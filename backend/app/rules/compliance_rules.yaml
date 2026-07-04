@@ -1,0 +1,39 @@
+# Deterministic compliance rules — layer 1 of the Regulatory Critic.
+# Simplified FDA-style boundaries for demonstration; not regulatory guidance.
+
+- id: RENAL-001
+  attribute: egfr
+  description: "Renal function thresholds must be a specific eGFR value (cf. FDA Guidance: Pharmacokinetics in Patients with Impaired Renal Function)"
+  check: must_be_quantitative
+  keywords: ["renal", "kidney", "egfr", "creatinine"]
+
+- id: HEPATIC-001
+  attribute: creatinine
+  description: "Organ-function criteria must carry numeric lab thresholds, not qualitative language"
+  check: must_be_quantitative
+  keywords: ["hepatic", "liver", "bilirubin", "organ function"]
+
+- id: BP-001
+  attribute: systolic_bp
+  description: "Systolic BP threshold outside plausible clinical range"
+  check: range
+  min_plausible: 90
+  max_plausible: 200
+
+- id: BP-002
+  attribute: diastolic_bp
+  description: "Diastolic BP threshold outside plausible clinical range"
+  check: range
+  min_plausible: 50
+  max_plausible: 130
+
+- id: AGE-001
+  attribute: age
+  description: "Protocol must state an explicit lower age bound (cf. 21 CFR Part 50 pediatric protections)"
+  check: required_attribute
+
+- id: PREG-001
+  description: "Protocol mentions women of childbearing potential but no pregnancy-related condition criterion was extracted"
+  check: keyword_implies_criterion
+  keywords: ["childbearing", "pregnan"]
+  required_category: condition
