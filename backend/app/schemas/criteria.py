@@ -5,36 +5,53 @@ it looks up patient[attribute] and applies the operator, no LLM involved.
 Every criterion carries the verbatim protocol sentence it came from, so a
 reviewer can audit any threshold back to its source.
 """
-from typing import Literal, Optional
+
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
 EhrAttribute = Literal[
-    "age", "egfr", "creatinine", "systolic_bp", "diastolic_bp",
-    "hba1c", "bmi", "anc", "platelets", "ecog", "ejection_fraction",
+    "age",
+    "egfr",
+    "creatinine",
+    "systolic_bp",
+    "diastolic_bp",
+    "hba1c",
+    "bmi",
+    "anc",
+    "platelets",
+    "ecog",
+    "ejection_fraction",
 ]
 
 
 class QuantitativeCriterion(BaseModel):
     """A criterion checkable numerically against an EHR field."""
-    attribute: EhrAttribute = Field(description="Canonical EHR attribute this constraint applies to")
+
+    attribute: EhrAttribute = Field(
+        description="Canonical EHR attribute this constraint applies to"
+    )
     operator: Literal[">=", "<=", ">", "<", "==", "between"]
     value: float
-    value_high: Optional[float] = Field(None, description="Upper bound when operator is 'between'")
+    value_high: float | None = Field(None, description="Upper bound when operator is 'between'")
     unit: str = Field(description="e.g. 'mL/min/1.73m2', 'mmHg', '%'")
     source_text: str = Field(description="Verbatim protocol sentence this was extracted from")
 
 
 class CategoricalCriterion(BaseModel):
     """A criterion checked against categorical EHR data (diagnoses, meds, history)."""
+
     category: Literal["diagnosis", "prior_treatment", "medication", "biomarker", "condition"]
-    value: str = Field(description="Normalized term, e.g. 'EGFR exon 19 deletion', 'prior platinum chemotherapy'")
+    value: str = Field(
+        description="Normalized term, e.g. 'EGFR exon 19 deletion', 'prior platinum chemotherapy'"
+    )
     negated: bool = Field(description="True if the patient must NOT have this")
     source_text: str
 
 
 class CriteriaSchema(BaseModel):
     """Full structured extraction of a protocol's eligibility section."""
+
     trial_title: str
     inclusion_quantitative: list[QuantitativeCriterion]
     inclusion_categorical: list[CategoricalCriterion]
@@ -42,5 +59,5 @@ class CriteriaSchema(BaseModel):
     exclusion_categorical: list[CategoricalCriterion]
     unparseable: list[str] = Field(
         description="Criteria that could not be converted to structured form — verbatim text. "
-                    "Never invent numbers; put vague criteria here instead."
+        "Never invent numbers; put vague criteria here instead."
     )

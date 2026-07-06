@@ -4,6 +4,7 @@ Distributions are hand-tuned so a realistic oncology protocol yields roughly
 10-15% eligible, a few needs-review (missing labs), and clear fails — including
 deliberately tricky boundary patients (e.g. eGFR 58 against a >=60 cutoff).
 """
+
 import json
 import random
 from pathlib import Path

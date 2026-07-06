@@ -8,12 +8,16 @@ const LABELS: Record<string, string> = {
   human_escalation: "⚠ Human Escalation",
 };
 
-export function AgentCard({ id, active, state }: {
+export function AgentCard({
+  id,
+  active,
+  state,
+}: {
   id: string;
   active: boolean;
   state?: NodeState;
 }) {
-  const events = (state?.update?.events as { detail: string; status: string }[]) ?? [];
+  const events = state?.update.events ?? [];
   const latest = events[events.length - 1];
   return (
     <div className={`agent-card ${active ? "active" : ""} ${latest?.status ?? ""}`}>

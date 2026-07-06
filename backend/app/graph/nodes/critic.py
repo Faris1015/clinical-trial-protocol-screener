@@ -6,6 +6,7 @@ run_llm_semantic_review. A rejection routes back to the Parser with structured
 feedback; after MAX_PARSE_ATTEMPTS the graph escalates to a human instead of
 looping forever.
 """
+
 from pathlib import Path
 
 import yaml
@@ -17,11 +18,15 @@ RULES_PATH = Path(__file__).resolve().parents[2] / "rules" / "compliance_rules.y
 
 
 def load_rules() -> list[dict]:
-    return yaml.safe_load(RULES_PATH.read_text())
+    rules: list[dict] = yaml.safe_load(RULES_PATH.read_text())
+    return rules
 
 
 def _all_quantitative(criteria: dict) -> list[dict]:
-    return criteria["inclusion_quantitative"] + criteria["exclusion_quantitative"]
+    quantitative: list[dict] = (
+        criteria["inclusion_quantitative"] + criteria["exclusion_quantitative"]
+    )
+    return quantitative
 
 
 def run_deterministic_checks(criteria: dict, raw_text: str, rules: list[dict]) -> list[dict]:
@@ -34,42 +39,54 @@ def run_deterministic_checks(criteria: dict, raw_text: str, rules: list[dict]) -
 
         if check == "must_be_quantitative":
             in_unparseable = any(
-                any(k in u.lower() for k in rule["keywords"])
-                for u in criteria["unparseable"]
+                any(k in u.lower() for k in rule["keywords"]) for u in criteria["unparseable"]
             )
             has_quant = any(c["attribute"] == rule["attribute"] for c in quantitative)
             if in_unparseable and not has_quant:
-                findings.append({
-                    "rule_id": rule["id"], "severity": "reject",
-                    "message": f"{rule['description']} — found only vague language, no numeric threshold.",
-                })
+                findings.append(
+                    {
+                        "rule_id": rule["id"],
+                        "severity": "reject",
+                        "message": f"{rule['description']} — found only vague language, "
+                        "no numeric threshold.",
+                    }
+                )
 
         elif check == "range":
             for c in quantitative:
                 if c["attribute"] != rule["attribute"]:
                     continue
                 if not (rule["min_plausible"] <= c["value"] <= rule["max_plausible"]):
-                    findings.append({
-                        "rule_id": rule["id"], "severity": "reject",
-                        "message": f"{rule['description']}: extracted {c['value']} {c['unit']} "
-                                   f"from '{c['source_text']}'",
-                    })
+                    findings.append(
+                        {
+                            "rule_id": rule["id"],
+                            "severity": "reject",
+                            "message": f"{rule['description']}: extracted {c['value']} {c['unit']} "
+                            f"from '{c['source_text']}'",
+                        }
+                    )
 
         elif check == "required_attribute":
             if not any(c["attribute"] == rule["attribute"] for c in quantitative):
-                findings.append({
-                    "rule_id": rule["id"], "severity": "warn",
-                    "message": rule["description"],
-                })
+                findings.append(
+                    {
+                        "rule_id": rule["id"],
+                        "severity": "warn",
+                        "message": rule["description"],
+                    }
+                )
 
         elif check == "keyword_implies_criterion":
             mentioned = any(k in raw_text.lower() for k in rule["keywords"])
             covered = any(c["category"] == rule["required_category"] for c in categorical)
             if mentioned and not covered:
-                findings.append({
-                    "rule_id": rule["id"], "severity": "reject",
-                    "message": rule["description"],
-                })
+                findings.append(
+                    {
+                        "rule_id": rule["id"],
+                        "severity": "reject",
+                        "message": rule["description"],
+                    }
+                )
 
     return findings
 
@@ -82,9 +99,9 @@ def run_llm_semantic_review(state: ScreenerState) -> list[dict]:
 
 
 def critic_node(state: ScreenerState) -> dict:
-    findings = run_deterministic_checks(
-        state["parsed_criteria"], state["raw_protocol_text"], load_rules()
-    )
+    criteria = state["parsed_criteria"]
+    assert criteria is not None, "critic runs after parser — parsed_criteria is set"
+    findings = run_deterministic_checks(criteria, state["raw_protocol_text"], load_rules())
     findings += run_llm_semantic_review(state)
 
     rejects = [f for f in findings if f["severity"] == "reject"]
@@ -93,12 +110,17 @@ def critic_node(state: ScreenerState) -> dict:
     return {
         "compliance_passed": passed,
         "compliance_findings": findings,
-        "critic_feedback": None if passed else "\n".join(
-            f"- [{f['rule_id']}] {f['message']}" for f in rejects
-        ),
+        "critic_feedback": None
+        if passed
+        else "\n".join(f"- [{f['rule_id']}] {f['message']}" for f in rejects),
         "current_step": "awaiting_approval" if passed else "parsing",
-        "events": [event("critic", "completed" if passed else "rejected",
-                         f"{len(findings)} findings ({len(rejects)} blocking)")],
+        "events": [
+            event(
+                "critic",
+                "completed" if passed else "rejected",
+                f"{len(findings)} findings ({len(rejects)} blocking)",
+            )
+        ],
     }
 
 

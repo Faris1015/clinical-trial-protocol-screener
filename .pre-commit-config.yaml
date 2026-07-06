@@ -1,0 +1,42 @@
+# Install once: pip install pre-commit && pre-commit install
+# Runs the same checks as CI on staged files before every commit.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        args: [--fix]
+        files: ^backend/
+      - id: ruff-format
+        files: ^backend/
+
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy (backend)
+        entry: bash -c 'cd backend && .venv/bin/mypy'
+        language: system
+        files: ^backend/.*\.py$
+        pass_filenames: false
+
+      - id: eslint
+        name: eslint (frontend)
+        entry: bash -c 'cd frontend && npm run --silent lint'
+        language: system
+        files: ^frontend/src/.*\.(ts|tsx)$
+        pass_filenames: false
+
+      - id: prettier
+        name: prettier check (frontend)
+        entry: bash -c 'cd frontend && npm run --silent format:check'
+        language: system
+        files: ^frontend/src/.*\.(ts|tsx|css)$
+        pass_filenames: false
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: detect-private-key

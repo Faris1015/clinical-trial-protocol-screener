@@ -3,6 +3,7 @@
 On a Critic loop-back, the prompt includes the previous extraction plus the
 Critic's structured objections, so retries converge instead of re-rolling.
 """
+
 from app.graph.state import ScreenerState, event
 from app.schemas.criteria import CriteriaSchema
 from app.services.llm import get_llm
@@ -30,17 +31,22 @@ def parser_node(state: ScreenerState) -> dict:
             "Produce a corrected extraction addressing every point."
         )
 
-    result: CriteriaSchema = structured_llm.invoke(
-        [("system", PARSER_SYSTEM), ("user", prompt)]
-    )
+    raw = structured_llm.invoke([("system", PARSER_SYSTEM), ("user", prompt)])
+    # with_structured_output may return the model instance or a plain dict
+    result = raw if isinstance(raw, CriteriaSchema) else CriteriaSchema.model_validate(raw)
     n_inc = len(result.inclusion_quantitative) + len(result.inclusion_categorical)
     n_exc = len(result.exclusion_quantitative) + len(result.exclusion_categorical)
     return {
         "parsed_criteria": result.model_dump(),
         "parse_attempts": state.get("parse_attempts", 0) + 1,
         "current_step": "critiquing",
-        "events": [event("parser", "completed",
-                         f"Extracted {n_inc} inclusion / {n_exc} exclusion criteria, "
-                         f"{len(result.unparseable)} unparseable "
-                         f"(attempt {state.get('parse_attempts', 0) + 1})")],
+        "events": [
+            event(
+                "parser",
+                "completed",
+                f"Extracted {n_inc} inclusion / {n_exc} exclusion criteria, "
+                f"{len(result.unparseable)} unparseable "
+                f"(attempt {state.get('parse_attempts', 0) + 1})",
+            )
+        ],
     }
