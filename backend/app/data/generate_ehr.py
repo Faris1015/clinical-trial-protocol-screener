@@ -6,13 +6,13 @@ deliberately tricky boundary patients (e.g. eGFR 58 against a >=60 cutoff).
 """
 import json
 import random
-from pathlib import Path
 
 from faker import Faker
 
+from app.config import get_settings
+
 SEED = 42
 N_PATIENTS = 100
-OUT = Path(__file__).parent / "patients.json"
 
 DIAGNOSES = [
     "non-small cell lung cancer stage IIIB",
@@ -69,8 +69,10 @@ def main() -> None:
     patients[0]["labs"]["egfr"] = 58.0
     patients[0]["diagnoses"] = ["non-small cell lung cancer stage IV", "EGFR exon 19 deletion"]
 
-    OUT.write_text(json.dumps(patients, indent=2))
-    print(f"Wrote {len(patients)} synthetic patients to {OUT}")
+    out = get_settings().patients_path
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(patients, indent=2))
+    print(f"Wrote {len(patients)} synthetic patients to {out}")
 
 
 if __name__ == "__main__":

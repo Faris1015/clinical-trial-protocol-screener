@@ -10,6 +10,7 @@ dependencies = [
     "langchain-ollama>=0.2",
     "langchain-anthropic>=0.3",
     "pydantic>=2.8",
+    "pydantic-settings>=2.4",
     "pymupdf>=1.24",
     "pyyaml>=6.0",
     "faker>=28.0",
