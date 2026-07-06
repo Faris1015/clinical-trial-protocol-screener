@@ -216,11 +216,23 @@ Once [#14](../../issues/14) lands this moves to `CONTRIBUTING.md`; the flow it c
 
 ## Configuration
 
-All runtime configuration is environment-driven (see [#1](../../issues/1) — `.env.example`
-will be the authoritative list). Current variables:
+All runtime configuration is environment-driven via `app/config.py`
+(pydantic-settings). Copy [`backend/.env.example`](backend/.env.example) to
+`backend/.env` for local development — it is the authoritative variable list.
+Validation runs at startup: a misconfigured deployment (e.g.
+`LLM_PROVIDER=anthropic` without a key, or a missing rules file) fails fast
+with a clear message instead of erroring mid-screening.
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `LLM_PROVIDER` | `ollama` | `ollama` (local) or `anthropic` (hosted) |
 | `OLLAMA_MODEL` | `llama3.1:8b` | Local model tag |
-| `ANTHROPIC_API_KEY` | — | Required when `LLM_PROVIDER=anthropic` |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server address |
+| `ANTHROPIC_MODEL` | `claude-sonnet-5` | Hosted model id |
+| `ANTHROPIC_API_KEY` | — | **Required** when `LLM_PROVIDER=anthropic` |
+| `LLM_TEMPERATURE` | `0.0` | Sampling temperature (0–1) |
+| `CORS_ORIGINS` | `http://localhost:5173` | Comma-separated allowed origins |
+| `MAX_PARSE_ATTEMPTS` | `3` | Parser retries before human escalation (1–10) |
+| `RULES_PATH` | `app/rules/compliance_rules.yaml` | Compliance rules database |
+| `PATIENTS_PATH` | `app/data/patients.json` | Synthetic EHR location |
+| `LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |

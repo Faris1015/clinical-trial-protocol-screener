@@ -1,24 +1,20 @@
 """Agent 3: Regulatory Critic — hybrid deterministic + LLM compliance guardrail.
 
-Layer 1 runs auditable rule checks from compliance_rules.yaml. Layer 2 (LLM
-semantic review of contradictions rules can't express) plugs in via
-run_llm_semantic_review. A rejection routes back to the Parser with structured
-feedback; after MAX_PARSE_ATTEMPTS the graph escalates to a human instead of
-looping forever.
+Layer 1 runs auditable rule checks from the rules file configured in Settings.
+Layer 2 (LLM semantic review of contradictions rules can't express) plugs in
+via run_llm_semantic_review. A rejection routes back to the Parser with
+structured feedback; after MAX_PARSE_ATTEMPTS (Settings) the graph escalates
+to a human instead of looping forever.
 """
-
-from pathlib import Path
 
 import yaml
 
+from app.config import get_settings
 from app.graph.state import ScreenerState, event
-
-MAX_PARSE_ATTEMPTS = 3
-RULES_PATH = Path(__file__).resolve().parents[2] / "rules" / "compliance_rules.yaml"
 
 
 def load_rules() -> list[dict]:
-    rules: list[dict] = yaml.safe_load(RULES_PATH.read_text())
+    rules: list[dict] = yaml.safe_load(get_settings().rules_path.read_text())
     return rules
 
 
@@ -127,6 +123,6 @@ def critic_node(state: ScreenerState) -> dict:
 def critic_router(state: ScreenerState) -> str:
     if state["compliance_passed"]:
         return "matcher"
-    if state["parse_attempts"] >= MAX_PARSE_ATTEMPTS:
+    if state["parse_attempts"] >= get_settings().max_parse_attempts:
         return "human_escalation"
     return "parser"

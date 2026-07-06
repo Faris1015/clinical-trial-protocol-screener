@@ -7,12 +7,11 @@ silent pass or fail.
 
 import json
 from operator import eq, ge, gt, le, lt
-from pathlib import Path
 
+from app.config import get_settings
 from app.graph.state import ScreenerState, event
 
 OPS = {">=": ge, "<=": le, ">": gt, "<": lt, "==": eq}
-PATIENTS_PATH = Path(__file__).resolve().parents[2] / "data" / "patients.json"
 
 
 def _check_quantitative(patient: dict, criterion: dict) -> str:
@@ -79,7 +78,7 @@ def evaluate_patient(patient: dict, criteria: dict) -> dict:
 def matcher_node(state: ScreenerState) -> dict:
     criteria = state["parsed_criteria"]
     assert criteria is not None, "matcher runs after parser — parsed_criteria is set"
-    patients = json.loads(PATIENTS_PATH.read_text())
+    patients = json.loads(get_settings().patients_path.read_text())
     evaluations = [evaluate_patient(p, criteria) for p in patients]
     eligible = [e for e in evaluations if e["eligible"] and not e["needs_review"]]
     review = [e for e in evaluations if e["needs_review"]]
