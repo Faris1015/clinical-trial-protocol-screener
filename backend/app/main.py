@@ -7,13 +7,19 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
+from app.config import get_settings
 from app.graph.builder import graph
 from app.services.pdf import extract_eligibility_text
+
+# Resolve settings at import time so a misconfigured deployment fails at
+# startup (e.g. LLM_PROVIDER=anthropic without ANTHROPIC_API_KEY), not
+# mid-screening.
+settings = get_settings()
 
 app = FastAPI(title="Clinical Trial Protocol Screener")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=settings.cors_origin_list,
     allow_methods=["*"],
     allow_headers=["*"],
 )
