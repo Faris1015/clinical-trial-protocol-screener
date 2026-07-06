@@ -4,6 +4,7 @@ No LLM calls per patient: the typed criteria contract makes matching pure
 Python. Missing lab values yield "unknown" (needs human review), never a
 silent pass or fail.
 """
+
 import json
 from operator import eq, ge, gt, le, lt
 
@@ -26,9 +27,7 @@ def _check_quantitative(patient: dict, criterion: dict) -> str:
 
 def _check_categorical(patient: dict, criterion: dict) -> str:
     haystack = " ".join(
-        patient.get("diagnoses", [])
-        + patient.get("medications", [])
-        + patient.get("history", [])
+        patient.get("diagnoses", []) + patient.get("medications", []) + patient.get("history", [])
     ).lower()
     present = criterion["value"].lower() in haystack
     if criterion["negated"]:
@@ -39,18 +38,32 @@ def _check_categorical(patient: dict, criterion: dict) -> str:
 def evaluate_patient(patient: dict, criteria: dict) -> dict:
     results = []
     for c in criteria["inclusion_quantitative"]:
-        results.append({"criterion": c, "kind": "inclusion", "status": _check_quantitative(patient, c)})
+        results.append(
+            {"criterion": c, "kind": "inclusion", "status": _check_quantitative(patient, c)}
+        )
     for c in criteria["inclusion_categorical"]:
-        results.append({"criterion": c, "kind": "inclusion", "status": _check_categorical(patient, c)})
+        results.append(
+            {"criterion": c, "kind": "inclusion", "status": _check_categorical(patient, c)}
+        )
     # A patient MATCHING an exclusion criterion fails screening
     for c in criteria["exclusion_quantitative"]:
         status = _check_quantitative(patient, c)
-        results.append({"criterion": c, "kind": "exclusion",
-                        "status": {"pass": "fail", "fail": "pass"}.get(status, status)})
+        results.append(
+            {
+                "criterion": c,
+                "kind": "exclusion",
+                "status": {"pass": "fail", "fail": "pass"}.get(status, status),
+            }
+        )
     for c in criteria["exclusion_categorical"]:
         status = _check_categorical(patient, c)
-        results.append({"criterion": c, "kind": "exclusion",
-                        "status": {"pass": "fail", "fail": "pass"}.get(status, status)})
+        results.append(
+            {
+                "criterion": c,
+                "kind": "exclusion",
+                "status": {"pass": "fail", "fail": "pass"}.get(status, status),
+            }
+        )
 
     known = [r for r in results if r["status"] != "unknown"]
     return {
@@ -63,14 +76,21 @@ def evaluate_patient(patient: dict, criteria: dict) -> dict:
 
 
 def matcher_node(state: ScreenerState) -> dict:
+    criteria = state["parsed_criteria"]
+    assert criteria is not None, "matcher runs after parser — parsed_criteria is set"
     patients = json.loads(get_settings().patients_path.read_text())
-    evaluations = [evaluate_patient(p, state["parsed_criteria"]) for p in patients]
+    evaluations = [evaluate_patient(p, criteria) for p in patients]
     eligible = [e for e in evaluations if e["eligible"] and not e["needs_review"]]
     review = [e for e in evaluations if e["needs_review"]]
     return {
         "matched_patients": evaluations,
         "current_step": "done",
-        "events": [event("matcher", "completed",
-                         f"Screened {len(evaluations)} patients: {len(eligible)} eligible, "
-                         f"{len(review)} need review")],
+        "events": [
+            event(
+                "matcher",
+                "completed",
+                f"Screened {len(evaluations)} patients: {len(eligible)} eligible, "
+                f"{len(review)} need review",
+            )
+        ],
     }

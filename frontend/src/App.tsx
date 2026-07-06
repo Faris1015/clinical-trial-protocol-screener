@@ -3,13 +3,14 @@ import { useScreenerStream } from "./hooks/useScreenerStream";
 import { AgentCard } from "./components/AgentCard";
 import { CriteriaTable } from "./components/CriteriaTable";
 import { PatientMatchTable } from "./components/PatientMatchTable";
+import type { ApproveResponse, PatientEvaluation } from "./types";
 import "./styles.css";
 
 const AGENTS = ["router", "parser", "critic", "matcher"];
 
 export default function App() {
   const [threadId, setThreadId] = useState<string | null>(null);
-  const [matches, setMatches] = useState<any[]>([]);
+  const [matches, setMatches] = useState<PatientEvaluation[]>([]);
   const { nodeStates, phase, setPhase } = useScreenerStream(threadId);
 
   async function upload(e: React.ChangeEvent<HTMLInputElement>) {
@@ -18,24 +19,22 @@ export default function App() {
     const body = new FormData();
     body.append("file", file);
     const res = await fetch("/api/screenings", { method: "POST", body });
-    const { thread_id } = await res.json();
+    const { thread_id } = (await res.json()) as { thread_id: string };
     setMatches([]);
     setThreadId(thread_id);
   }
 
   async function approve() {
     const res = await fetch(`/api/screenings/${threadId}/approve`, { method: "POST" });
-    const data = await res.json();
+    const data = (await res.json()) as ApproveResponse;
     setMatches(data.matched_patients);
     setPhase("done");
   }
 
   // Latest parsed criteria streamed from the parser node
-  const parsed = (nodeStates.parser?.update?.parsed_criteria as Record<string, unknown>) ?? null;
+  const parsed = nodeStates.parser?.update.parsed_criteria ?? null;
   const activeAgent =
-    phase === "running"
-      ? AGENTS.findLast?.((a) => nodeStates[a]) ?? null
-      : null;
+    phase === "running" ? ([...AGENTS].reverse().find((a) => nodeStates[a]) ?? null) : null;
 
   return (
     <div className="app">
@@ -65,7 +64,9 @@ export default function App() {
 
       {phase === "awaiting_approval" && (
         <div className="banner approval">
-          <span>Compliance checks passed. Review the criteria above, then approve patient matching.</span>
+          <span>
+            Compliance checks passed. Review the criteria above, then approve patient matching.
+          </span>
           <button onClick={approve}>Approve → run matching</button>
         </div>
       )}

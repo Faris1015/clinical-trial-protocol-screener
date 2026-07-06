@@ -1,25 +1,25 @@
-type Evaluation = {
-  patient_id: string;
-  name: string;
-  eligible: boolean;
-  needs_review: boolean;
-  criterion_results: { criterion: { source_text: string }; kind: string; status: string }[];
-};
+import type { PatientEvaluation } from "../types";
 
-export function PatientMatchTable({ patients }: { patients: Evaluation[] }) {
+export function PatientMatchTable({ patients }: { patients: PatientEvaluation[] }) {
   if (!patients.length) return null;
-  const bucket = (e: Evaluation) =>
+  const bucket = (e: PatientEvaluation) =>
     e.needs_review ? "review" : e.eligible ? "eligible" : "ineligible";
 
   return (
     <table className="matches">
       <thead>
-        <tr><th>Patient</th><th>Status</th><th>Failing / unknown criteria</th></tr>
+        <tr>
+          <th>Patient</th>
+          <th>Status</th>
+          <th>Failing / unknown criteria</th>
+        </tr>
       </thead>
       <tbody>
         {patients.map((e) => (
           <tr key={e.patient_id} className={bucket(e)}>
-            <td>{e.patient_id} · {e.name}</td>
+            <td>
+              {e.patient_id} · {e.name}
+            </td>
             <td>{bucket(e)}</td>
             <td>
               {e.criterion_results

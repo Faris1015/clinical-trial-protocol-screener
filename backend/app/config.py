@@ -8,7 +8,7 @@ fails at startup with a clear message instead of mid-screening.
 """
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     ollama_model: str = "llama3.1:8b"
     ollama_base_url: str = "http://localhost:11434"
     anthropic_model: str = "claude-sonnet-5"
-    anthropic_api_key: Optional[str] = None
+    anthropic_api_key: str | None = None
     llm_temperature: float = Field(0.0, ge=0.0, le=1.0)
 
     # --- API ---

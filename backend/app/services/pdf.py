@@ -4,6 +4,7 @@ Protocols run 80-200 pages; eligibility criteria live in one section. Scoring
 pages by hint density and taking a window keeps the LLM input to ~4k tokens,
 which is what makes a local 8B model viable.
 """
+
 import pymupdf
 
 SECTION_HINTS = ["inclusion criteria", "exclusion criteria", "eligibility", "study population"]
@@ -11,7 +12,7 @@ SECTION_HINTS = ["inclusion criteria", "exclusion criteria", "eligibility", "stu
 
 def extract_eligibility_text(pdf_bytes: bytes) -> str:
     doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
-    pages = [page.get_text() for page in doc]
+    pages = [doc[i].get_text() for i in range(doc.page_count)]
     if not pages:
         return ""
     scores = [sum(p.lower().count(h) for h in SECTION_HINTS) for p in pages]
@@ -20,5 +21,5 @@ def extract_eligibility_text(pdf_bytes: bytes) -> str:
         # Router flag it as suspicious.
         return "\n".join(pages)
     center = scores.index(max(scores))
-    window = pages[max(0, center - 2): center + 4]
+    window = pages[max(0, center - 2) : center + 4]
     return "\n".join(window)

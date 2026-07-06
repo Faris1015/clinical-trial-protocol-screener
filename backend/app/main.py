@@ -1,11 +1,14 @@
 """FastAPI app: upload a protocol, stream graph execution over SSE, approve the HITL gate."""
+
 import json
+from collections.abc import AsyncIterator
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from langchain_core.runnables import RunnableConfig
 
 from app.config import get_settings
 from app.graph.builder import graph
@@ -29,7 +32,7 @@ THREADS: dict[str, dict] = {}
 
 
 @app.post("/api/screenings")
-async def create_screening(file: UploadFile):
+async def create_screening(file: UploadFile) -> dict:
     raw = await file.read()
     if file.filename and file.filename.lower().endswith(".pdf"):
         text = extract_eligibility_text(raw)
@@ -53,12 +56,12 @@ async def create_screening(file: UploadFile):
 
 
 @app.get("/api/screenings/{thread_id}/stream")
-async def stream_screening(thread_id: str):
+async def stream_screening(thread_id: str) -> StreamingResponse:
     if thread_id not in THREADS:
         raise HTTPException(404, "unknown thread_id")
-    config = {"configurable": {"thread_id": thread_id}}
+    config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
 
-    async def generate():
+    async def generate() -> AsyncIterator[str]:
         async for chunk in graph.astream(THREADS[thread_id], config, stream_mode="updates"):
             for node, update in chunk.items():
                 payload = {"node": node, "update": jsonable_encoder(update)}
@@ -72,10 +75,10 @@ async def stream_screening(thread_id: str):
 
 
 @app.post("/api/screenings/{thread_id}/approve")
-async def approve_screening(thread_id: str):
+async def approve_screening(thread_id: str) -> dict:
     if thread_id not in THREADS:
         raise HTTPException(404, "unknown thread_id")
-    config = {"configurable": {"thread_id": thread_id}}
+    config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
     if not graph.get_state(config).next:
         raise HTTPException(409, "screening is not awaiting approval")
     # Resume past the interrupt_before=["matcher"] gate
@@ -87,9 +90,9 @@ async def approve_screening(thread_id: str):
 
 
 @app.get("/api/screenings/{thread_id}/state")
-async def get_state(thread_id: str):
+async def get_state(thread_id: str) -> dict:
     if thread_id not in THREADS:
         raise HTTPException(404, "unknown thread_id")
-    config = {"configurable": {"thread_id": thread_id}}
+    config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
     snapshot = graph.get_state(config)
     return {"values": jsonable_encoder(snapshot.values), "pending": list(snapshot.next)}

@@ -106,6 +106,30 @@ curl -N http://localhost:8000/api/screenings/<thread_id>/stream
 curl -X POST http://localhost:8000/api/screenings/<thread_id>/approve
 ```
 
+## Code quality
+
+Backend is linted and formatted with **ruff** and type-checked with **mypy**
+(strict `disallow_untyped_defs` on `app/`); frontend uses **ESLint**
+(typescript-eslint + react-hooks), **Prettier**, and strict TypeScript with
+zero `any`. Shared API payload types live in
+[`frontend/src/types.ts`](frontend/src/types.ts), mirroring the backend
+Pydantic schemas.
+
+```bash
+make lint        # ruff + eslint
+make format      # ruff format + prettier
+make typecheck   # mypy + tsc --noEmit
+make test        # pytest
+make check       # all of the above — what CI runs
+```
+
+Install the git hooks once and every commit runs the same checks on staged
+files:
+
+```bash
+pip install pre-commit && pre-commit install
+```
+
 ## Project structure
 
 ```
