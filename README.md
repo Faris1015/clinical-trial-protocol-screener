@@ -127,11 +127,76 @@ frontend/
     components/                # PipelineGraph, AgentCard, CriteriaTable, matches
 ```
 
-## Roadmap
+## Production roadmap
 
-- [x] Repo scaffold: state, schemas, agent nodes, graph wiring, rules DB
-- [ ] Parser golden-set eval against real ClinicalTrials.gov eligibility sections
-- [ ] Critic LLM semantic-review layer
-- [ ] React pipeline visualization with Critic-rejection loop animation
-- [ ] Per-criterion patient match breakdown UI
-- [ ] Docker compose for one-command demo
+The scaffold works end-to-end; the path to production-grade is tracked as GitHub issues,
+organized around four pillars. Each issue carries acceptance criteria and a priority label
+(`P1` = do first / blocks other work, `P2` = core production requirement, `P3` = hardening).
+
+### 1. Architectural foundations — `architecture`
+
+| Issue | Priority | What it delivers |
+|---|---|---|
+| [#1 Centralized configuration](../../issues/1) | P1 | pydantic-settings, `.env.example`, zero hardcoded values |
+| [#2 Durable state persistence](../../issues/2) | P1 | SQLite/Postgres checkpointer — screenings survive restarts and scale past one replica |
+| [#4 Defensive error handling](../../issues/4) | P1 | Exception hierarchy, exponential backoff on LLM calls, graceful SSE error events |
+| [#3 Service-layer separation](../../issues/3) | P2 | Routes → services → graph → nodes; no business logic in handlers |
+| [#15 API hardening](../../issues/15) | P2 | Upload limits, rate limiting, concurrency caps, SSE hygiene |
+| [#16 Complete stubbed intelligence](../../issues/16) | P2 | Critic LLM semantic review + Matcher semantic term-mapping (fixes the substring pitfall) |
+
+### 2. Operational visibility — `observability`
+
+| Issue | Priority | What it delivers |
+|---|---|---|
+| [#5 Structured logging](../../issues/5) | P1 | JSON logs with `thread_id`/`request_id` correlation, PHI-safe by construction |
+| [#6 Health & readiness endpoints](../../issues/6) | P2 | `/health` liveness + `/ready` dependency checks (LLM, rules, data, DB) |
+| [#7 Metrics & telemetry](../../issues/7) | P3 | Prometheus metrics per agent node, Grafana dashboard, critic-rejection rates |
+
+### 3. Rigorous testing & QA — `testing`
+
+| Issue | Priority | What it delivers |
+|---|---|---|
+| [#8 Linting & typing](../../issues/8) | P1 | ruff + mypy + ESLint/Prettier + pre-commit; no `any`, no bare excepts |
+| [#9 Test coverage expansion](../../issues/9) | P2 | FakeChatModel integration tests, loop-convergence tests, Parser golden-set eval, 80% gate |
+| [#10 Load testing](../../issues/10) | P3 | Locust SSE fan-out benchmarks, documented performance baseline |
+
+### 4. Deployment pipeline (CI/CD) — `ci-cd`
+
+| Issue | Priority | What it delivers |
+|---|---|---|
+| [#11 Containerization](../../issues/11) | P1 | Multi-stage Dockerfiles, `docker compose up` one-command stack, pinned deps |
+| [#12 CI with GitHub Actions](../../issues/12) | P1 | Lint + typecheck + tests + docker build on every PR; branch protection |
+| [#13 CD with zero-downtime rollout](../../issues/13) | P2 | GHCR images on merge, deploy with `/ready`-gated rolling updates, smoke tests, rollback |
+| [#14 Version control workflow](../../issues/14) | P2 | CONTRIBUTING, PR/issue templates, CODEOWNERS, conventional commits, squash-merge |
+
+### Suggested execution order
+
+```
+Phase 1 (unblock everything):  #1 config → #8 lint/type → #12 CI → #14 workflow
+Phase 2 (make it robust):      #4 errors → #5 logging → #2 persistence → #9 tests
+Phase 3 (make it shippable):   #11 docker → #6 health → #13 CD
+Phase 4 (make it excellent):   #15 hardening → #16 intelligence → #7 metrics → #10 load
+```
+
+Phase 1 first because every later PR then lands through CI with lint/type/test gates —
+the guardrails pay for themselves on all subsequent work.
+
+## Development workflow
+
+Once [#14](../../issues/14) lands this moves to `CONTRIBUTING.md`; the flow it codifies:
+
+1. Pick an issue, branch from `main`: `feat/<slug>` or `fix/<slug>`
+2. Open a PR referencing the issue (`Closes #N`) — CI must pass (lint, types, tests, build)
+3. Squash-merge with a conventional-commit title (`feat:`, `fix:`, `test:`, `docs:`, `chore:`)
+4. Merge to `main` triggers CD: image build → registry → rolling deploy gated on `/ready`
+
+## Configuration
+
+All runtime configuration is environment-driven (see [#1](../../issues/1) — `.env.example`
+will be the authoritative list). Current variables:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `LLM_PROVIDER` | `ollama` | `ollama` (local) or `anthropic` (hosted) |
+| `OLLAMA_MODEL` | `llama3.1:8b` | Local model tag |
+| `ANTHROPIC_API_KEY` | — | Required when `LLM_PROVIDER=anthropic` |
