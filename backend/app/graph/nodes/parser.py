@@ -2,11 +2,22 @@
 
 On a Critic loop-back, the prompt includes the previous extraction plus the
 Critic's structured objections, so retries converge instead of re-rolling.
+
+Failure containment: transient LLM errors are retried inside
+invoke_with_retry; a schema-validation failure gets exactly one repair
+attempt (the validation error is fed back to the model); anything still
+failing lands the screening in a terminal `failed` state with a user-visible
+event instead of an unhandled exception killing the stream.
 """
 
+from langchain_core.exceptions import OutputParserException
+from langchain_core.runnables import Runnable
+from pydantic import ValidationError
+
+from app.exceptions import LLMUnavailableError
 from app.graph.state import ScreenerState, event
 from app.schemas.criteria import CriteriaSchema
-from app.services.llm import get_llm
+from app.services.llm import get_llm, invoke_with_retry
 
 PARSER_SYSTEM = """You are a clinical protocol extraction engine. Extract eligibility \
 criteria into the exact schema provided. Rules:
@@ -16,6 +27,36 @@ numbers), put its verbatim text in `unparseable`.
 3. `source_text` must be copied verbatim from the protocol.
 4. Exclusion criteria describing a required ABSENCE go in exclusion lists, not inclusion \
 with negated=true."""
+
+
+def _validate(raw: object) -> CriteriaSchema:
+    # with_structured_output may return the model instance or a plain dict
+    return raw if isinstance(raw, CriteriaSchema) else CriteriaSchema.model_validate(raw)
+
+
+def _extract_criteria(structured_llm: Runnable, prompt: str) -> CriteriaSchema:
+    """One extraction, with a single repair round-trip on schema violations."""
+    messages: list[tuple[str, str]] = [("system", PARSER_SYSTEM), ("user", prompt)]
+    try:
+        return _validate(invoke_with_retry(structured_llm, messages))
+    except (ValidationError, OutputParserException) as exc:
+        repair = [
+            *messages,
+            (
+                "user",
+                "Your previous response failed schema validation:\n"
+                f"{exc}\n"
+                "Return a corrected extraction that strictly matches the schema.",
+            ),
+        ]
+        return _validate(invoke_with_retry(structured_llm, repair))
+
+
+def _failed(detail: str) -> dict:
+    return {
+        "current_step": "failed",
+        "events": [event("parser", "failed", detail)],
+    }
 
 
 def parser_node(state: ScreenerState) -> dict:
@@ -31,9 +72,16 @@ def parser_node(state: ScreenerState) -> dict:
             "Produce a corrected extraction addressing every point."
         )
 
-    raw = structured_llm.invoke([("system", PARSER_SYSTEM), ("user", prompt)])
-    # with_structured_output may return the model instance or a plain dict
-    result = raw if isinstance(raw, CriteriaSchema) else CriteriaSchema.model_validate(raw)
+    try:
+        result = _extract_criteria(structured_llm, prompt)
+    except LLMUnavailableError as exc:
+        return _failed(str(exc))
+    except (ValidationError, OutputParserException):
+        return _failed(
+            "Model output failed schema validation twice (original + repair attempt) — "
+            "screening aborted."
+        )
+
     n_inc = len(result.inclusion_quantitative) + len(result.inclusion_categorical)
     n_exc = len(result.exclusion_quantitative) + len(result.exclusion_categorical)
     return {
@@ -50,3 +98,8 @@ def parser_node(state: ScreenerState) -> dict:
             )
         ],
     }
+
+
+def parser_router(state: ScreenerState) -> str:
+    """A failed extraction ends the run; a successful one goes to the Critic."""
+    return "failed" if state["current_step"] == "failed" else "critic"

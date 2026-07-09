@@ -27,7 +27,7 @@ export type CriteriaSchema = {
 
 export type AgentEvent = {
   agent: string;
-  status: "started" | "completed" | "rejected" | "escalated";
+  status: "started" | "completed" | "rejected" | "escalated" | "failed";
   detail: string;
   timestamp: string;
 };
@@ -56,6 +56,8 @@ export type StateUpdate = {
 export type StreamMessage = {
   node: string;
   update?: StateUpdate;
+  /** Present only on the terminal `__error__` event. */
+  message?: string;
 };
 
 export type ApproveResponse = {
