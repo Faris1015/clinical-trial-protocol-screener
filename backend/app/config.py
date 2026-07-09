@@ -6,6 +6,7 @@ authoritative list). Nothing elsewhere in the codebase reads `os.environ`
 directly. Validation runs at first access, so a misconfigured deployment
 fails at startup with a clear message instead of mid-screening.
 """
+
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal

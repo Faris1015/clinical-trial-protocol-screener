@@ -1,5 +1,7 @@
 # Multi-Agent Clinical Trial Protocol Screener
 
+[![CI](https://github.com/Faris1015/clinical-trial-protocol-screener/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Faris1015/clinical-trial-protocol-screener/actions/workflows/ci.yml)
+
 A multi-agent AI system that ingests clinical trial protocols (PDF or markdown), extracts
 eligibility criteria into a strict typed schema, cross-checks them against an FDA-style
 compliance rules database, and deterministically matches them against a synthetic patient
@@ -213,6 +215,36 @@ Once [#14](../../issues/14) lands this moves to `CONTRIBUTING.md`; the flow it c
 2. Open a PR referencing the issue (`Closes #N`) — CI must pass (lint, types, tests, build)
 3. Squash-merge with a conventional-commit title (`feat:`, `fix:`, `test:`, `docs:`, `chore:`)
 4. Merge to `main` triggers CD: image build → registry → rolling deploy gated on `/ready`
+
+### CI
+
+Every PR and push to `main` runs [`ci.yml`](.github/workflows/ci.yml): parallel backend
+(ruff, mypy, pytest with a ratcheting coverage gate) and frontend (eslint, prettier, tsc,
+vite build) jobs. [`docker.yml`](.github/workflows/docker.yml) rebuilds images only when
+container files or dependency manifests change. Superseded runs on the same ref are
+cancelled automatically.
+
+Branch protection on `main` is a repository setting (not enforceable from the repo
+contents); it should be configured as:
+
+- Require the `backend` and `frontend` status checks to pass before merging
+- Require 1 approving review
+- Allow only squash merging; delete head branches on merge
+
+```sh
+gh api -X PUT repos/Faris1015/clinical-trial-protocol-screener/branches/main/protection \
+  --input - <<'JSON'
+{
+  "required_status_checks": {"strict": false, "contexts": ["backend", "frontend"]},
+  "required_pull_request_reviews": {"required_approving_review_count": 1},
+  "enforce_admins": false,
+  "restrictions": null
+}
+JSON
+gh repo edit Faris1015/clinical-trial-protocol-screener \
+  --enable-squash-merge --enable-merge-commit=false --enable-rebase-merge=false \
+  --delete-branch-on-merge
+```
 
 ## Configuration
 
