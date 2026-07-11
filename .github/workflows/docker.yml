@@ -1,0 +1,40 @@
+name: Docker build
+
+# Catches Dockerfile rot without paying the build cost on every PR: this
+# workflow only triggers when container files or dependency manifests change.
+# Until #11 lands the Dockerfiles, the guard steps below make it a no-op.
+on:
+  pull_request:
+    paths: &container_paths
+      - "**/Dockerfile*"
+      - "docker-compose*.yml"
+      - "backend/pyproject.toml"
+      - "frontend/package-lock.json"
+      - ".github/workflows/docker.yml"
+  push:
+    branches: [main]
+    paths: *container_paths
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  build-images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build backend image (no push)
+        run: |
+          if [ -f backend/Dockerfile ]; then
+            docker build backend
+          else
+            echo "backend/Dockerfile not present yet (#11) — skipping"
+          fi
+      - name: Build frontend image (no push)
+        run: |
+          if [ -f frontend/Dockerfile ]; then
+            docker build frontend
+          else
+            echo "frontend/Dockerfile not present yet (#11) — skipping"
+          fi
