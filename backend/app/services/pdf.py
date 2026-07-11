@@ -7,12 +7,19 @@ which is what makes a local 8B model viable.
 
 import pymupdf
 
+from app.exceptions import ExtractionError
+
 SECTION_HINTS = ["inclusion criteria", "exclusion criteria", "eligibility", "study population"]
 
 
 def extract_eligibility_text(pdf_bytes: bytes) -> str:
-    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
-    pages = [doc[i].get_text() for i in range(doc.page_count)]
+    # pymupdf signals unreadable input with FileDataError/EmptyFileError,
+    # which subclass RuntimeError and ValueError respectively.
+    try:
+        doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+        pages = [doc[i].get_text() for i in range(doc.page_count)]
+    except (RuntimeError, ValueError) as exc:
+        raise ExtractionError(f"Could not read PDF: {exc}") from exc
     if not pages:
         return ""
     scores = [sum(p.lower().count(h) for h in SECTION_HINTS) for p in pages]

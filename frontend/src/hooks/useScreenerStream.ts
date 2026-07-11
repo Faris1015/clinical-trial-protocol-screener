@@ -11,10 +11,12 @@ export type Phase = "idle" | "running" | "awaiting_approval" | "done" | "failed"
 export function useScreenerStream(threadId: string | null) {
   const [nodeStates, setNodeStates] = useState<Record<string, NodeState>>({});
   const [phase, setPhase] = useState<Phase>("idle");
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!threadId) return;
     setNodeStates({});
+    setError(null);
     setPhase("running");
 
     const es = new EventSource(`/api/screenings/${threadId}/stream`);
@@ -26,7 +28,15 @@ export function useScreenerStream(threadId: string | null) {
         return;
       }
       if (msg.node === "__end__") {
-        setPhase("done");
+        // A terminal node that set phase="failed" (e.g. human_escalation)
+        // arrives just before __end__ — don't clobber it back to "done".
+        setPhase((prev) => (prev === "failed" ? prev : "done"));
+        es.close();
+        return;
+      }
+      if (msg.node === "__error__") {
+        setError(msg.message ?? "Screening failed");
+        setPhase("failed");
         es.close();
         return;
       }
@@ -40,5 +50,5 @@ export function useScreenerStream(threadId: string | null) {
     return () => es.close();
   }, [threadId]);
 
-  return { nodeStates, phase, setPhase };
+  return { nodeStates, phase, setPhase, error, setError };
 }

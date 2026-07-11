@@ -12,7 +12,7 @@ from langgraph.graph.state import CompiledStateGraph
 
 from app.graph.nodes.critic import critic_node, critic_router
 from app.graph.nodes.matcher import matcher_node
-from app.graph.nodes.parser import parser_node
+from app.graph.nodes.parser import parser_node, parser_router
 from app.graph.nodes.router import route_input, router_node
 from app.graph.state import ScreenerState, event
 
@@ -41,7 +41,9 @@ def build_graph() -> CompiledStateGraph:
 
     g.add_edge(START, "router")
     g.add_conditional_edges("router", route_input, {"parser": "parser", "reject": END})
-    g.add_edge("parser", "critic")
+    # A parser that absorbed a failure (LLM down, unrepairable output) ends the
+    # run cleanly instead of handing the Critic an empty extraction.
+    g.add_conditional_edges("parser", parser_router, {"critic": "critic", "failed": END})
     g.add_conditional_edges(
         "critic",
         critic_router,

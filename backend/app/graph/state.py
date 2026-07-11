@@ -12,7 +12,7 @@ from typing import Annotated, Literal, TypedDict
 
 class AgentEvent(TypedDict):
     agent: str  # "router" | "parser" | "critic" | "matcher"
-    status: str  # "started" | "completed" | "rejected" | "escalated"
+    status: str  # "started" | "completed" | "rejected" | "escalated" | "failed"
     detail: str
     timestamp: str
 
