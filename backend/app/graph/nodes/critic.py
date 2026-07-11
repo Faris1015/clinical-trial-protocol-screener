@@ -10,11 +10,25 @@ to a human instead of looping forever.
 import yaml
 
 from app.config import get_settings
+from app.exceptions import DataStoreError
 from app.graph.state import ScreenerState, event
 
 
 def load_rules() -> list[dict]:
-    rules: list[dict] = yaml.safe_load(get_settings().rules_path.read_text())
+    """Load the compliance rules; a missing or malformed file is a DataStoreError.
+
+    Settings validates existence at startup, but the file can still disappear
+    or be corrupted while the server runs.
+    """
+    path = get_settings().rules_path
+    try:
+        rules: list[dict] = yaml.safe_load(path.read_text())
+    except OSError as exc:
+        raise DataStoreError(f"Compliance rules unavailable at {path}: {exc}") from exc
+    except yaml.YAMLError as exc:
+        raise DataStoreError(f"Compliance rules at {path} are not valid YAML: {exc}") from exc
+    if not isinstance(rules, list):
+        raise DataStoreError(f"Compliance rules at {path} must be a YAML list of rules")
     return rules
 
 

@@ -9,6 +9,7 @@ import json
 from operator import eq, ge, gt, le, lt
 
 from app.config import get_settings
+from app.exceptions import DataStoreError
 from app.graph.state import ScreenerState, event
 
 OPS = {">=": ge, "<=": le, ">": gt, "<": lt, "==": eq}
@@ -75,10 +76,29 @@ def evaluate_patient(patient: dict, criteria: dict) -> dict:
     }
 
 
+def load_patients() -> list[dict]:
+    """Read the synthetic EHR; a missing or corrupt file is a DataStoreError.
+
+    Raised (not absorbed into state) on purpose: the matcher only runs inside
+    the synchronous /approve request, where the FastAPI handler turns this
+    into a 503 and the checkpointed screening stays resumable at the gate.
+    """
+    path = get_settings().patients_path
+    try:
+        patients = json.loads(path.read_text())
+    except OSError as exc:
+        raise DataStoreError(f"Patient records unavailable at {path}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise DataStoreError(f"Patient records at {path} are not valid JSON: {exc}") from exc
+    if not isinstance(patients, list):
+        raise DataStoreError(f"Patient records at {path} must be a JSON array of patients")
+    return patients
+
+
 def matcher_node(state: ScreenerState) -> dict:
     criteria = state["parsed_criteria"]
     assert criteria is not None, "matcher runs after parser — parsed_criteria is set"
-    patients = json.loads(get_settings().patients_path.read_text())
+    patients = load_patients()
     evaluations = [evaluate_patient(p, criteria) for p in patients]
     eligible = [e for e in evaluations if e["eligible"] and not e["needs_review"]]
     review = [e for e in evaluations if e["needs_review"]]

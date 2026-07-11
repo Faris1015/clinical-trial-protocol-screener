@@ -11,7 +11,7 @@ const AGENTS = ["router", "parser", "critic", "matcher"];
 export default function App() {
   const [threadId, setThreadId] = useState<string | null>(null);
   const [matches, setMatches] = useState<PatientEvaluation[]>([]);
-  const { nodeStates, phase, setPhase } = useScreenerStream(threadId);
+  const { nodeStates, phase, setPhase, error, setError } = useScreenerStream(threadId);
 
   async function upload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -26,6 +26,14 @@ export default function App() {
 
   async function approve() {
     const res = await fetch(`/api/screenings/${threadId}/approve`, { method: "POST" });
+    if (!res.ok) {
+      // e.g. 503 when the patient store is unavailable — the screening stays
+      // parked at the gate, so show the error instead of crashing on undefined.
+      const body = (await res.json().catch(() => ({}))) as { detail?: string };
+      setError(body.detail ?? "Approval failed");
+      setPhase("failed");
+      return;
+    }
     const data = (await res.json()) as ApproveResponse;
     setMatches(data.matched_patients);
     setPhase("done");
@@ -56,7 +64,7 @@ export default function App() {
 
       {phase === "failed" && (
         <div className="banner failed">
-          Could not converge — escalated to human review after 3 attempts.
+          {error ?? "Could not converge — escalated to human review after 3 attempts."}
         </div>
       )}
 
