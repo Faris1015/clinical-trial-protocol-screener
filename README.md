@@ -79,7 +79,36 @@ data gets touched.
 
 ## Quickstart
 
-### Backend
+### Docker (recommended)
+
+One command brings up the whole stack — backend, frontend, and a local Ollama
+that pulls its model on first run:
+
+```bash
+docker compose up --build
+```
+
+Then open **http://localhost:8080**. On the first run Ollama downloads
+`llama3.1:8b` (~4.7GB) before the backend starts — subsequent runs reuse the
+cached model volume. Synthetic patients are generated automatically into a
+data volume on first start. `depends_on` health conditions order startup so the
+frontend only comes up once the backend is healthy; check with
+`docker compose ps`.
+
+To use hosted Claude instead of local Ollama, create a root `.env`:
+
+```bash
+echo "LLM_PROVIDER=anthropic"       >> .env
+echo "ANTHROPIC_API_KEY=sk-ant-..." >> .env
+docker compose up --build
+```
+
+### Manual (local dev)
+
+<details>
+<summary>Run without Docker</summary>
+
+#### Backend
 
 ```bash
 cd backend
@@ -92,13 +121,15 @@ uvicorn app.main:app --reload --port 8000
 Requires [Ollama](https://ollama.com) running locally with `ollama pull llama3.1:8b`,
 or set `ANTHROPIC_API_KEY` and `LLM_PROVIDER=anthropic`.
 
-### Frontend
+#### Frontend
 
 ```bash
 cd frontend
 npm install
 npm run dev                              # http://localhost:5173
 ```
+
+</details>
 
 ### Run a screening
 

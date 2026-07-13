@@ -52,6 +52,17 @@ async def http_error_handler(request: Request, exc: StarletteHTTPException) -> J
     )
 
 
+@app.get("/health")
+async def health() -> dict:
+    """Liveness probe: the process is up and serving requests.
+
+    Deliberately dependency-free so the container HEALTHCHECK reflects only
+    "is the server alive". Dependency readiness (LLM, rules, data, DB) belongs
+    to a separate /ready endpoint — see #6.
+    """
+    return {"status": "ok"}
+
+
 # thread_id -> initial state; the graph checkpointer holds execution state
 THREADS: dict[str, dict] = {}
 
