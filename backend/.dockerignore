@@ -1,0 +1,23 @@
+# Keep the build context lean and the image free of dev-only artifacts.
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Tests aren't needed at runtime
+tests/
+
+# Generated at container start onto the /data volume — never bake it in
+app/data/patients.json
+
+# Local secrets / tooling
+.env
+.env.*
+Dockerfile
+.dockerignore

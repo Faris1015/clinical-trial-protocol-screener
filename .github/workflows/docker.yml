@@ -2,7 +2,6 @@ name: Docker build
 
 # Catches Dockerfile rot without paying the build cost on every PR: this
 # workflow only triggers when container files or dependency manifests change.
-# Until #11 lands the Dockerfiles, the guard steps below make it a no-op.
 on:
   pull_request:
     paths: &container_paths
@@ -25,16 +24,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build backend image (no push)
+        run: docker build -t screener-backend backend
+      - name: Assert backend image size < 300MB
+        # Acceptance criterion for #11 — a slim runtime is the whole point of
+        # the multi-stage build, so guard against regressions here. We measure
+        # the compressed (pushed/pulled) size: it's the number that matters for
+        # the GHCR registry and #13's rollout, and `docker save | gzip` gives a
+        # deterministic result regardless of the runner's image-store backend
+        # (`docker image inspect .Size` reports uncompressed on the classic
+        # store but compressed on containerd — not portable).
         run: |
-          if [ -f backend/Dockerfile ]; then
-            docker build backend
-          else
-            echo "backend/Dockerfile not present yet (#11) — skipping"
+          bytes=$(docker save screener-backend | gzip -c | wc -c)
+          mb=$((bytes / 1024 / 1024))
+          echo "backend image (compressed): ${mb}MB"
+          if [ "$mb" -ge 300 ]; then
+            echo "::error::backend image ${mb}MB exceeds the 300MB budget"
+            exit 1
           fi
       - name: Build frontend image (no push)
-        run: |
-          if [ -f frontend/Dockerfile ]; then
-            docker build frontend
-          else
-            echo "frontend/Dockerfile not present yet (#11) — skipping"
-          fi
+        run: docker build -t screener-frontend frontend

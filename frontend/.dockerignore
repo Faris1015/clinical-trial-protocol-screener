@@ -1,0 +1,8 @@
+# Keep the build context lean; node_modules is rebuilt via `npm ci` in-image.
+node_modules/
+dist/
+.env
+.env.*
+Dockerfile
+.dockerignore
+npm-debug.log*

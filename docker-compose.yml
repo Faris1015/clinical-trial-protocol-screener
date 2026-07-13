@@ -1,0 +1,70 @@
+# One-command stack: `docker compose up`.
+#
+#   ollama       local LLM inference server
+#   ollama-pull  one-shot: pulls the model, then exits (gates the backend)
+#   backend      FastAPI + LangGraph API
+#   frontend     nginx serving the built React app + /api reverse proxy
+#
+# depends_on health conditions make startup ordering deterministic: the backend
+# waits until the model is pulled; the frontend waits until the backend is
+# healthy. Dashboard comes up at http://localhost:8080.
+name: protocol-screener
+
+services:
+  ollama:
+    image: ollama/ollama:0.6.2
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      # `ollama list` exits 0 only once the server is accepting connections.
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  ollama-pull:
+    image: ollama/ollama:0.6.2
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    # Pulls the model into the shared volume, then exits. ~4.7GB on first run;
+    # subsequent runs are cached by the ollama-models volume.
+    entrypoint: ["ollama", "pull", "llama3.1:8b"]
+    restart: "no"
+
+  backend:
+    build: ./backend
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - PATIENTS_PATH=/data/patients.json
+      # The browser talks only to the frontend origin (nginx proxies /api), so
+      # CORS is effectively unused here — set for direct API access on :8000.
+      - CORS_ORIGINS=http://localhost:8080
+      # Switch to hosted Claude with `LLM_PROVIDER=anthropic ANTHROPIC_API_KEY=...`
+      # in a root .env (ollama/ollama-pull still start but go unused).
+      - LLM_PROVIDER=${LLM_PROVIDER:-ollama}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+    volumes:
+      # Holds the generated patients.json (and the durable checkpointer DB once
+      # #2 lands) so screening data survives container restarts.
+      - backend-data:/data
+    depends_on:
+      ollama-pull:
+        condition: service_completed_successfully
+    ports:
+      - "8000:8000"
+
+  frontend:
+    build: ./frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "8080:80"
+
+volumes:
+  ollama-models:
+  backend-data:
