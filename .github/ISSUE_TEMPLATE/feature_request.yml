@@ -1,0 +1,53 @@
+name: Feature request
+description: Propose a new capability or improvement
+title: "feat: <short description>"
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the proposal. Please search existing issues first to avoid duplicates.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What problem does this solve? Why does it matter?
+      placeholder: The Matcher uses substring comparison, so "diabetes" matches "no diabetes".
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: What should happen? Describe the approach at a high level.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: How do we know this is done? Concrete, checkable outcomes.
+      placeholder: |
+        - [ ] Negated criteria no longer match via substring
+        - [ ] Test covers the "no diabetes" case
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - backend (API / graph / agents)
+        - frontend (React dashboard)
+        - CI / tooling / infra
+        - docs
+        - other / not sure
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you weighed and why you set them aside.
+    validations:
+      required: false

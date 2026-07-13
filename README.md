@@ -209,9 +209,10 @@ the guardrails pay for themselves on all subsequent work.
 
 ## Development workflow
 
-Once [#14](../../issues/14) lands this moves to `CONTRIBUTING.md`; the flow it codifies:
+The full flow — local setup, branching, PRs, conventional commits, and repo
+settings — lives in [`CONTRIBUTING.md`](CONTRIBUTING.md). In short:
 
-1. Pick an issue, branch from `main`: `feat/<slug>` or `fix/<slug>`
+1. Pick an issue, branch from `main`: `feat/<issue>-<slug>` or `fix/<issue>-<slug>`
 2. Open a PR referencing the issue (`Closes #N`) — CI must pass (lint, types, tests, build)
 3. Squash-merge with a conventional-commit title (`feat:`, `fix:`, `test:`, `docs:`, `chore:`)
 4. Merge to `main` triggers CD: image build → registry → rolling deploy gated on `/ready`
@@ -220,31 +221,12 @@ Once [#14](../../issues/14) lands this moves to `CONTRIBUTING.md`; the flow it c
 
 Every PR and push to `main` runs [`ci.yml`](.github/workflows/ci.yml): parallel backend
 (ruff, mypy, pytest with a ratcheting coverage gate) and frontend (eslint, prettier, tsc,
-vite build) jobs. [`docker.yml`](.github/workflows/docker.yml) rebuilds images only when
+vite build) jobs. A [`pr-title.yml`](.github/workflows/pr-title.yml) check enforces a
+Conventional Commits PR title (the squash-merge commit message).
+[`docker.yml`](.github/workflows/docker.yml) rebuilds images only when
 container files or dependency manifests change. Superseded runs on the same ref are
-cancelled automatically.
-
-Branch protection on `main` is a repository setting (not enforceable from the repo
-contents); it should be configured as:
-
-- Require the `backend` and `frontend` status checks to pass before merging
-- Require 1 approving review
-- Allow only squash merging; delete head branches on merge
-
-```sh
-gh api -X PUT repos/Faris1015/clinical-trial-protocol-screener/branches/main/protection \
-  --input - <<'JSON'
-{
-  "required_status_checks": {"strict": false, "contexts": ["backend", "frontend"]},
-  "required_pull_request_reviews": {"required_approving_review_count": 1},
-  "enforce_admins": false,
-  "restrictions": null
-}
-JSON
-gh repo edit Faris1015/clinical-trial-protocol-screener \
-  --enable-squash-merge --enable-merge-commit=false --enable-rebase-merge=false \
-  --delete-branch-on-merge
-```
+cancelled automatically. Branch protection and merge settings are documented in
+[`CONTRIBUTING.md`](CONTRIBUTING.md#repository-settings).
 
 ## Configuration
 
