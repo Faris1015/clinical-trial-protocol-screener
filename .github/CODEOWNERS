@@ -1,0 +1,7 @@
+# Code owners are automatically requested for review on any PR touching
+# matching paths. Self-ownership for now — the mechanism is what matters;
+# add teammates or path-specific owners as the project grows.
+#
+# Docs: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+* @Faris1015

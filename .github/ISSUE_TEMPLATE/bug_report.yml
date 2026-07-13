@@ -1,0 +1,55 @@
+name: Bug report
+description: Report something that is broken or behaving incorrectly
+title: "fix: <short description>"
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. Please search existing issues first to avoid duplicates.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug and what you expected instead.
+      placeholder: When I upload a PDF over 10MB, the stream hangs. I expected an error.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Exact commands or actions so we can reproduce it.
+      placeholder: |
+        1. `uvicorn app.main:app --reload`
+        2. POST a 12MB protocol to /api/screenings
+        3. GET the stream — it never emits an error event
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - backend (API / graph / agents)
+        - frontend (React dashboard)
+        - CI / tooling / infra
+        - other / not sure
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Python/Node versions, LLM provider (ollama / anthropic), commit SHA.
+      placeholder: macOS 15, Python 3.11.9, Node 22.4, LLM_PROVIDER=ollama, commit abc1234
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste any error output or stack traces. Automatically formatted as code.
+      render: shell
+    validations:
+      required: false
