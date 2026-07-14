@@ -1,9 +1,12 @@
 """Agent 1: Router — validates input and decides whether to admit it to the pipeline."""
 
 from app.graph.state import ScreenerState, event
+from app.logging_config import get_logger
 
 MIN_PROTOCOL_LENGTH = 200
 ELIGIBILITY_MARKERS = ["inclusion", "exclusion", "eligib"]
+
+log = get_logger("router")
 
 
 def router_node(state: ScreenerState) -> dict:
@@ -12,6 +15,7 @@ def router_node(state: ScreenerState) -> dict:
         marker in text.lower() for marker in ELIGIBILITY_MARKERS
     )
     if not looks_like_protocol:
+        log.warning("router.rejected", text_chars=len(text))
         return {
             "current_step": "failed",
             "events": [

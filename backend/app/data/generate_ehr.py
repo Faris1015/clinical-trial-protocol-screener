@@ -11,6 +11,9 @@ import random
 from faker import Faker
 
 from app.config import get_settings
+from app.logging_config import configure_logging, get_logger
+
+log = get_logger("generate_ehr")
 
 SEED = 42
 N_PATIENTS = 100
@@ -60,6 +63,7 @@ def make_patient(fake: Faker, rng: random.Random, idx: int) -> dict:
 
 
 def main() -> None:
+    configure_logging()
     rng = random.Random(SEED)
     fake = Faker()
     Faker.seed(SEED)
@@ -73,7 +77,7 @@ def main() -> None:
     out = get_settings().patients_path
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(patients, indent=2))
-    print(f"Wrote {len(patients)} synthetic patients to {out}")
+    log.info("generate_ehr.wrote", count=len(patients), path=str(out))
 
 
 if __name__ == "__main__":

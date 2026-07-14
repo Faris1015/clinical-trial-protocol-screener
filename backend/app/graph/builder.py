@@ -6,6 +6,10 @@ checkpointer persists every state transition per thread_id, making runs
 resumable and inspectable.
 """
 
+import time
+from collections.abc import Callable
+from typing import TypeVar, cast
+
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
@@ -15,9 +19,49 @@ from app.graph.nodes.matcher import matcher_node
 from app.graph.nodes.parser import parser_node, parser_router
 from app.graph.nodes.router import route_input, router_node
 from app.graph.state import ScreenerState, event
+from app.logging_config import get_logger
+
+log = get_logger("graph")
+
+NodeFn = TypeVar("NodeFn", bound=Callable[[ScreenerState], dict])
+
+
+def _instrument(name: str, fn: NodeFn) -> NodeFn:
+    """Wrap a node so every run logs its start, duration, and outcome.
+
+    Server-side counterpart to the in-state event log: the `request_id` and
+    `thread_id` bound by the API layer ride along via contextvars, so these
+    lines join a single screening's story. Node bodies still log their own
+    domain detail (retries, critic rejections) at the appropriate level.
+    """
+
+    def wrapped(state: ScreenerState) -> dict:
+        # Resolved per-call rather than closing over a module-level logger, so
+        # the render config in force at request time (LOG_FORMAT) always wins.
+        node_log = get_logger("graph").bind(node=name)
+        node_log.info("node.start")
+        started = time.perf_counter()
+        try:
+            result = fn(state)
+        except Exception:
+            node_log.error(
+                "node.error",
+                duration_ms=round((time.perf_counter() - started) * 1000, 1),
+                exc_info=True,
+            )
+            raise
+        node_log.info(
+            "node.finish",
+            duration_ms=round((time.perf_counter() - started) * 1000, 1),
+            outcome=result.get("current_step"),
+        )
+        return result
+
+    return cast(NodeFn, wrapped)
 
 
 def human_escalation_node(state: ScreenerState) -> dict:
+    log.warning("critic.escalated", attempts=state["parse_attempts"])
     return {
         "current_step": "escalated",
         "events": [
@@ -33,11 +77,11 @@ def human_escalation_node(state: ScreenerState) -> dict:
 
 def build_graph() -> CompiledStateGraph:
     g = StateGraph(ScreenerState)
-    g.add_node("router", router_node)
-    g.add_node("parser", parser_node)
-    g.add_node("critic", critic_node)
-    g.add_node("matcher", matcher_node)
-    g.add_node("human_escalation", human_escalation_node)
+    g.add_node("router", _instrument("router", router_node))
+    g.add_node("parser", _instrument("parser", parser_node))
+    g.add_node("critic", _instrument("critic", critic_node))
+    g.add_node("matcher", _instrument("matcher", matcher_node))
+    g.add_node("human_escalation", _instrument("human_escalation", human_escalation_node))
 
     g.add_edge(START, "router")
     g.add_conditional_edges("router", route_input, {"parser": "parser", "reject": END})

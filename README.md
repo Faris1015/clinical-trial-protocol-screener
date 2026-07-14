@@ -281,3 +281,4 @@ with a clear message instead of erroring mid-screening.
 | `RULES_PATH` | `app/rules/compliance_rules.yaml` | Compliance rules database |
 | `PATIENTS_PATH` | `app/data/patients.json` | Synthetic EHR location |
 | `LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
+| `LOG_FORMAT` | `console` | `console` (human-readable) or `json` (one object per line) |

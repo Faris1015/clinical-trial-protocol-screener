@@ -16,6 +16,7 @@ dependencies = [
     "faker>=28.0",
     "python-multipart>=0.0.9",
     "tenacity>=8.2",
+    "structlog>=24.1",
 ]
 
 [project.optional-dependencies]
@@ -53,10 +54,6 @@ select = [
     "T20",  # no print statements
     "BLE",  # no blind excepts
 ]
-
-[tool.ruff.lint.per-file-ignores]
-# generate_ehr.py is a CLI script — printing its result is its job
-"app/data/generate_ehr.py" = ["T201"]
 
 [tool.mypy]
 python_version = "3.11"
