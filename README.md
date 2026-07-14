@@ -137,7 +137,11 @@ npm run dev                              # http://localhost:5173
 curl -X POST http://localhost:8000/api/screenings -F "file=@protocol.pdf"
 curl -N http://localhost:8000/api/screenings/<thread_id>/stream
 curl -X POST http://localhost:8000/api/screenings/<thread_id>/approve
+curl http://localhost:8000/api/screenings        # list all screenings (newest first)
 ```
+
+State is durable: a screening parked at the human-approval gate survives a
+server restart or deploy and stays resumable (see [Configuration](#configuration)).
 
 ## Code quality
 
@@ -280,5 +284,8 @@ with a clear message instead of erroring mid-screening.
 | `MAX_PARSE_ATTEMPTS` | `3` | Parser retries before human escalation (1–10) |
 | `RULES_PATH` | `app/rules/compliance_rules.yaml` | Compliance rules database |
 | `PATIENTS_PATH` | `app/data/patients.json` | Synthetic EHR location |
+| `CHECKPOINT_BACKEND` | `sqlite` | `memory` (tests), `sqlite` (durable single-node), `postgres` (multi-replica) |
+| `SQLITE_PATH` | `screenings.sqlite` | sqlite file shared by the checkpointer and screening store |
+| `POSTGRES_DSN` | — | **Required** when `CHECKPOINT_BACKEND=postgres`; install with `pip install -e ".[postgres]"` |
 | `LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
 | `LOG_FORMAT` | `console` | `console` (human-readable) or `json` (one object per line) |

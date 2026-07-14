@@ -12,7 +12,9 @@ import app.main as main
 
 @pytest.fixture
 def client():
-    return TestClient(main.app, raise_server_exceptions=False)
+    # `with` runs the lifespan so the persistence store is wired up.
+    with TestClient(main.app, raise_server_exceptions=False) as c:
+        yield c
 
 
 def test_response_mints_a_request_id_header(client):

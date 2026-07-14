@@ -12,7 +12,9 @@ from app.exceptions import DataStoreError
 
 @pytest.fixture
 def client():
-    return TestClient(main.app, raise_server_exceptions=False)
+    # `with` runs the lifespan so the persistence store is wired up.
+    with TestClient(main.app, raise_server_exceptions=False) as c:
+        yield c
 
 
 def _sse_events(response) -> list[dict]:
@@ -83,10 +85,10 @@ class FakeGraph:
         yield {"router": {"current_step": "parsing"}}
         raise self.exc
 
-    def get_state(self, _config: object) -> FakeSnapshot:
+    async def aget_state(self, _config: object) -> FakeSnapshot:
         return FakeSnapshot(self.pending)
 
-    def invoke(self, *_args: object) -> dict:
+    async def ainvoke(self, *_args: object) -> dict:
         raise self.exc
 
 
@@ -127,7 +129,7 @@ class CompletingGraph:
         for update in self.updates:
             yield update
 
-    def get_state(self, _config: object) -> FakeSnapshot:
+    async def aget_state(self, _config: object) -> FakeSnapshot:
         snap = FakeSnapshot(self.pending)
         snap.values = self.values
         return snap

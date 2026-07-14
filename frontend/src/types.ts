@@ -64,3 +64,11 @@ export type ApproveResponse = {
   matched_patients: PatientEvaluation[];
   events: AgentEvent[];
 };
+
+/** One row from `GET /api/screenings` — metadata only, no protocol text. */
+export type Screening = {
+  thread_id: string;
+  source_filename: string;
+  status: string;
+  created_at: string;
+};
