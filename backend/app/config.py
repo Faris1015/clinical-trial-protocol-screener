@@ -45,6 +45,8 @@ class Settings(BaseSettings):
 
     # --- Observability ---
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
+    # "console" = human-readable, colorized (dev); "json" = one object per line (prod).
+    log_format: Literal["console", "json"] = "console"
 
     @property
     def cors_origin_list(self) -> list[str]:

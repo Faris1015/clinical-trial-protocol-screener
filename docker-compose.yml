@@ -40,6 +40,8 @@ services:
     environment:
       - OLLAMA_BASE_URL=http://ollama:11434
       - PATIENTS_PATH=/data/patients.json
+      # One JSON object per log line for machine ingestion (see #5).
+      - LOG_FORMAT=${LOG_FORMAT:-json}
       # The browser talks only to the frontend origin (nginx proxies /api), so
       # CORS is effectively unused here — set for direct API access on :8000.
       - CORS_ORIGINS=http://localhost:8080

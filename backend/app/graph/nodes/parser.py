@@ -16,8 +16,11 @@ from pydantic import ValidationError
 
 from app.exceptions import LLMUnavailableError
 from app.graph.state import ScreenerState, event
+from app.logging_config import get_logger
 from app.schemas.criteria import CriteriaSchema
 from app.services.llm import get_llm, invoke_with_retry
+
+log = get_logger("parser")
 
 PARSER_SYSTEM = """You are a clinical protocol extraction engine. Extract eligibility \
 criteria into the exact schema provided. Rules:
@@ -40,6 +43,7 @@ def _extract_criteria(structured_llm: Runnable, prompt: str) -> CriteriaSchema:
     try:
         return _validate(invoke_with_retry(structured_llm, messages))
     except (ValidationError, OutputParserException) as exc:
+        log.warning("parser.schema_repair", error=type(exc).__name__)
         repair = [
             *messages,
             (
@@ -61,6 +65,9 @@ def _failed(detail: str) -> dict:
 
 def parser_node(state: ScreenerState) -> dict:
     structured_llm = get_llm().with_structured_output(CriteriaSchema)
+    attempt = state.get("parse_attempts", 0) + 1
+    is_revision = bool(state.get("critic_feedback"))
+    log.info("parser.extracting", attempt=attempt, revision=is_revision)
 
     prompt = state["raw_protocol_text"]
     if state.get("critic_feedback"):
@@ -75,8 +82,10 @@ def parser_node(state: ScreenerState) -> dict:
     try:
         result = _extract_criteria(structured_llm, prompt)
     except LLMUnavailableError as exc:
+        log.error("parser.llm_unavailable", attempt=attempt, detail=str(exc))
         return _failed(str(exc))
     except (ValidationError, OutputParserException):
+        log.error("parser.schema_validation_exhausted", attempt=attempt)
         return _failed(
             "Model output failed schema validation twice (original + repair attempt) — "
             "screening aborted."
@@ -84,6 +93,13 @@ def parser_node(state: ScreenerState) -> dict:
 
     n_inc = len(result.inclusion_quantitative) + len(result.inclusion_categorical)
     n_exc = len(result.exclusion_quantitative) + len(result.exclusion_categorical)
+    log.info(
+        "parser.extracted",
+        attempt=attempt,
+        inclusion=n_inc,
+        exclusion=n_exc,
+        unparseable=len(result.unparseable),
+    )
     return {
         "parsed_criteria": result.model_dump(),
         "parse_attempts": state.get("parse_attempts", 0) + 1,

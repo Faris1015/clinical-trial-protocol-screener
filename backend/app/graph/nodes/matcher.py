@@ -11,8 +11,11 @@ from operator import eq, ge, gt, le, lt
 from app.config import get_settings
 from app.exceptions import DataStoreError
 from app.graph.state import ScreenerState, event
+from app.logging_config import get_logger
 
 OPS = {">=": ge, "<=": le, ">": gt, "<": lt, "==": eq}
+
+log = get_logger("matcher")
 
 
 def _check_quantitative(patient: dict, criterion: dict) -> str:
@@ -102,6 +105,12 @@ def matcher_node(state: ScreenerState) -> dict:
     evaluations = [evaluate_patient(p, criteria) for p in patients]
     eligible = [e for e in evaluations if e["eligible"] and not e["needs_review"]]
     review = [e for e in evaluations if e["needs_review"]]
+    log.info(
+        "matcher.screened",
+        patients=len(evaluations),
+        eligible=len(eligible),
+        needs_review=len(review),
+    )
     return {
         "matched_patients": evaluations,
         "current_step": "done",

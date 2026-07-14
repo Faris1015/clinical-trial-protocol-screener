@@ -6,25 +6,30 @@ terminates with `__error__` instead of dying silently when a node blows up.
 """
 
 import json
-from collections.abc import AsyncIterator
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from langchain_core.runnables import RunnableConfig
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import get_settings
 from app.exceptions import ScreenerError, ScreeningNotFoundError
 from app.graph.builder import graph
+from app.logging_config import bind_contextvars, clear_contextvars, configure_logging, get_logger
 from app.services.pdf import extract_eligibility_text
 
 # Resolve settings at import time so a misconfigured deployment fails at
 # startup (e.g. LLM_PROVIDER=anthropic without ANTHROPIC_API_KEY), not
-# mid-screening.
+# mid-screening. configure_logging() re-applies settings-driven config (it also
+# runs on logging_config import, so module-level loggers are already wired).
 settings = get_settings()
+configure_logging()
+log = get_logger("api")
 
 app = FastAPI(title="Clinical Trial Protocol Screener")
 app.add_middleware(
@@ -35,8 +40,49 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def correlation_middleware(
+    request: Request, call_next: Callable[[Request], Awaitable[Response]]
+) -> Response:
+    """Bind a per-request `request_id` into every log line and echo it back.
+
+    A client-supplied `X-Request-ID` is honored (so a trace spans services);
+    otherwise one is minted. `thread_id` is bound later, inside the handlers
+    that know it, and rides the same contextvars into the graph nodes.
+    """
+    request_id = request.headers.get("x-request-id") or str(uuid4())
+    clear_contextvars()
+    bind_contextvars(request_id=request_id)
+    started = time.perf_counter()
+    log.info("request.start", method=request.method, path=request.url.path)
+    try:
+        response = await call_next(request)
+        log.info(
+            "request.finish",
+            status_code=response.status_code,
+            duration_ms=round((time.perf_counter() - started) * 1000, 1),
+        )
+        response.headers["X-Request-ID"] = request_id
+        return response
+    except Exception:
+        log.error(
+            "request.error",
+            duration_ms=round((time.perf_counter() - started) * 1000, 1),
+            exc_info=True,
+        )
+        raise
+    finally:
+        clear_contextvars()
+
+
 @app.exception_handler(ScreenerError)
 async def screener_error_handler(request: Request, exc: ScreenerError) -> JSONResponse:
+    log.warning(
+        "screener_error",
+        error=type(exc).__name__,
+        status_code=exc.http_status,
+        detail=str(exc),
+    )
     return JSONResponse(
         status_code=exc.http_status,
         content={"error": type(exc).__name__, "detail": str(exc)},
@@ -104,6 +150,7 @@ async def create_screening(file: UploadFile) -> dict:
         text = raw.decode("utf-8", errors="replace")
 
     thread_id = str(uuid4())
+    bind_contextvars(thread_id=thread_id)
     THREADS[thread_id] = {
         "raw_protocol_text": text,
         "source_filename": file.filename or "upload",
@@ -116,12 +163,20 @@ async def create_screening(file: UploadFile) -> dict:
         "events": [],
         "current_step": "routing",
     }
+    # PHI hygiene: log the size of the upload, never its contents.
+    log.info(
+        "screening.created",
+        source_filename=file.filename or "upload",
+        text_chars=len(text),
+    )
     return {"thread_id": thread_id}
 
 
 @app.get("/api/screenings/{thread_id}/stream")
 async def stream_screening(thread_id: str) -> StreamingResponse:
     config = _require_thread(thread_id)
+    bind_contextvars(thread_id=thread_id)
+    log.info("screening.stream_started")
 
     async def generate() -> AsyncIterator[str]:
         # An exception mid-stream can't become an HTTP error (headers are
@@ -132,9 +187,12 @@ async def stream_screening(thread_id: str) -> StreamingResponse:
                 for node, update in chunk.items():
                     yield _sse({"node": node, "update": jsonable_encoder(update)})
             yield _terminal_event(config)
+            log.info("screening.stream_finished")
         except ScreenerError as exc:
+            log.warning("screening.stream_error", error=type(exc).__name__, detail=str(exc))
             yield _sse({"node": "__error__", "message": str(exc)})
         except Exception:  # noqa: BLE001 — last-resort stream terminator, detail stays server-side
+            log.error("screening.stream_crashed", exc_info=True)
             yield _sse(
                 {
                     "node": "__error__",
@@ -148,8 +206,10 @@ async def stream_screening(thread_id: str) -> StreamingResponse:
 @app.post("/api/screenings/{thread_id}/approve")
 async def approve_screening(thread_id: str) -> dict:
     config = _require_thread(thread_id)
+    bind_contextvars(thread_id=thread_id)
     if not graph.get_state(config).next:
         raise HTTPException(409, "screening is not awaiting approval")
+    log.info("screening.approved")
     # Resume past the interrupt_before=["matcher"] gate. A DataStoreError from
     # the matcher propagates to screener_error_handler (503) and the screening
     # stays parked at the gate, so approval can be retried once fixed.
@@ -163,5 +223,6 @@ async def approve_screening(thread_id: str) -> dict:
 @app.get("/api/screenings/{thread_id}/state")
 async def get_state(thread_id: str) -> dict:
     config = _require_thread(thread_id)
+    bind_contextvars(thread_id=thread_id)
     snapshot = graph.get_state(config)
     return {"values": jsonable_encoder(snapshot.values), "pending": list(snapshot.next)}

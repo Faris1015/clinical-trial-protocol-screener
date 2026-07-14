@@ -12,6 +12,9 @@ import yaml
 from app.config import get_settings
 from app.exceptions import DataStoreError
 from app.graph.state import ScreenerState, event
+from app.logging_config import get_logger
+
+log = get_logger("critic")
 
 
 def load_rules() -> list[dict]:
@@ -116,6 +119,17 @@ def critic_node(state: ScreenerState) -> dict:
 
     rejects = [f for f in findings if f["severity"] == "reject"]
     passed = not rejects
+
+    if passed:
+        log.info("critic.passed", findings=len(findings))
+    else:
+        log.warning(
+            "critic.rejected",
+            findings=len(findings),
+            blocking=len(rejects),
+            rule_ids=[f["rule_id"] for f in rejects],
+            attempt=state["parse_attempts"],
+        )
 
     return {
         "compliance_passed": passed,
