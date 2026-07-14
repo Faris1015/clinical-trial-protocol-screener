@@ -143,6 +143,23 @@ curl http://localhost:8000/api/screenings        # list all screenings (newest f
 State is durable: a screening parked at the human-approval gate survives a
 server restart or deploy and stays resumable (see [Configuration](#configuration)).
 
+### Health & readiness
+
+```bash
+curl http://localhost:8000/health   # liveness: 200 whenever the process is up
+curl http://localhost:8000/ready    # readiness: 200 only when dependencies are reachable
+```
+
+- **`/health`** is dependency-free — it answers "is the process alive?" and
+  backs the container `HEALTHCHECK`, so a hung or crashed process is restarted
+  without a blipping dependency triggering a restart storm.
+- **`/ready`** answers "can this instance serve traffic?" — it checks the LLM
+  backend, the compliance rules, the patient EHR, and the screening store
+  concurrently (each under a timeout), returning `200` when all pass or `503`
+  with a per-check breakdown otherwise. Point load balancers and
+  `kubelet` readiness probes here. Both responses include the build `version`
+  and `commit`.
+
 ## Code quality
 
 Backend is linted and formatted with **ruff** and type-checked with **mypy**

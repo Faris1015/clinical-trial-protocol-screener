@@ -54,6 +54,11 @@ class Settings(BaseSettings):
     # "postgresql://user:pass@host:5432/screener".
     postgres_dsn: str | None = None
 
+    # --- Build metadata ---
+    # Short commit SHA, injected at image build (Docker ARG -> GIT_SHA env) so
+    # /health and /ready can report exactly which build is running.
+    git_sha: str | None = None
+
     # --- Observability ---
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     # "console" = human-readable, colorized (dev); "json" = one object per line (prod).

@@ -24,9 +24,14 @@ from app.config import get_settings
 from app.exceptions import ScreenerError, ScreeningNotFoundError
 from app.graph.builder import build_graph
 from app.graph.state import initial_state
+from app.health import app_version, readiness
 from app.logging_config import bind_contextvars, clear_contextvars, configure_logging, get_logger
 from app.persistence import Persistence, ScreeningStore, open_persistence
 from app.services.pdf import extract_eligibility_text
+
+# Probes fire every few seconds from orchestrators/load balancers; keep them out
+# of the INFO access log so they don't drown the request stream.
+_QUIET_PATHS = frozenset({"/health", "/ready"})
 
 # Resolve settings at import time so a misconfigured deployment fails at
 # startup (e.g. LLM_PROVIDER=anthropic without ANTHROPIC_API_KEY), not
@@ -89,15 +94,18 @@ async def correlation_middleware(
     request_id = request.headers.get("x-request-id") or str(uuid4())
     clear_contextvars()
     bind_contextvars(request_id=request_id)
+    quiet = request.url.path in _QUIET_PATHS
     started = time.perf_counter()
-    log.info("request.start", method=request.method, path=request.url.path)
+    if not quiet:
+        log.info("request.start", method=request.method, path=request.url.path)
     try:
         response = await call_next(request)
-        log.info(
-            "request.finish",
-            status_code=response.status_code,
-            duration_ms=round((time.perf_counter() - started) * 1000, 1),
-        )
+        if not quiet:
+            log.info(
+                "request.finish",
+                status_code=response.status_code,
+                duration_ms=round((time.perf_counter() - started) * 1000, 1),
+            )
         response.headers["X-Request-ID"] = request_id
         return response
     except Exception:
@@ -139,10 +147,23 @@ async def health() -> dict:
     """Liveness probe: the process is up and serving requests.
 
     Deliberately dependency-free so the container HEALTHCHECK reflects only
-    "is the server alive". Dependency readiness (LLM, rules, data, DB) belongs
-    to a separate /ready endpoint — see #6.
+    "is the server alive" — a hung or crashed process, not a blipping
+    dependency. Dependency readiness lives in /ready.
     """
-    return {"status": "ok"}
+    return {"status": "ok", **app_version()}
+
+
+@app.get("/ready")
+async def ready() -> JSONResponse:
+    """Readiness probe: 200 only when every dependency the request path needs
+    is reachable; 503 with a per-check breakdown otherwise.
+
+    Checks (LLM, rules, patients, store) run concurrently under a per-check
+    timeout, so a single hung dependency can't blow the probe's time budget.
+    """
+    all_ok, checks = await readiness(_store())
+    body = {"status": "ok" if all_ok else "degraded", "checks": checks, **app_version()}
+    return JSONResponse(status_code=200 if all_ok else 503, content=body)
 
 
 async def _require_thread(thread_id: str) -> RunnableConfig:
