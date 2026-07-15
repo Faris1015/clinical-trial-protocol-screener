@@ -65,6 +65,16 @@ data gets touched.
   matching runs.
 - **Append-only event log in graph state** (`Annotated[list, operator.add]` reducer)
   powers the frontend's live "which agent owns the token" visualization for free.
+- **Layered by responsibility: routes → services → graph → nodes.** Route handlers
+  in `main.py` only translate between HTTP and the service layer — they read the
+  request, resolve the wired dependencies (store, graph), and hand off. All
+  screening business logic (input parsing, state construction, graph invocation,
+  status denormalization, SSE framing) lives in `app/services/screening.py`; the
+  SSE wire format lives in the single-purpose `app/services/sse.py`. The dependency
+  arrow points one way — **nodes never import FastAPI**, and `main.py` never imports
+  the graph builder except through the service layer. Each module states its one
+  responsibility in its docstring, and service functions are unit-tested directly
+  without a running server.
 
 ## Tech stack
 
@@ -189,7 +199,7 @@ pip install pre-commit && pre-commit install
 ```
 backend/
   app/
-    main.py                    # FastAPI app + SSE endpoints
+    main.py                    # FastAPI app: thin HTTP routes → service layer
     graph/
       state.py                 # Shared LangGraph state (typed, with event reducer)
       builder.py               # Graph assembly: nodes, edges, loop, HITL interrupt
@@ -197,7 +207,10 @@ backend/
     schemas/criteria.py        # Pydantic criteria contracts
     rules/compliance_rules.yaml# Deterministic FDA-style boundary rules
     data/generate_ehr.py       # Seeded synthetic patient generator
-    services/                  # LLM factory, PDF eligibility-section extraction
+    services/
+      screening.py             # Screening use-cases (create/stream/approve/state)
+      sse.py                   # Server-Sent Events wire format (one place)
+      llm.py, pdf.py           # LLM factory, PDF eligibility-section extraction
   tests/
 frontend/
   src/

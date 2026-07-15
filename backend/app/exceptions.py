@@ -36,3 +36,9 @@ class ScreeningNotFoundError(ScreenerError):
     """No screening exists for the requested thread_id."""
 
     http_status = 404
+
+
+class ScreeningNotApprovableError(ScreenerError):
+    """Approval was requested for a screening that isn't parked at the gate."""
+
+    http_status = 409
