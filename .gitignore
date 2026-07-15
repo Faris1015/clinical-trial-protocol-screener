@@ -23,6 +23,11 @@ dist/
 # Generated data
 backend/app/data/patients.json
 
+# Durable persistence (sqlite checkpointer + screening store)
+backend/*.sqlite
+backend/*.sqlite-shm
+backend/*.sqlite-wal
+
 # OS / editor
 .DS_Store
 .idea/

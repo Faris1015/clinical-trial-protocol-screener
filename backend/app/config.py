@@ -43,6 +43,17 @@ class Settings(BaseSettings):
     rules_path: Path = APP_DIR / "rules" / "compliance_rules.yaml"
     patients_path: Path = APP_DIR / "data" / "patients.json"
 
+    # --- Persistence ---
+    # Where LangGraph execution state and screening metadata live. "memory" is
+    # process-local and lost on restart (tests only); "sqlite" is the durable
+    # single-node default; "postgres" is the multi-replica production target.
+    checkpoint_backend: Literal["memory", "sqlite", "postgres"] = "sqlite"
+    # sqlite file for both the checkpointer and the screening store (one DB).
+    sqlite_path: Path = APP_DIR.parent / "screenings.sqlite"
+    # Required when CHECKPOINT_BACKEND=postgres, e.g.
+    # "postgresql://user:pass@host:5432/screener".
+    postgres_dsn: str | None = None
+
     # --- Observability ---
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     # "console" = human-readable, colorized (dev); "json" = one object per line (prod).
@@ -57,6 +68,15 @@ class Settings(BaseSettings):
         if self.llm_provider == "anthropic" and not self.anthropic_api_key:
             raise ValueError(
                 "ANTHROPIC_API_KEY is required when LLM_PROVIDER=anthropic. "
+                "Set it in the environment or in backend/.env."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _require_postgres_dsn(self) -> "Settings":
+        if self.checkpoint_backend == "postgres" and not self.postgres_dsn:
+            raise ValueError(
+                "POSTGRES_DSN is required when CHECKPOINT_BACKEND=postgres. "
                 "Set it in the environment or in backend/.env."
             )
         return self

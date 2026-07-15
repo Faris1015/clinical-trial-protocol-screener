@@ -57,3 +57,24 @@ def event(agent: str, status: str, detail: str) -> AgentEvent:
         detail=detail,
         timestamp=datetime.now(UTC).isoformat(),
     )
+
+
+def initial_state(raw_protocol_text: str, source_filename: str) -> ScreenerState:
+    """Build the fresh state a screening starts from.
+
+    The graph's first checkpoint is written from this when a run streams, so
+    it is rebuilt from the durable store (not held in process memory) — a
+    restart between upload and stream loses nothing.
+    """
+    return ScreenerState(
+        raw_protocol_text=raw_protocol_text,
+        source_filename=source_filename,
+        parsed_criteria=None,
+        compliance_passed=False,
+        critic_feedback=None,
+        parse_attempts=0,
+        compliance_findings=[],
+        matched_patients=[],
+        events=[],
+        current_step="routing",
+    )

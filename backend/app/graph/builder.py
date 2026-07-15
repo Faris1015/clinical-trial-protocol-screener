@@ -10,7 +10,7 @@ import time
 from collections.abc import Callable
 from typing import TypeVar, cast
 
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
@@ -75,7 +75,7 @@ def human_escalation_node(state: ScreenerState) -> dict:
     }
 
 
-def build_graph() -> CompiledStateGraph:
+def build_graph(checkpointer: BaseCheckpointSaver) -> CompiledStateGraph:
     g = StateGraph(ScreenerState)
     g.add_node("router", _instrument("router", router_node))
     g.add_node("parser", _instrument("parser", parser_node))
@@ -100,7 +100,4 @@ def build_graph() -> CompiledStateGraph:
     g.add_edge("matcher", END)
     g.add_edge("human_escalation", END)
 
-    return g.compile(checkpointer=MemorySaver(), interrupt_before=["matcher"])
-
-
-graph = build_graph()
+    return g.compile(checkpointer=checkpointer, interrupt_before=["matcher"])
