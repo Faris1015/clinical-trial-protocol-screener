@@ -12,11 +12,13 @@ from typing import Any
 
 from langgraph.checkpoint.memory import MemorySaver
 
+import app.graph.nodes.matcher as matcher_mod
 import app.graph.nodes.parser as parser_mod
 from app.config import get_settings
 from app.graph.builder import build_graph
 from app.graph.state import initial_state
 from tests.fakes import (
+    FAKE_PATIENTS,
     NON_PROTOCOL_TEXT,
     PROTOCOL_TEXT,
     FakeChatModel,
@@ -119,6 +121,7 @@ async def test_happy_path_pauses_then_resumes_through_matcher(monkeypatch):
     """A clean extraction pauses at the gate; resuming runs the real Matcher
     against the bundled synthetic EHR and completes."""
     graph, fake = _graph_with_llm(monkeypatch, [good_criteria()])
+    monkeypatch.setattr(matcher_mod, "load_patients", lambda: FAKE_PATIENTS)
     config = _config("happy")
 
     snapshot = await _run_to_pause(graph, "happy")

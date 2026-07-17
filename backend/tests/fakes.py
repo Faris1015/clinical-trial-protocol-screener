@@ -38,6 +38,37 @@ PROTOCOL_TEXT = (
 # Fails the Router: too short and no eligibility section.
 NON_PROTOCOL_TEXT = "Minutes from the weekly logistics sync. Coffee supplies are low."
 
+# Small synthetic EHR for tests that resume through the *real* Matcher. The
+# bundled app/data/patients.json is a generated, git-ignored artifact (absent in
+# CI), so tests must inject their own patients rather than read it — every one
+# here satisfies `good_criteria` (age >= 18), so a screening yields matches.
+FAKE_PATIENTS = [
+    {
+        "id": "PT-1",
+        "name": "Ann",
+        "labs": {"age": 30},
+        "diagnoses": [],
+        "medications": [],
+        "history": [],
+    },
+    {
+        "id": "PT-2",
+        "name": "Ben",
+        "labs": {"age": 52},
+        "diagnoses": [],
+        "medications": [],
+        "history": [],
+    },
+    {
+        "id": "PT-3",
+        "name": "Cai",
+        "labs": {"age": 71},
+        "diagnoses": [],
+        "medications": [],
+        "history": [],
+    },
+]
+
 
 def good_criteria(title: str = "Passing Trial") -> CriteriaSchema:
     """An extraction the deterministic Critic accepts (no blocking findings)."""

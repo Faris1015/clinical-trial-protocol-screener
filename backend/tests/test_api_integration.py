@@ -13,9 +13,10 @@ import json
 
 from httpx import ASGITransport, AsyncClient
 
+import app.graph.nodes.matcher as matcher_mod
 import app.graph.nodes.parser as parser_mod
 import app.main as main
-from tests.fakes import PROTOCOL_TEXT, FakeChatModel, good_criteria
+from tests.fakes import FAKE_PATIENTS, PROTOCOL_TEXT, FakeChatModel, good_criteria
 
 
 def _sse_frames(lines: list[str]) -> list[dict]:
@@ -24,6 +25,9 @@ def _sse_frames(lines: list[str]) -> list[dict]:
 
 async def test_upload_stream_interrupt_approve_happy_path(monkeypatch):
     monkeypatch.setattr(parser_mod, "get_llm", lambda: FakeChatModel([good_criteria()]))
+    # The real Matcher runs on /approve; feed it an in-test EHR (patients.json is
+    # a generated, git-ignored artifact, absent in CI).
+    monkeypatch.setattr(matcher_mod, "load_patients", lambda: FAKE_PATIENTS)
 
     async with main.lifespan(main.app):
         transport = ASGITransport(app=main.app)
