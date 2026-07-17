@@ -1,0 +1,12 @@
+{
+  "_comment": "Provenance for every eval protocol. `origin` is 'curated' (written for this repo, modeled on real criteria, kept inside the EhrAttribute vocabulary) or 'clinicaltrials.gov' (verbatim eligibility section from a public NCT record). Real sections are hand-labeled under the convention documented in README.md: in-vocabulary numerics -> quantitative; concrete medical terms -> categorical; medical-but-unrepresentable criteria (out-of-vocab numerics, vague, compound OR-clauses) -> unparseable; purely administrative/logistical/temporal criteria -> omitted.",
+  "01_nsclc_osimertinib": {"origin": "curated"},
+  "02_t2dm_cardio": {"origin": "curated"},
+  "03_hfref": {"origin": "curated"},
+  "04_ckd": {"origin": "curated"},
+  "05_hypertension": {"origin": "curated"},
+  "nct03521154_nsclc": {"origin": "clinicaltrials.gov", "nct": "NCT03521154", "url": "https://clinicaltrials.gov/study/NCT03521154", "accessed": "2026-07-17"},
+  "nct07433192_t2dm": {"origin": "clinicaltrials.gov", "nct": "NCT07433192", "url": "https://clinicaltrials.gov/study/NCT07433192", "accessed": "2026-07-17"},
+  "nct06278844_hfref": {"origin": "clinicaltrials.gov", "nct": "NCT06278844", "url": "https://clinicaltrials.gov/study/NCT06278844", "accessed": "2026-07-17"},
+  "nct06224153_ckd": {"origin": "clinicaltrials.gov", "nct": "NCT06224153", "url": "https://clinicaltrials.gov/study/NCT06224153", "accessed": "2026-07-17"}
+}

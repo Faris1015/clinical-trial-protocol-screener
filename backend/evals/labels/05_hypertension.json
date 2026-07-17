@@ -1,0 +1,16 @@
+{
+  "trial_title": "Phase III study of a fixed-dose combination antihypertensive in stage 2 hypertension",
+  "inclusion_quantitative": [
+    {"attribute": "age", "operator": ">=", "value": 18, "value_high": null, "unit": "years", "source_text": "Age 18 years or older."},
+    {"attribute": "systolic_bp", "operator": ">=", "value": 140, "value_high": null, "unit": "mmHg", "source_text": "Systolic blood pressure of 140 mmHg or higher."},
+    {"attribute": "diastolic_bp", "operator": ">=", "value": 90, "value_high": null, "unit": "mmHg", "source_text": "Diastolic blood pressure of 90 mmHg or higher."},
+    {"attribute": "bmi", "operator": "<=", "value": 40, "value_high": null, "unit": "kg/m2", "source_text": "Body mass index of 40 kg/m2 or less."}
+  ],
+  "inclusion_categorical": [],
+  "exclusion_quantitative": [],
+  "exclusion_categorical": [
+    {"category": "condition", "value": "secondary hypertension", "negated": false, "source_text": "Secondary hypertension."},
+    {"category": "condition", "value": "pregnant or breastfeeding", "negated": false, "source_text": "Currently pregnant or breastfeeding."}
+  ],
+  "unparseable": []
+}

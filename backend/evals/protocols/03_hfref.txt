@@ -1,0 +1,12 @@
+A Phase II study of a novel agent in patients with heart failure with reduced
+ejection fraction.
+
+Inclusion Criteria:
+1. Age 21 years or older.
+2. Chronic heart failure diagnosis for at least 6 months.
+3. Left ventricular ejection fraction of 40% or less.
+4. Systolic blood pressure of at least 100 mmHg.
+
+Exclusion Criteria:
+1. Systolic blood pressure greater than 180 mmHg.
+2. Adequate hepatic function is required, per investigator judgment.

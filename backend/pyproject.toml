@@ -96,8 +96,13 @@ disallow_untyped_defs = false
 # `auto` lets async test functions run without a per-test @pytest.mark.asyncio.
 asyncio_mode = "auto"
 
+[tool.coverage.run]
+# The seeded synthetic-EHR generator is a one-off data script, not part of the
+# request path — exercising it would test Faker, not our logic (#9).
+omit = ["app/data/generate_ehr.py"]
+
 [tool.coverage.report]
 # Single source of truth for the coverage floor — CI runs `pytest --cov` and
-# picks this up, so raising the gate (see #9) is a one-line change here, not
-# an edit to the workflow. Baseline is ~36%; ratchet up as tests land.
-fail_under = 35
+# picks this up, so changing the gate is a one-line edit here, not a workflow
+# change. Raised to 80 in #9 once the integration suite landed.
+fail_under = 80

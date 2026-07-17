@@ -1,0 +1,11 @@
+A Phase III study of a renoprotective agent in adults with chronic kidney
+disease.
+
+Inclusion Criteria:
+1. Age 18 years or older.
+2. Estimated glomerular filtration rate between 25 and 75 mL/min/1.73m2.
+3. Serum creatinine of 3.0 mg/dL or less.
+
+Exclusion Criteria:
+1. Diagnosis of polycystic kidney disease.
+2. Received a kidney transplant.

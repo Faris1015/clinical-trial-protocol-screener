@@ -1,0 +1,12 @@
+A Phase III study of a fixed-dose combination antihypertensive in adults with
+stage 2 hypertension.
+
+Inclusion Criteria:
+1. Age 18 years or older.
+2. Systolic blood pressure of 140 mmHg or higher.
+3. Diastolic blood pressure of 90 mmHg or higher.
+4. Body mass index of 40 kg/m2 or less.
+
+Exclusion Criteria:
+1. Secondary hypertension.
+2. Currently pregnant or breastfeeding.

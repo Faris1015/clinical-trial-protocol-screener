@@ -1,0 +1,18 @@
+{
+  "trial_title": "Phase II study in heart failure with reduced ejection fraction",
+  "inclusion_quantitative": [
+    {"attribute": "age", "operator": ">=", "value": 21, "value_high": null, "unit": "years", "source_text": "Age 21 years or older."},
+    {"attribute": "ejection_fraction", "operator": "<=", "value": 40, "value_high": null, "unit": "%", "source_text": "Left ventricular ejection fraction of 40% or less."},
+    {"attribute": "systolic_bp", "operator": ">=", "value": 100, "value_high": null, "unit": "mmHg", "source_text": "Systolic blood pressure of at least 100 mmHg."}
+  ],
+  "inclusion_categorical": [
+    {"category": "diagnosis", "value": "chronic heart failure", "negated": false, "source_text": "Chronic heart failure diagnosis for at least 6 months."}
+  ],
+  "exclusion_quantitative": [
+    {"attribute": "systolic_bp", "operator": ">", "value": 180, "value_high": null, "unit": "mmHg", "source_text": "Systolic blood pressure greater than 180 mmHg."}
+  ],
+  "exclusion_categorical": [],
+  "unparseable": [
+    "Adequate hepatic function is required, per investigator judgment."
+  ]
+}

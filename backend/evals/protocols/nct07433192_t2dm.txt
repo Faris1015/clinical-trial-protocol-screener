@@ -1,0 +1,24 @@
+Inclusion Criteria:
+
+* Men and women aged 18 years and older.
+* Patients with type 2 diabetes.
+* Written informed consent of the patient to participate in the study.
+* No conditions that require emergency medical aid.
+* Treatment with luseogliflozin started 7 to 30 days prior to the inclusion visit as part of routine clinical practice and in accordance with the SmPC approved in the Russian Federation.
+* Presence of data on the parameters of interest (HbA1c, eGFR, BP, body weight), dated no later than 15 days from the date the treatment with luseogliflozin was started
+
+Exclusion Criteria:
+
+* Patients cannot be included in this study if they meet at least one of the following exclusion criteria:
+* Known hypersensitivity to luseogliflozin or other components of Lusefi®.
+* Type 1 diabetes.
+* Decompensated type 2 diabetes.
+* Pregnancy, breastfeeding, or planned pregnancy during the study and at least two months after the study.
+* Severe renal failure (eGFR <30 mL/min/1.73 m2), end-stage chronic kidney disease (CKD) or dialysis, as the treatment is predicted to be ineffective in this population of patients.
+* Diabetic ketoacidosis, diabetic coma or precoma.
+* Severe infections, pre- and postoperative period, or severe injury.
+* Any suspected or confirmed malignant neoplasm, including a history of malignancy within ≤5 years prior to screening, excluding successfully treated basal cell carcinoma and squamous cell carcinoma of the skin or in situ cervical cancer.
+* Urinary tract infection (confirmed or suspected).
+* Other concomitant disorders considered by the investigator to affect the natural progression of the disease and significantly impact the treatment results.
+* Predictable unwillingness of the patient to adhere to the treatment regimen and/or cooperate with the investigator.
+* Participation of the patient in another clinical study within 3 months (6 months for biological medicinal products) prior to the inclusion visit or during this study.

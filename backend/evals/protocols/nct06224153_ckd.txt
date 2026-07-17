@@ -1,0 +1,17 @@
+Inclusion Criteria:
+
+* Patient at least 18 years of age,
+* Patient capable of understanding the study and having given informed non-opposition,
+* Patient with stage 4 or 5 CKD,
+* Patient included in the MRC pathway,
+* Patient motivated by a hypo-protein diet,
+* Patient able to use a computer/smartphone/tablet with Internet access.
+
+Exclusion Criteria:
+
+* Difficulty reading or understanding the French language,
+* Patient with ongoing cancer,
+* Patient undernourished or at risk of undernutrition (based on weight loss and albumin measurement from last blood test),
+* Persons covered by articles L. 1121-5 to L. 1121-8 of the French Public Health Code (minors, adults under guardianship or trusteeship, patients deprived of their liberty, pregnant or breast-feeding women).
+* Dialysis patient
+* Patient who underwent major surgery less than 3 months ago.

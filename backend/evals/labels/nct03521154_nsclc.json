@@ -1,0 +1,26 @@
+{
+  "trial_title": "Osimertinib following chemoradiation in Stage III unresectable NSCLC (LAURA)",
+  "inclusion_quantitative": [
+    {"attribute": "age", "operator": ">=", "value": 18, "value_high": null, "unit": "years", "source_text": "Male or female aged at least 18 years."},
+    {"attribute": "ecog", "operator": "<=", "value": 1, "value_high": null, "unit": "score", "source_text": "World Health Organization (WHO) performance status of 0 or 1."}
+  ],
+  "inclusion_categorical": [
+    {"category": "diagnosis", "value": "non-small cell lung cancer", "negated": false, "source_text": "Patients with histologically documented NSCLC of predominantly non-squamous Pathology who present with locally advanced, unresectable (Stage III) disease"},
+    {"category": "biomarker", "value": "EGFR mutation (Ex19del or L858R)", "negated": false, "source_text": "The tumor harbours one of the two common EGFR mutations known to be associated with EGFR-TKI sensitivity (Ex19del, L858R)"},
+    {"category": "prior_treatment", "value": "platinum-based chemoradiation", "negated": false, "source_text": "Patients must have received either concurrent chemoradiation or sequential chemoradiation including at least 2 cycles of platinum based chemotherapy"}
+  ],
+  "exclusion_quantitative": [],
+  "exclusion_categorical": [
+    {"category": "diagnosis", "value": "mixed small cell and non-small cell lung cancer", "negated": false, "source_text": "Mixed small cell and non-small cell lung cancer histology"},
+    {"category": "condition", "value": "interstitial lung disease", "negated": false, "source_text": "History of interstitial lung disease (ILD) prior to chemoradiation"},
+    {"category": "prior_treatment", "value": "EGFR-TKI therapy", "negated": false, "source_text": "Prior treatment with EGFR-TKI therapy"},
+    {"category": "condition", "value": "history of other malignancy", "negated": false, "source_text": "History of other malignancies, except: adequately treated non-melanoma skin cancer or lentigo maligna"},
+    {"category": "condition", "value": "active infection with hepatitis B, hepatitis C, or HIV", "negated": false, "source_text": "active infection including hepatitis B, hepatitis C and human immunodeficiency virus (HIV)"}
+  ],
+  "unparseable": [
+    "Life expectancy >12 weeks at Day 1.",
+    "Inadequate bone marrow reserve or organ function",
+    "Any unresolved toxicity Common Terminology Criteria for Adverse Events (CTCAE) > Grade 2 from the prior chemoradiation therapy",
+    "Mean resting corrected QT interval (QTc) >470 msec, obtained from 3 ECGs"
+  ]
+}

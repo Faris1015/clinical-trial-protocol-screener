@@ -1,0 +1,14 @@
+A Phase III, randomized study of osimertinib in patients with EGFR-mutated
+non-small cell lung cancer.
+
+Inclusion Criteria:
+1. Age 18 years or older at the time of informed consent.
+2. Histologically confirmed non-small cell lung cancer.
+3. Documented EGFR exon 19 deletion or L858R substitution mutation.
+4. ECOG performance status of 0 or 1.
+5. Absolute neutrophil count greater than or equal to 1.5 x10^9/L.
+6. Platelet count greater than or equal to 100 x10^9/L.
+
+Exclusion Criteria:
+1. Prior treatment with any EGFR tyrosine kinase inhibitor.
+2. Symptomatic central nervous system metastases.

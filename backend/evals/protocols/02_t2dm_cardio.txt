@@ -1,0 +1,12 @@
+A Phase IV cardiovascular outcomes trial of an SGLT2 inhibitor in adults with
+type 2 diabetes mellitus.
+
+Inclusion Criteria:
+1. Age between 40 and 80 years, inclusive.
+2. Diagnosis of type 2 diabetes mellitus.
+3. Glycated hemoglobin (HbA1c) of 7.0% or higher.
+4. Body mass index of 25 kg/m2 or greater.
+
+Exclusion Criteria:
+1. Estimated glomerular filtration rate below 30 mL/min/1.73m2.
+2. Current treatment with an SGLT2 inhibitor.

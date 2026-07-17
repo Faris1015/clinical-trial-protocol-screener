@@ -1,0 +1,17 @@
+{
+  "trial_title": "Conduction system pacing in heart failure without a compelling CRT indication",
+  "inclusion_quantitative": [],
+  "inclusion_categorical": [
+    {"category": "diagnosis", "value": "heart failure", "negated": false, "source_text": "Patients with heart failure as defined by European Society of Cardiology guidelines"}
+  ],
+  "exclusion_quantitative": [
+    {"attribute": "age", "operator": "<", "value": 18, "value_high": null, "unit": "years", "source_text": "Age under 18 years old"},
+    {"attribute": "egfr", "operator": "<=", "value": 20, "value_high": null, "unit": "mL/min/1.73m2", "source_text": "Severe chronic kidney disease (eGFR ≤20 mL/kg/min or dialysis)"}
+  ],
+  "exclusion_categorical": [
+    {"category": "condition", "value": "pregnancy", "negated": false, "source_text": "Pregnancy"}
+  ],
+  "unparseable": [
+    "AND LVEF <50% OR LVEF ≥50% and objective evidence of cardiac structural and/or functional abnormalities consistent with the presence of LV diastolic dysfunction/raised filling pressures"
+  ]
+}

@@ -194,6 +194,95 @@ files:
 pip install pre-commit && pre-commit install
 ```
 
+### Testing
+
+The backend suite runs fully offline in seconds — the LLM is faked, so there is
+no network or GPU dependency and CI stays deterministic. Coverage is enforced by
+a gate in [`pyproject.toml`](backend/pyproject.toml)
+(`[tool.coverage.report] fail_under = 80`, the seeded EHR generator omitted) so
+the floor is one source of truth for both `make test` and CI.
+
+- **Unit** — Matcher boundaries, deterministic Critic rules, SSE framing, retry
+  policy, data-store guards (each pure component tested in isolation).
+- **Service** — the screening use-cases (create/stream/approve/state) driven
+  directly against an in-memory store with fake graphs.
+- **Integration** — the *real* compiled graph with an in-memory checkpointer and
+  a scripted `FakeChatModel`: the Critic→Parser loop converges, the escalation
+  cap trips after `MAX_PARSE_ATTEMPTS`, the Router reject edge is clean, and the
+  full upload → stream → interrupt → approve path runs over HTTP via
+  `httpx.AsyncClient` + `ASGITransport`.
+
+#### Parser golden-set eval
+
+Extraction quality (the one non-deterministic node) is gauged separately by a
+hand-labeled eval — real LLM, **run on demand / nightly, not in the CI gate**.
+See [`backend/evals/`](backend/evals/README.md).
+
+```bash
+make eval    # LLM_PROVIDER + ANTHROPIC_API_KEY honored from the environment
+```
+
+The set mixes two origins (69 labeled criteria across 9 protocols), scored
+separately and combined:
+
+- **Curated** (5 protocols, 31 criteria) — written for this repo inside the
+  `EhrAttribute` vocabulary; measures quality on the happy path.
+- **Real** (4 protocols, 38 criteria) — verbatim eligibility sections from
+  public ClinicalTrials.gov records (NCT ids + access dates in
+  [`sources.json`](backend/evals/sources.json)); deliberately messy, measures
+  robustness on production-shaped input.
+
+Matching is **semantic and functional** — it scores what changes a screening
+decision, not string form. The `category` enum is reported as a separate
+diagnostic because the Matcher never reads it. Real sections are hand-labeled
+under a documented convention (in-vocab numerics → quantitative; concrete terms
+→ categorical; unrepresentable medical criteria → `unparseable`; administrative
+text → omitted). Details in [`backend/evals/`](backend/evals/README.md).
+
+**Baseline** — `llama3.1:8b` via Ollama (`make eval`; local 8B model, no
+fine-tuning). The two origins are read differently, on purpose:
+
+*Curated set — labels are exhaustive, so precision **and** recall are both
+meaningful:*
+
+| Criterion type | Gold | Precision | Recall |
+|---|---|---|---|
+| inclusion_quantitative | 17 | 0.67 | 0.71 |
+| inclusion_categorical | 4 | 0.80 | 1.00 |
+| exclusion_quantitative | 2 | 1.00 | 1.00 |
+| exclusion_categorical | 7 | 0.22 | 0.29 |
+| unparseable | 1 | 1.00 | 1.00 |
+| **overall** | **31** | **0.60** | **0.68** |
+
+*Real set (ClinicalTrials.gov) — labels are a curated subset, so **read recall**;
+precision is a confounded floor (the model is charged a false positive for every
+real criterion we deliberately omitted — e.g. 21 administrative items it dumped
+into `unparseable`), not a fair metric:*
+
+| Criterion type | Gold | Recall |
+|---|---|---|
+| inclusion_quantitative | 4 | 0.25 |
+| inclusion_categorical | 7 | 0.29 |
+| exclusion_quantitative | 3 | 0.33 |
+| exclusion_categorical | 16 | 0.06 |
+| unparseable | 8 | 0.00 |
+| **overall** | **38** | **0.13** |
+
+Category-label accuracy (diagnostic, not in P/R): **0.78** (7/9 matched
+categoricals).
+
+**Reading.** On clean, in-vocabulary input the 8B model is dependable at exactly
+what the deterministic Critic leans on — numeric thresholds (`exclusion_quantitative`
+1.00/1.00) and routing vague criteria to `unparseable`. Its weak spot is
+categorical exclusions (over-extraction + inclusion/exclusion bucket confusion,
+not category mislabeling). On raw ClinicalTrials.gov text recall collapses to
+~0.13: a small local model under-extracts the criteria that matter from long,
+messy protocols. That gap — clean vs. real — is the headline finding, and the
+concrete case for a larger model and the LLM semantic-review layer the Critic
+currently stubs (`run_llm_semantic_review`). Numbers move with the model; treat
+them as a snapshot, not a contract. Reproduce with `make eval` (prints curated,
+real, and combined tables).
+
 ## Project structure
 
 ```
