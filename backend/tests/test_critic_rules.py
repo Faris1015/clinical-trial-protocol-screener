@@ -132,3 +132,20 @@ def test_pregnancy_keyword_without_criterion_rejected():
     crit = _criteria()
     findings = run_deterministic_checks(crit, "women of childbearing potential", RULES)
     assert any(f["rule_id"] == "PREG-001" for f in findings)
+
+
+def test_pregnancy_criterion_with_wrong_category_still_covers():
+    """PREG-001 verifies the pregnancy exclusion was captured, not that the model
+    tagged it category='condition' — a weak model may mislabel it as biomarker."""
+    crit = _criteria(
+        exclusion_categorical=[
+            {
+                "category": "biomarker",  # mislabeled, but clearly about pregnancy
+                "value": "pregnant or breastfeeding",
+                "negated": False,
+                "source_text": "Women of childbearing potential who are pregnant or breastfeeding.",
+            }
+        ]
+    )
+    findings = run_deterministic_checks(crit, "women of childbearing potential", RULES)
+    assert not any(f["rule_id"] == "PREG-001" for f in findings)

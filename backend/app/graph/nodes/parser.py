@@ -17,17 +17,23 @@ from pydantic import ValidationError
 from app.exceptions import LLMUnavailableError
 from app.graph.state import ScreenerState, event
 from app.logging_config import get_logger
-from app.schemas.criteria import CriteriaSchema
+from app.schemas.criteria import CategoricalCriterion, CriteriaSchema
 from app.services.llm import get_llm, invoke_with_retry
 
 log = get_logger("parser")
 
 PARSER_SYSTEM = """You are a clinical protocol extraction engine. Extract eligibility \
 criteria into the exact schema provided. Rules:
-1. Every numeric threshold MUST become a QuantitativeCriterion with operator and unit.
-2. Never invent values. If a criterion is vague (e.g. "adequate organ function" with no \
-numbers), put its verbatim text in `unparseable`.
-3. `source_text` must be copied verbatim from the protocol.
+1. Every numeric threshold MUST become a QuantitativeCriterion with operator and unit. \
+Never invent a number — if a criterion has no number, it is NOT quantitative (do not emit \
+value=0 or a placeholder).
+2. A criterion naming a diagnosis, biomarker, prior treatment, or condition (e.g. \
+"Diagnosis of type 2 diabetes mellitus", "EGFR exon 19 deletion") is a CategoricalCriterion \
+with the matching category — even though it has no number. `unparseable` is ONLY for \
+criteria that imply a numeric threshold but state none (e.g. "adequate organ function"); \
+never put a diagnosis or a plainly-checkable term there.
+3. `source_text` must be copied verbatim from the protocol. Extract ONLY from the protocol \
+text; never copy a reviewer's revision feedback into any field.
 4. Exclusion criteria describing a required ABSENCE go in exclusion lists, not inclusion \
 with negated=true.
 5. Extract lab thresholds as the plain clinical number, never the scientific-notation \
@@ -60,6 +66,37 @@ def _extract_criteria(structured_llm: Runnable, prompt: str) -> CriteriaSchema:
         return _validate(invoke_with_retry(structured_llm, repair))
 
 
+def _dedupe_categoricals(criteria: CriteriaSchema) -> CriteriaSchema:
+    """Clean up redundant categorical extractions before they reach the Matcher.
+
+    A weak model sometimes emits the same term in both an inclusion and an
+    exclusion list (e.g. a GLP-1 agonist as a negated inclusion AND an
+    exclusion — the same "must not have" meaning twice), repeats a term, or
+    emits an empty-value criterion. Drop the cross-list duplicate from the
+    inclusion side (the exclusion list is the term's natural home), collapse
+    intra-list repeats, and discard empty values.
+    """
+
+    def _key(c: CategoricalCriterion) -> str:
+        return c.value.strip().lower()
+
+    def _clean(items: list[CategoricalCriterion], drop: set[str]) -> list[CategoricalCriterion]:
+        seen: set[str] = set()
+        out: list[CategoricalCriterion] = []
+        for c in items:
+            k = _key(c)
+            if not k or k in drop or k in seen:
+                continue
+            seen.add(k)
+            out.append(c)
+        return out
+
+    exclusion_keys = {_key(c) for c in criteria.exclusion_categorical if _key(c)}
+    criteria.inclusion_categorical = _clean(criteria.inclusion_categorical, exclusion_keys)
+    criteria.exclusion_categorical = _clean(criteria.exclusion_categorical, set())
+    return criteria
+
+
 def _failed(detail: str) -> dict:
     return {
         "current_step": "failed",
@@ -80,7 +117,9 @@ def parser_node(state: ScreenerState) -> dict:
             "A compliance reviewer rejected your previous extraction:\n"
             f"{state['critic_feedback']}\n"
             f"Your previous extraction was:\n{state['parsed_criteria']}\n"
-            "Produce a corrected extraction addressing every point."
+            "Produce a corrected extraction addressing every point. Re-extract from the "
+            "protocol text above; the feedback is guidance only — never copy its wording "
+            "into source_text, unparseable, or any other field."
         )
 
     try:
@@ -95,6 +134,7 @@ def parser_node(state: ScreenerState) -> dict:
             "screening aborted."
         )
 
+    result = _dedupe_categoricals(result)
     n_inc = len(result.inclusion_quantitative) + len(result.inclusion_categorical)
     n_exc = len(result.exclusion_quantitative) + len(result.exclusion_categorical)
     log.info(
