@@ -24,6 +24,21 @@ jobs:
           python-version: "3.11"
           cache: pip
           cache-dependency-path: backend/pyproject.toml
+      - name: Lock drift check (requirements.lock ⇄ pyproject.toml)
+        # The Docker image installs from requirements.lock, but this job installs
+        # from pyproject.toml — so a lock that has drifted out of sync (e.g. a
+        # newly-added dep never compiled in) stays invisible to the test suite.
+        # That gap shipped the aiosqlite/lockfile startup crash. Regenerate the
+        # lock and fail on any diff. Reproducible because: Python 3.11 (matching
+        # the runtime image), pinned pip-tools, and no --upgrade (existing pins
+        # are preserved, so this only reacts to real pyproject changes).
+        run: |
+          pip install pip-tools==7.5.3
+          pip-compile --quiet --output-file=requirements.lock --strip-extras pyproject.toml
+          if ! git diff --exit-code requirements.lock; then
+            echo "::error file=backend/requirements.lock::requirements.lock is out of sync with pyproject.toml. Regenerate: cd backend && pip-compile --output-file=requirements.lock --strip-extras pyproject.toml"
+            exit 1
+          fi
       - name: Install
         run: pip install -e ".[dev]"
       - name: Lint (ruff)

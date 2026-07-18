@@ -41,6 +41,27 @@ Requires [Ollama](https://ollama.com) running locally with
 `LLM_PROVIDER=anthropic`. Copy `backend/.env.example` to `backend/.env` for the
 authoritative list of configuration variables.
 
+### Changing backend dependencies
+
+Add or bump deps in `backend/pyproject.toml`, then regenerate the pinned lock
+the Docker image builds from:
+
+```bash
+cd backend
+pip-compile --output-file=requirements.lock --strip-extras pyproject.toml
+```
+
+Run this on **Python 3.11** — the same version as the runtime image (see the
+`Dockerfile`). CI regenerates the lock on 3.11 and fails if it differs from the
+committed one, so a lock produced on another Python version will be rejected. If
+you don't have 3.11 handy, generate it in a container:
+
+```bash
+docker run --rm -v "$PWD":/w -w /w python:3.11-slim \
+  sh -c "pip install pip-tools==7.5.3 && \
+         pip-compile --output-file=requirements.lock --strip-extras pyproject.toml"
+```
+
 ### Frontend
 
 ```bash
