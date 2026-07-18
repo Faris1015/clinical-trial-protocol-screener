@@ -7,14 +7,40 @@ structured feedback; after MAX_PARSE_ATTEMPTS (Settings) the graph escalates
 to a human instead of looping forever.
 """
 
+import json
+
 import yaml
+from langchain_core.exceptions import OutputParserException
+from pydantic import ValidationError
 
 from app.config import get_settings
-from app.exceptions import DataStoreError
+from app.exceptions import DataStoreError, LLMUnavailableError
 from app.graph.state import ScreenerState, event
 from app.logging_config import get_logger
+from app.schemas.review import SemanticReview
+from app.services.llm import get_llm, invoke_with_retry
 
 log = get_logger("critic")
+
+CRITIC_SEMANTIC_SYSTEM = """You are a regulatory compliance reviewer performing a \
+SECOND-PASS semantic audit of a structured extraction of a clinical trial protocol's \
+eligibility criteria. A deterministic rule engine has already run (numeric ranges, \
+required fields, vague-language checks) — do NOT repeat those. Focus only on issues \
+those rules cannot express:
+
+1. Internal contradictions between criteria — e.g. an inclusion lower age bound and an \
+exclusion upper age bound that overlap or conflict (an inclusion "age >= 18" alongside \
+an exclusion "age > 65" is an inconsistent way to state an age window and must be \
+flagged), the same value both included and excluded, or mutually exclusive requirements.
+2. Unit/attribute mismatches — a unit that does not belong to its attribute (e.g. eGFR \
+in mmHg, platelets in %, blood pressure in mL/min).
+3. Extraction completeness — an eligibility criterion clearly present in the protocol \
+text but absent from the structured extraction.
+
+Report ONLY genuine problems. Use severity "reject" for an issue that would corrupt \
+patient screening and must be fixed; use "warn" for a concern a human reviewer should \
+see but that need not block. If the extraction is sound, return an empty findings list. \
+Never invent criteria that are not in the protocol text."""
 
 
 def load_rules() -> list[dict]:
@@ -121,10 +147,54 @@ def run_deterministic_checks(criteria: dict, raw_text: str, rules: list[dict]) -
 
 
 def run_llm_semantic_review(state: ScreenerState) -> list[dict]:
-    # TODO: LLM pass for contradictions deterministic rules can't express
-    # (inconsistent age bounds, units mismatched to attributes, criteria
-    # present in raw text but missing from the extraction).
-    return []
+    """Layer 2: LLM pass for contradictions the deterministic rules can't express.
+
+    Catches inconsistent bounds, units mismatched to attributes, and criteria
+    present in the raw text but missing from the extraction. Findings are stamped
+    `rule_id="LLM-SEM"` and merge into the same `compliance_findings` list.
+
+    This is a supplementary safety layer, so a degraded LLM never aborts a
+    screening: an unavailable backend yields a single non-blocking `warn`
+    (so the gap is visible in the UI, not silent), and malformed output is
+    dropped. The deterministic layer still stands on its own.
+    """
+    criteria = state["parsed_criteria"]
+    if criteria is None:
+        return []
+
+    structured = get_llm().with_structured_output(SemanticReview)
+    prompt = (
+        "ORIGINAL PROTOCOL TEXT:\n"
+        f"{state['raw_protocol_text']}\n\n"
+        "STRUCTURED EXTRACTION (JSON):\n"
+        f"{json.dumps(criteria, indent=2)}\n\n"
+        "Audit the extraction against the protocol and report any semantic issues."
+    )
+    messages = [("system", CRITIC_SEMANTIC_SYSTEM), ("user", prompt)]
+
+    try:
+        raw = invoke_with_retry(structured, messages)
+        review = raw if isinstance(raw, SemanticReview) else SemanticReview.model_validate(raw)
+    except LLMUnavailableError as exc:
+        log.warning("critic.semantic_review_unavailable", detail=str(exc))
+        return [
+            {
+                "rule_id": "LLM-SEM",
+                "severity": "warn",
+                "message": "Semantic review skipped — LLM backend unavailable; "
+                "deterministic compliance checks only.",
+            }
+        ]
+    except (ValidationError, OutputParserException) as exc:
+        log.warning("critic.semantic_review_invalid", error=type(exc).__name__)
+        return []
+
+    findings = [
+        {"rule_id": "LLM-SEM", "severity": f.severity, "message": f.message}
+        for f in review.findings
+    ]
+    log.info("critic.semantic_review", findings=len(findings))
+    return findings
 
 
 def critic_node(state: ScreenerState) -> dict:

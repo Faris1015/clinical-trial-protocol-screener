@@ -128,8 +128,10 @@ def durable_app(tmp_path, monkeypatch):
     no committed data files)."""
     monkeypatch.setattr(main, "settings", _sqlite_settings(tmp_path))
     monkeypatch.setattr("app.graph.nodes.parser.get_llm", lambda: _ScriptedLLM())
-    # Critic approves (its deterministic layer is exercised in test_critic_rules).
+    # Critic approves (its deterministic layer is exercised in test_critic_rules,
+    # its LLM layer in test_critic_semantic) — stub both so this test stays offline.
     monkeypatch.setattr("app.graph.nodes.critic.run_deterministic_checks", lambda *a, **k: [])
+    monkeypatch.setattr("app.graph.nodes.critic.run_llm_semantic_review", lambda _state: [])
 
     # A one-patient EHR the matcher can read after restart, kept out of the repo.
     patients = tmp_path / "patients.json"

@@ -13,6 +13,7 @@ import json
 
 from httpx import ASGITransport, AsyncClient
 
+import app.graph.nodes.critic as critic_mod
 import app.graph.nodes.matcher as matcher_mod
 import app.graph.nodes.parser as parser_mod
 import app.main as main
@@ -25,6 +26,7 @@ def _sse_frames(lines: list[str]) -> list[dict]:
 
 async def test_upload_stream_interrupt_approve_happy_path(monkeypatch):
     monkeypatch.setattr(parser_mod, "get_llm", lambda: FakeChatModel([good_criteria()]))
+    monkeypatch.setattr(critic_mod, "run_llm_semantic_review", lambda _state: [])
     # The real Matcher runs on /approve; feed it an in-test EHR (patients.json is
     # a generated, git-ignored artifact, absent in CI).
     monkeypatch.setattr(matcher_mod, "load_patients", lambda: FAKE_PATIENTS)
@@ -80,6 +82,7 @@ async def test_approve_before_streaming_is_conflict(monkeypatch):
     """Approving a screening that has not reached the gate is a clean 409, not a
     crash — the run was never streamed, so there is no interrupt to resume."""
     monkeypatch.setattr(parser_mod, "get_llm", lambda: FakeChatModel([good_criteria()]))
+    monkeypatch.setattr(critic_mod, "run_llm_semantic_review", lambda _state: [])
 
     async with main.lifespan(main.app):
         transport = ASGITransport(app=main.app)
