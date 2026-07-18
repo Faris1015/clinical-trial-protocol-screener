@@ -27,6 +27,24 @@
   min_plausible: 50
   max_plausible: 130
 
+# Blood-count thresholds are conventionally written "x 10^9/L"; a model that
+# multiplies the coefficient out (e.g. 100 x 10^9 -> 1e11) yields a threshold
+# no record can satisfy, silently excluding everyone. These bounds reject the
+# scaled value and loop the Parser back with the offending number.
+- id: PLT-001
+  attribute: platelets
+  description: "Platelet count threshold outside plausible clinical range (x10^9/L)"
+  check: range
+  min_plausible: 10
+  max_plausible: 1000
+
+- id: ANC-001
+  attribute: anc
+  description: "Absolute neutrophil count threshold outside plausible clinical range (x10^9/L)"
+  check: range
+  min_plausible: 0.1
+  max_plausible: 50
+
 - id: AGE-001
   attribute: age
   description: "Protocol must state an explicit lower age bound (cf. 21 CFR Part 50 pediatric protections)"

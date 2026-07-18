@@ -11,8 +11,8 @@ each `invoke()` replays the next one, and the last entry repeats so an
 "always-bad" run can loop until the graph escalates without running off the end.
 
 The criteria builders below produce a *good* extraction (passes the deterministic
-Critic) and a *bad* one (trips RENAL-001: a vague renal criterion with no numeric
-eGFR threshold), which is what drives the Critic→Parser loop in tests.
+Critic) and a *bad* one (trips HEPATIC-001: a vague organ-function criterion with
+no numeric threshold), which is what drives the Critic→Parser loop in tests.
 """
 
 from __future__ import annotations
@@ -92,8 +92,9 @@ def good_criteria(title: str = "Passing Trial") -> CriteriaSchema:
 
 
 def bad_criteria(title: str = "Failing Trial") -> CriteriaSchema:
-    """An extraction the Critic rejects: renal function left as vague language
-    (RENAL-001 requires a numeric eGFR threshold)."""
+    """An extraction the Critic rejects: organ function left as vague language
+    (HEPATIC-001 requires a numeric threshold). The vague sentence is copied
+    from PROTOCOL_TEXT so the rule's raw-text guard sees the keyword there."""
     return CriteriaSchema(
         trial_title=title,
         inclusion_quantitative=[
@@ -109,7 +110,7 @@ def bad_criteria(title: str = "Failing Trial") -> CriteriaSchema:
         inclusion_categorical=[],
         exclusion_quantitative=[],
         exclusion_categorical=[],
-        unparseable=["Adequate renal function."],
+        unparseable=["Adequate bone marrow and organ function per investigator assessment."],
     )
 
 
