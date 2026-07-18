@@ -103,7 +103,7 @@ NSCLC = [
     ("body",
      "1. Age >= 18 years at the time of consent.\n"
      "2. Histologically confirmed non-small cell lung cancer, stage IV.\n"
-     "3. Documented EGFR exon 19 deletion or L858R mutation.\n"
+     "3. Documented EGFR exon 19 deletion.\n"
      "4. ECOG performance status <= 1.\n"
      "5. Adequate renal function.\n"
      "6. Left ventricular ejection fraction >= 50%."),
