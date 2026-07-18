@@ -29,7 +29,11 @@ criteria into the exact schema provided. Rules:
 numbers), put its verbatim text in `unparseable`.
 3. `source_text` must be copied verbatim from the protocol.
 4. Exclusion criteria describing a required ABSENCE go in exclusion lists, not inclusion \
-with negated=true."""
+with negated=true.
+5. Extract lab thresholds as the plain clinical number, never the scientific-notation \
+expansion. A blood count written "N x 10^9/L" (platelets, ANC) has value N with unit \
+"10^9/L" — e.g. "100 x 10^9/L" is value=100 (NOT 100000000000), "1.5 x 10^9/L" is \
+value=1.5. Do not multiply the coefficient out."""
 
 
 def _validate(raw: object) -> CriteriaSchema:

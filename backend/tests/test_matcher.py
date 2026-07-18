@@ -118,3 +118,26 @@ def test_negated_categorical():
     )
     # Patient does not have multiple myeloma -> negated inclusion passes
     assert evaluate_patient(BASE_PATIENT, crit)["eligible"] is True
+
+
+def test_exclusion_categorical_ignores_negated_flag():
+    """Regression: an exclusion item with negated=True must not double-negate.
+
+    The exclusion list already means "must not have this"; honoring `negated`
+    on top of that once wrongly failed every patient who LACKS the term.
+    """
+    crit = _criteria(
+        exclusion_categorical=[
+            {
+                "category": "medication",
+                "value": "warfarin",
+                "negated": True,
+                "source_text": "Prior warfarin",
+            }
+        ]
+    )
+    # Patient is NOT on warfarin -> not excluded -> eligible
+    assert evaluate_patient(BASE_PATIENT, crit)["eligible"] is True
+    # Patient IS on warfarin -> excluded -> fails
+    on_warfarin = {**BASE_PATIENT, "medications": ["warfarin"]}
+    assert evaluate_patient(on_warfarin, crit)["eligible"] is False

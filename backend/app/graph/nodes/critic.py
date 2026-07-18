@@ -51,11 +51,16 @@ def run_deterministic_checks(criteria: dict, raw_text: str, rules: list[dict]) -
         check = rule["check"]
 
         if check == "must_be_quantitative":
+            # Only fire when the protocol ITSELF uses the vague language. Keying
+            # solely off `unparseable` lets a model that hallucinates, say,
+            # "organ function" into that list trigger a phantom rejection for a
+            # protocol that never mentions it (observed with small local models).
+            in_text = any(k in raw_text.lower() for k in rule["keywords"])
             in_unparseable = any(
                 any(k in u.lower() for k in rule["keywords"]) for u in criteria["unparseable"]
             )
             has_quant = any(c["attribute"] == rule["attribute"] for c in quantitative)
-            if in_unparseable and not has_quant:
+            if in_text and in_unparseable and not has_quant:
                 findings.append(
                     {
                         "rule_id": rule["id"],

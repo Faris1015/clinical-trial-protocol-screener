@@ -29,11 +29,21 @@ def _check_quantitative(patient: dict, criterion: dict) -> str:
     return "pass" if ok else "fail"
 
 
-def _check_categorical(patient: dict, criterion: dict) -> str:
+def _categorical_present(patient: dict, criterion: dict) -> bool:
+    """Whether the criterion's term appears anywhere in the patient's records."""
     haystack = " ".join(
         patient.get("diagnoses", []) + patient.get("medications", []) + patient.get("history", [])
     ).lower()
-    present = criterion["value"].lower() in haystack
+    return criterion["value"].lower() in haystack
+
+
+def _check_categorical(patient: dict, criterion: dict) -> str:
+    """Inclusion-side check: does the patient satisfy this categorical criterion?
+
+    `negated` ("patient must NOT have this") is an inclusion-side concept — see
+    the exclusion loop in evaluate_patient for why it is not honored there.
+    """
+    present = _categorical_present(patient, criterion)
     if criterion["negated"]:
         return "fail" if present else "pass"
     return "pass" if present else "fail"
@@ -59,13 +69,17 @@ def evaluate_patient(patient: dict, criteria: dict) -> dict:
                 "status": {"pass": "fail", "fail": "pass"}.get(status, status),
             }
         )
+    # Presence of an excluded term fails the patient. We match on presence and
+    # ignore the criterion's `negated` flag on purpose: the exclusion list
+    # already carries the "must not have" meaning, so also honoring `negated`
+    # here would double-negate — wrongly failing every patient who LACKS the
+    # excluded condition whenever the parser sets negated=True on an exclusion.
     for c in criteria["exclusion_categorical"]:
-        status = _check_categorical(patient, c)
         results.append(
             {
                 "criterion": c,
                 "kind": "exclusion",
-                "status": {"pass": "fail", "fail": "pass"}.get(status, status),
+                "status": "fail" if _categorical_present(patient, c) else "pass",
             }
         )
 

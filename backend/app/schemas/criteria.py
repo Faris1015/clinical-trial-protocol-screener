@@ -45,7 +45,11 @@ class CategoricalCriterion(BaseModel):
     value: str = Field(
         description="Normalized term, e.g. 'EGFR exon 19 deletion', 'prior platinum chemotherapy'"
     )
-    negated: bool = Field(description="True if the patient must NOT have this")
+    negated: bool = Field(
+        description="Inclusion-side only: True for an inclusion criterion the patient must NOT "
+        "meet (e.g. 'no active infection'). Leave False for exclusion-list items — the "
+        "exclusion list already means 'must not have this'."
+    )
     source_text: str
 
 
