@@ -59,9 +59,10 @@ def _norm(text: str) -> str:
 
 
 def _patient_terms(patient: dict) -> list[str]:
-    return (
-        patient.get("diagnoses", []) + patient.get("medications", []) + patient.get("history", [])
-    )
+    terms: list[str] = []
+    for field in ("diagnoses", "medications", "history"):
+        terms.extend(patient.get(field, []))
+    return terms
 
 
 def _fast_present(criterion_value: str, term: str) -> bool:
