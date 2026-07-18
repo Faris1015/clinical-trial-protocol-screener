@@ -12,6 +12,7 @@ from typing import Any
 
 from langgraph.checkpoint.memory import MemorySaver
 
+import app.graph.nodes.critic as critic_mod
 import app.graph.nodes.matcher as matcher_mod
 import app.graph.nodes.parser as parser_mod
 from app.config import get_settings
@@ -30,6 +31,9 @@ from tests.fakes import (
 def _graph_with_llm(monkeypatch, scripted: list) -> tuple[Any, FakeChatModel]:
     fake = FakeChatModel(scripted)
     monkeypatch.setattr(parser_mod, "get_llm", lambda: fake)
+    # The Critic's layer-2 LLM pass is exercised in test_critic_semantic; here we
+    # stub it so these tests drive the loop off the deterministic layer alone.
+    monkeypatch.setattr(critic_mod, "run_llm_semantic_review", lambda _state: [])
     graph = build_graph(MemorySaver())
     return graph, fake
 
