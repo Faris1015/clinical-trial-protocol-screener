@@ -8,6 +8,9 @@ on:
       - "**/Dockerfile*"
       - "docker-compose*.yml"
       - "backend/pyproject.toml"
+      # The image is built *from* the lock, so a lock-only change (e.g. a
+      # regenerated pin set) must re-run the container build + smoke test.
+      - "backend/requirements.lock"
       - "frontend/package-lock.json"
       - ".github/workflows/docker.yml"
   push:
@@ -41,5 +44,29 @@ jobs:
             echo "::error::backend image ${mb}MB exceeds the 300MB budget"
             exit 1
           fi
+      - name: Smoke-test backend boots and serves /health
+        # `docker build` above proves the image *builds*, but a missing runtime
+        # dependency or an unwritable DB path only surfaces at *startup*, which a
+        # build never exercises — exactly how the aiosqlite crash and the
+        # root-owned /app path reached a green CI. Boot the real compose service
+        # (--no-deps skips the ~4.7GB ollama pull; startup builds no LLM client)
+        # and probe /health. compose reuses the layer cache from the build above.
+        run: |
+          docker compose up -d --no-deps backend
+          ok=0
+          for _ in $(seq 1 30); do
+            if curl -fsS http://localhost:8000/health >/dev/null 2>&1; then
+              ok=1; break
+            fi
+            sleep 2
+          done
+          if [ "$ok" != 1 ]; then
+            echo "::error::backend did not become healthy within 60s"
+            docker compose logs backend
+            docker compose down -v
+            exit 1
+          fi
+          echo "backend healthy"
+          docker compose down -v
       - name: Build frontend image (no push)
         run: docker build -t screener-frontend frontend

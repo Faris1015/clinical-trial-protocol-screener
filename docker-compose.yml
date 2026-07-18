@@ -40,6 +40,10 @@ services:
     environment:
       - OLLAMA_BASE_URL=http://ollama:11434
       - PATIENTS_PATH=/data/patients.json
+      # Durable checkpointer + screening store DB. Must live on the writable
+      # /data volume — the image's /app is owned by root, so the default
+      # (/app/screenings.sqlite) is unwritable to the non-root appuser.
+      - SQLITE_PATH=/data/screenings.sqlite
       # One JSON object per log line for machine ingestion (see #5).
       - LOG_FORMAT=${LOG_FORMAT:-json}
       # The browser talks only to the frontend origin (nginx proxies /api), so
