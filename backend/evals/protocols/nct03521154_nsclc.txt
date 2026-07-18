@@ -1,0 +1,32 @@
+Inclusion Criteria
+
+1. Male or female aged at least 18 years.
+2. Patients with histologically documented NSCLC of predominantly non-squamous Pathology who present with locally advanced, unresectable (Stage III) disease (according to Version 8 of the International Association for the Study of Lung Cancer [IASLC] Staging Manual in Thoracic Oncology).
+3. The tumor harbours one of the two common EGFR mutations known to be associated with EGFR-TKI sensitivity (Ex19del, L858R), either alone or in combination with other EGFR mutations, assessed by cobas® EGFR Mutation Test v2 (Roche Diagnostics) or FoundationOne® test in a CLIA certified (USA sites) or an accredited local laboratory (sites outside of the USA) or by central testing (cobas® v2 only).
+4. Patients must have received either concurrent chemoradiation or sequential chemoradiation including at least 2 cycles of platinum based chemotherapy and a total dose of radiation of 60 Gy ±10% (54 to 66 Gy).
+5. Chemoradiation must be completed ≤6 weeks prior to randomization.
+6. Patients must not have had disease progression during or following definitive platinum-based, chemoradiation therapy.
+7. World Health Organization (WHO) performance status of 0 or 1.
+8. Life expectancy >12 weeks at Day 1.
+9. Female patients who are not abstinent (in line with the preferred and usual lifestyle choice) must be using adequate contraceptive measures, must not be breast feeding, and must have a negative pregnancy test prior to first dose of study drug; or female patients must have an evidence of non-childbearing potential.
+
+Exclusion Criteria
+
+1. Mixed small cell and non-small cell lung cancer histology
+2. History of interstitial lung disease (ILD) prior to chemoradiation
+3. Symptomatic pneumonitis following chemoradiation
+4. Any unresolved toxicity Common Terminology Criteria for Adverse Events (CTCAE) > Grade 2 from the prior chemoradiation therapy
+5. Any of the following cardiac criteria:
+
+   * Mean resting corrected QT interval (QTc) >470 msec, obtained from 3 ECGs
+   * Any clinically important abnormalities in rhythm, conduction, or morphology of resting ECG
+   * Patient with any factors that increase the risk of QTc prolongation or risk of arrhythmic events such as heart failure, hypokalaemia, congenital long QT syndrome, family history of long QT syndrome, or unexplained sudden death under 40 years of age in first-degree relatives or any concomitant medication known to prolong the QT interval and cause Torsades de Pointes
+6. Inadequate bone marrow reserve or organ function
+7. History of other malignancies, except: adequately treated non-melanoma skin cancer or lentigo maligna , curatively treated in-situ cancer, or other solid tumors curatively treated with no evidence of disease for > 5 years following the end of treatment and which, in the opinion of the treating physician, do not have a substantial risk of recurrence of the prior malignancy.
+8. Any evidence of severe or uncontrolled systemic diseases, including uncontrolled hypertension and active bleeding diatheses; or active infection including hepatitis B, hepatitis C and human immunodeficiency virus (HIV).
+9. Refractory nausea and vomiting, chronic gastrointestinal diseases, inability to swallow the formulated product, or previous significant bowel resection that would preclude adequate absorption of osimertinib
+10. Prior treatment with any prior chemotherapy, radiation therapy, immunotherapy or investigational agents for NSCLC outside of that received in the definitive setting for Stage III disease (chemotherapy and radiotherapy in SCRT and CCRT regimens is allowed for treatment of Stage III disease).
+11. Prior treatment with EGFR-TKI therapy
+12. Major surgery as defined by the investigator within 4 weeks of the first dose of study drug.
+13. Patients currently receiving (unable to stop use prior to receiving the first dose of study treatment) medications or herbal supplements known to be strong inducers of CYP3A4 (at least 3 weeks prior to receiving the first dose of study drug).
+14. Contraindication to MRI, including but not limited to, claustrophobia, pace makers, metal implants, intracranial surgical clips and metal foreign bodies

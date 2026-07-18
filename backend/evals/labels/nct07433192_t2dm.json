@@ -1,0 +1,26 @@
+{
+  "trial_title": "Luseogliflozin in patients with type 2 diabetes (POLUS)",
+  "inclusion_quantitative": [
+    {"attribute": "age", "operator": ">=", "value": 18, "value_high": null, "unit": "years", "source_text": "Men and women aged 18 years and older."}
+  ],
+  "inclusion_categorical": [
+    {"category": "diagnosis", "value": "type 2 diabetes", "negated": false, "source_text": "Patients with type 2 diabetes."},
+    {"category": "medication", "value": "luseogliflozin", "negated": false, "source_text": "Treatment with luseogliflozin started 7 to 30 days prior to the inclusion visit as part of routine clinical practice"}
+  ],
+  "exclusion_quantitative": [
+    {"attribute": "egfr", "operator": "<", "value": 30, "value_high": null, "unit": "mL/min/1.73m2", "source_text": "Severe renal failure (eGFR <30 mL/min/1.73 m2)"}
+  ],
+  "exclusion_categorical": [
+    {"category": "diagnosis", "value": "type 1 diabetes", "negated": false, "source_text": "Type 1 diabetes."},
+    {"category": "condition", "value": "decompensated type 2 diabetes", "negated": false, "source_text": "Decompensated type 2 diabetes."},
+    {"category": "condition", "value": "pregnancy or breastfeeding", "negated": false, "source_text": "Pregnancy, breastfeeding, or planned pregnancy during the study and at least two months after the study."},
+    {"category": "prior_treatment", "value": "dialysis", "negated": false, "source_text": "end-stage chronic kidney disease (CKD) or dialysis"},
+    {"category": "condition", "value": "diabetic ketoacidosis", "negated": false, "source_text": "Diabetic ketoacidosis, diabetic coma or precoma."},
+    {"category": "condition", "value": "malignant neoplasm", "negated": false, "source_text": "Any suspected or confirmed malignant neoplasm, including a history of malignancy within ≤5 years prior to screening"},
+    {"category": "condition", "value": "urinary tract infection", "negated": false, "source_text": "Urinary tract infection (confirmed or suspected)."}
+  ],
+  "unparseable": [
+    "Known hypersensitivity to luseogliflozin or other components of Lusefi®.",
+    "Severe infections, pre- and postoperative period, or severe injury."
+  ]
+}

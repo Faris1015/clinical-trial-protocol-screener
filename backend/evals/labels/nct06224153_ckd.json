@@ -1,0 +1,18 @@
+{
+  "trial_title": "Protein intake assessment in stage 4-5 chronic kidney disease",
+  "inclusion_quantitative": [
+    {"attribute": "age", "operator": ">=", "value": 18, "value_high": null, "unit": "years", "source_text": "Patient at least 18 years of age,"}
+  ],
+  "inclusion_categorical": [
+    {"category": "diagnosis", "value": "stage 4 or 5 chronic kidney disease", "negated": false, "source_text": "Patient with stage 4 or 5 CKD,"}
+  ],
+  "exclusion_quantitative": [],
+  "exclusion_categorical": [
+    {"category": "condition", "value": "cancer", "negated": false, "source_text": "Patient with ongoing cancer,"},
+    {"category": "condition", "value": "undernutrition", "negated": false, "source_text": "Patient undernourished or at risk of undernutrition (based on weight loss and albumin measurement from last blood test),"},
+    {"category": "prior_treatment", "value": "dialysis", "negated": false, "source_text": "Dialysis patient"}
+  ],
+  "unparseable": [
+    "Patient who underwent major surgery less than 3 months ago."
+  ]
+}

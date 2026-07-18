@@ -1,0 +1,18 @@
+{
+  "trial_title": "Phase IV cardiovascular outcomes trial of an SGLT2 inhibitor in type 2 diabetes mellitus",
+  "inclusion_quantitative": [
+    {"attribute": "age", "operator": "between", "value": 40, "value_high": 80, "unit": "years", "source_text": "Age between 40 and 80 years, inclusive."},
+    {"attribute": "hba1c", "operator": ">=", "value": 7.0, "value_high": null, "unit": "%", "source_text": "Glycated hemoglobin (HbA1c) of 7.0% or higher."},
+    {"attribute": "bmi", "operator": ">=", "value": 25, "value_high": null, "unit": "kg/m2", "source_text": "Body mass index of 25 kg/m2 or greater."}
+  ],
+  "inclusion_categorical": [
+    {"category": "diagnosis", "value": "type 2 diabetes mellitus", "negated": false, "source_text": "Diagnosis of type 2 diabetes mellitus."}
+  ],
+  "exclusion_quantitative": [
+    {"attribute": "egfr", "operator": "<", "value": 30, "value_high": null, "unit": "mL/min/1.73m2", "source_text": "Estimated glomerular filtration rate below 30 mL/min/1.73m2."}
+  ],
+  "exclusion_categorical": [
+    {"category": "medication", "value": "SGLT2 inhibitor", "negated": false, "source_text": "Current treatment with an SGLT2 inhibitor."}
+  ],
+  "unparseable": []
+}

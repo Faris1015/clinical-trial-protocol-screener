@@ -1,0 +1,18 @@
+Inclusion Criteria:
+
+Patients with heart failure as defined by European Society of Cardiology guidelines
+
+* Signs and/or symptoms of heart failure
+* AND LVEF <50% OR LVEF ≥50% and objective evidence of cardiac structural and/or functional abnormalities consistent with the presence of LV diastolic dysfunction/raised filling pressures
+* AND indication for cardiac pacing as defined by European Society of Cardiology guidelines
+
+Exclusion Criteria:
+
+* Age under 18 years old
+* Pregnancy
+* Inability to provide consent or to undergo follow-up
+* Class 1A indication for classical CRT as defined by European Society of Cardiology guidelines. Patients with a class 2A or higher indication for CRT can be included. However, patients with Class 1A indication for classical CRT but failure or suboptimal result of CS lead placement can be included.
+* Significant cardiac or extracardiac comorbidity precluding maximal exercise testing, examples: Recent (<4 weeks) decompensation of heart failure, angina pectoris class ≥2 , uncontrolled hypertension or arrhythmia , severe valvular heart disease, significant peripheral vascular disease, orthopaedic limitation ...
+* Comorbidity that may influence 6-month prognosis, examples:
+
+Severe chronic kidney disease (eGFR ≤20 mL/kg/min or dialysis) , severe chronic obstructive pulmonary disease (≥GOLD 3) , active malignancy ...

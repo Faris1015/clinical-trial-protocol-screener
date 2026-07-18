@@ -1,0 +1,19 @@
+{
+  "trial_title": "Phase III study of osimertinib in EGFR-mutated non-small cell lung cancer",
+  "inclusion_quantitative": [
+    {"attribute": "age", "operator": ">=", "value": 18, "value_high": null, "unit": "years", "source_text": "Age 18 years or older at the time of informed consent."},
+    {"attribute": "ecog", "operator": "<=", "value": 1, "value_high": null, "unit": "score", "source_text": "ECOG performance status of 0 or 1."},
+    {"attribute": "anc", "operator": ">=", "value": 1.5, "value_high": null, "unit": "x10^9/L", "source_text": "Absolute neutrophil count greater than or equal to 1.5 x10^9/L."},
+    {"attribute": "platelets", "operator": ">=", "value": 100, "value_high": null, "unit": "x10^9/L", "source_text": "Platelet count greater than or equal to 100 x10^9/L."}
+  ],
+  "inclusion_categorical": [
+    {"category": "diagnosis", "value": "non-small cell lung cancer", "negated": false, "source_text": "Histologically confirmed non-small cell lung cancer."},
+    {"category": "biomarker", "value": "EGFR exon 19 deletion or L858R", "negated": false, "source_text": "Documented EGFR exon 19 deletion or L858R substitution mutation."}
+  ],
+  "exclusion_quantitative": [],
+  "exclusion_categorical": [
+    {"category": "prior_treatment", "value": "EGFR tyrosine kinase inhibitor", "negated": false, "source_text": "Prior treatment with any EGFR tyrosine kinase inhibitor."},
+    {"category": "condition", "value": "symptomatic central nervous system metastases", "negated": false, "source_text": "Symptomatic central nervous system metastases."}
+  ],
+  "unparseable": []
+}

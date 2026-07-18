@@ -1,0 +1,15 @@
+{
+  "trial_title": "Phase III study of a renoprotective agent in chronic kidney disease",
+  "inclusion_quantitative": [
+    {"attribute": "age", "operator": ">=", "value": 18, "value_high": null, "unit": "years", "source_text": "Age 18 years or older."},
+    {"attribute": "egfr", "operator": "between", "value": 25, "value_high": 75, "unit": "mL/min/1.73m2", "source_text": "Estimated glomerular filtration rate between 25 and 75 mL/min/1.73m2."},
+    {"attribute": "creatinine", "operator": "<=", "value": 3.0, "value_high": null, "unit": "mg/dL", "source_text": "Serum creatinine of 3.0 mg/dL or less."}
+  ],
+  "inclusion_categorical": [],
+  "exclusion_quantitative": [],
+  "exclusion_categorical": [
+    {"category": "diagnosis", "value": "polycystic kidney disease", "negated": false, "source_text": "Diagnosis of polycystic kidney disease."},
+    {"category": "prior_treatment", "value": "kidney transplant", "negated": false, "source_text": "Received a kidney transplant."}
+  ],
+  "unparseable": []
+}
