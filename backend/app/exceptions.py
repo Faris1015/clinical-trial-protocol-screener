@@ -13,6 +13,12 @@ class ScreenerError(Exception):
 
     http_status = 500
 
+    def __init__(self, *args: object, headers: dict[str, str] | None = None) -> None:
+        super().__init__(*args)
+        # Extra response headers the error handler should emit (e.g. Retry-After
+        # on a 429). Empty for the common case; the handler passes it through.
+        self.headers: dict[str, str] = headers or {}
+
 
 class LLMUnavailableError(ScreenerError):
     """The LLM backend could not be reached after exhausting retries."""
@@ -42,3 +48,21 @@ class ScreeningNotApprovableError(ScreenerError):
     """Approval was requested for a screening that isn't parked at the gate."""
 
     http_status = 409
+
+
+class PayloadTooLargeError(ScreenerError):
+    """An upload exceeded the configured size cap."""
+
+    http_status = 413
+
+
+class UnsupportedMediaTypeError(ScreenerError):
+    """An upload's content type is not in the allowlist."""
+
+    http_status = 415
+
+
+class TooManyActiveScreeningsError(ScreenerError):
+    """Every concurrency slot is in use; the caller should retry shortly."""
+
+    http_status = 429

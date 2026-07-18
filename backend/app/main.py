@@ -19,14 +19,19 @@ from fastapi import FastAPI, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from langgraph.graph.state import CompiledStateGraph
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import get_settings
-from app.exceptions import ScreenerError
+from app.exceptions import PayloadTooLargeError, ScreenerError
 from app.health import app_version, readiness
 from app.logging_config import bind_contextvars, clear_contextvars, configure_logging, get_logger
 from app.persistence import Persistence, ScreeningStore, open_persistence
-from app.services import screening
+from app.services import screening, sse
+from app.services.concurrency import ConcurrencyLimiter, release_after
+from app.services.uploads import read_upload_capped, validate_content_type
 
 # Probes fire every few seconds from orchestrators/load balancers; keep them out
 # of the INFO access log so they don't drown the request stream.
@@ -39,6 +44,17 @@ _QUIET_PATHS = frozenset({"/health", "/ready"})
 settings = get_settings()
 configure_logging()
 log = get_logger("api")
+
+# IP-keyed rate limiter (#15). Limits are read from settings *per request* via
+# callables, so a test can tighten them without re-importing the module. Disabled
+# wholesale via RATE_LIMIT_ENABLED so the test suite isn't throttled by this
+# process-wide in-memory counter.
+limiter = Limiter(key_func=get_remote_address, enabled=settings.rate_limit_enabled)
+
+# Bounds concurrent in-flight graph runs on this instance; saturation → 429.
+active_screenings = ConcurrencyLimiter(
+    settings.max_concurrent_screenings, settings.concurrency_retry_after_seconds
+)
 
 # Durable state lives here, wired up in the lifespan. No module-level mutable
 # dicts: a restart, crash, or deploy rehydrates everything from the store, and
@@ -72,6 +88,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="Clinical Trial Protocol Screener", lifespan=lifespan)
+# slowapi reads the limiter off app.state and its handler turns a tripped limit
+# into a 429 (with Retry-After) that our error contract shape wraps below.
+app.state.limiter = limiter
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
@@ -129,6 +148,41 @@ async def screener_error_handler(request: Request, exc: ScreenerError) -> JSONRe
     return JSONResponse(
         status_code=exc.http_status,
         content={"error": type(exc).__name__, "detail": str(exc)},
+        headers=exc.headers or None,
+    )
+
+
+def _retry_after_seconds(request: Request) -> int | None:
+    """Seconds until the tripped limit's window resets, from slowapi's storage.
+
+    `headers_enabled` is left off (it would force a `response` param onto every
+    endpoint), so we derive Retry-After here from the same window stats slowapi's
+    own header injector uses.
+    """
+    current = getattr(request.state, "view_rate_limit", None)
+    if not current:
+        return None
+    try:
+        reset_at, _remaining = limiter.limiter.get_window_stats(current[0], *current[1])
+        return max(1, int(reset_at - time.time()))
+    except Exception:  # noqa: BLE001 - Retry-After is best-effort, never fatal
+        return None
+
+
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded) -> JSONResponse:
+    """Tripped rate limit → 429 in our error-contract shape, with a Retry-After
+    so clients can back off."""
+    log.warning("rate_limited", path=request.url.path)
+    retry_after = _retry_after_seconds(request)
+    headers = {"Retry-After": str(retry_after)} if retry_after is not None else None
+    return JSONResponse(
+        status_code=429,
+        content={
+            "error": "RateLimitExceeded",
+            "detail": "Rate limit exceeded; slow down and retry after the window resets.",
+        },
+        headers=headers,
     )
 
 
@@ -166,27 +220,60 @@ async def ready() -> JSONResponse:
 
 
 @app.post("/api/screenings")
-async def create_screening(file: UploadFile) -> dict:
-    thread_id = await screening.create_screening(_store(), file.filename, await file.read())
+@limiter.limit(lambda: settings.rate_limit_create)
+async def create_screening(request: Request, file: UploadFile) -> dict:
+    # Reject an oversized upload from its declared size before touching the body,
+    # so a 100 MB spam POST is turned away in well under a second (the streamed
+    # read below is the exact guard for a spoofed/absent Content-Length).
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > settings.max_upload_bytes + 8192:
+        raise PayloadTooLargeError(
+            f"Upload exceeds the {settings.max_upload_bytes} byte limit.",
+            headers={"Connection": "close"},
+        )
+    validate_content_type(file.content_type, file.filename, settings.upload_content_type_set)
+    raw = await read_upload_capped(file, settings.max_upload_bytes)
+    thread_id = await screening.create_screening(
+        _store(), file.filename, raw, content_type=file.content_type
+    )
     return {"thread_id": thread_id}
 
 
 @app.get("/api/screenings")
-async def list_screenings() -> list[dict]:
+@limiter.limit(lambda: settings.rate_limit_read)
+async def list_screenings(request: Request) -> list[dict]:
     return await screening.list_screenings(_store())
 
 
 @app.get("/api/screenings/{thread_id}/stream")
-async def stream_screening(thread_id: str) -> StreamingResponse:
-    frames = await screening.stream_screening(_store(), _graph(), thread_id)
-    return StreamingResponse(frames, media_type="text/event-stream")
+@limiter.limit(lambda: settings.rate_limit_read)
+async def stream_screening(request: Request, thread_id: str) -> StreamingResponse:
+    # Fail fast (429 + Retry-After) *before* the response commits when every
+    # concurrency slot is taken; the slot is held for the stream's lifetime and
+    # freed in release_after's finally, even if the client disconnects.
+    active_screenings.acquire()
+    try:
+        frames = await screening.stream_screening(_store(), _graph(), thread_id)
+    except BaseException:
+        active_screenings.release()
+        raise
+    guarded = release_after(frames, active_screenings)
+    heartbeated = sse.with_heartbeats(
+        guarded,
+        heartbeat_seconds=settings.sse_heartbeat_seconds,
+        idle_timeout_seconds=settings.sse_idle_timeout_seconds,
+    )
+    return StreamingResponse(heartbeated, media_type="text/event-stream")
 
 
 @app.post("/api/screenings/{thread_id}/approve")
-async def approve_screening(thread_id: str) -> dict:
-    return await screening.approve_screening(_store(), _graph(), thread_id)
+@limiter.limit(lambda: settings.rate_limit_create)
+async def approve_screening(request: Request, thread_id: str) -> dict:
+    with active_screenings.slot():
+        return await screening.approve_screening(_store(), _graph(), thread_id)
 
 
 @app.get("/api/screenings/{thread_id}/state")
-async def get_state(thread_id: str) -> dict:
+@limiter.limit(lambda: settings.rate_limit_read)
+async def get_state(request: Request, thread_id: str) -> dict:
     return await screening.get_screening_state(_store(), _graph(), thread_id)
