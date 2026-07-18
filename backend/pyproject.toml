@@ -92,6 +92,14 @@ ignore_missing_imports = true
 module = "tests.*"
 disallow_untyped_defs = false
 
+# The eval harness is a nightly/on-demand tool, deliberately outside the typed
+# CI gate (it is not in `files` above). The scoring unit test imports it, so
+# tell mypy to resolve but not type-check it rather than fail the followed import.
+[[tool.mypy.overrides]]
+module = "evals.*"
+ignore_errors = true
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 # `auto` lets async test functions run without a per-test @pytest.mark.asyncio.
 asyncio_mode = "auto"
