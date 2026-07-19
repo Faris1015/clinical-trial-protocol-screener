@@ -1,0 +1,18 @@
+# Prometheus scrape config for the local observability stack.
+#
+# Brought up via the docker-compose.observability.yml overlay, which shares the
+# `protocol-screener` compose network — so the backend is reachable by its
+# service name. The instrumentator exposes /metrics on the same port as the API.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: screener-backend
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["backend:8000"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

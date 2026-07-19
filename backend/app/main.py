@@ -19,6 +19,7 @@ from fastapi import FastAPI, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from langgraph.graph.state import CompiledStateGraph
+from prometheus_fastapi_instrumentator import Instrumentator
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -34,8 +35,9 @@ from app.services.concurrency import ConcurrencyLimiter, release_after
 from app.services.uploads import read_upload_capped, validate_content_type
 
 # Probes fire every few seconds from orchestrators/load balancers; keep them out
-# of the INFO access log so they don't drown the request stream.
-_QUIET_PATHS = frozenset({"/health", "/ready"})
+# of the INFO access log so they don't drown the request stream. /metrics is
+# scraped by Prometheus on the same cadence, so it belongs here too.
+_QUIET_PATHS = frozenset({"/health", "/ready", "/metrics"})
 
 # Resolve settings at import time so a misconfigured deployment fails at
 # startup (e.g. LLM_PROVIDER=anthropic without ANTHROPIC_API_KEY), not
@@ -97,6 +99,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Standard HTTP metrics (request count, latency histogram, in-flight) at
+# GET /metrics (#7). Custom domain metrics live in app/services/metrics.py and
+# register on the same default registry, so one scrape returns both. Excluded
+# from the OpenAPI schema and the access log (see _QUIET_PATHS) — it's an
+# operator endpoint, not part of the API contract.
+if settings.metrics_enabled:
+    Instrumentator(excluded_handlers=["/metrics", "/health", "/ready"]).instrument(app).expose(
+        app, endpoint="/metrics", include_in_schema=False
+    )
 
 
 @app.middleware("http")

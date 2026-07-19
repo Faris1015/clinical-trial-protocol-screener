@@ -173,6 +173,44 @@ curl http://localhost:8000/ready    # readiness: 200 only when dependencies are 
   `kubelet` readiness probes here. Both responses include the build `version`
   and `commit`.
 
+### Metrics & telemetry
+
+Prometheus metrics are exposed at `GET /metrics` (standard HTTP metrics via
+[`prometheus-fastapi-instrumentator`](https://github.com/trallnag/prometheus-fastapi-instrumentator)
+plus the custom domain metrics below). Set `METRICS_ENABLED=false` to unmount
+the endpoint.
+
+```bash
+curl http://localhost:8000/metrics
+```
+
+Bring up Prometheus + Grafana with a pre-provisioned dashboard alongside the
+main stack:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.observability.yml up
+#   Prometheus  http://localhost:9090
+#   Grafana     http://localhost:3000   ("Protocol Screener — Pipeline" dashboard)
+```
+
+Run a screening (upload → stream → approve) and the dashboard renders the funnel,
+node latencies, Critic rejection rates, and LLM latency end-to-end.
+
+**Custom metrics** — the questions HTTP timings alone can't answer:
+
+| Metric | Type | Labels | What it answers |
+|---|---|---|---|
+| `screenings_total` | counter | `outcome` (`done`/`failed`/`escalated`) | Pipeline funnel — how runs end |
+| `agent_node_duration_seconds` | histogram | `agent` (`router`/`parser`/`critic`/`matcher`/`human_escalation`) | Per-node latency; p95 screening duration |
+| `critic_rejections_total` | counter | `rule_id` (e.g. `HEPATIC-001`, `LLM-SEM`) | Which compliance rules actually fire |
+| `parse_attempts` | histogram | — | How deep the self-correction loop runs per screening |
+| `llm_call_duration_seconds` | histogram | `provider` (`ollama`/`anthropic`) | LLM call latency distribution |
+| `llm_call_failures_total` | counter | `provider` | LLM calls that exhausted retries |
+
+Nodes are instrumented through the graph's `_instrument` decorator and LLM calls
+through the single `invoke_with_retry` door, so agent bodies stay free of metrics
+plumbing. Definitions live in one place — [`app/services/metrics.py`](backend/app/services/metrics.py).
+
 ## Code quality
 
 Backend is linted and formatted with **ruff** and type-checked with **mypy**
