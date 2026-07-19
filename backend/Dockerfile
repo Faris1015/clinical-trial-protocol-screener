@@ -39,6 +39,13 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
     && mkdir -p /data \
     && chown appuser:appuser /data
 
+# Commit SHA of the build, surfaced through config.git_sha so /health and
+# /ready report exactly which build is live. Set by CI (--build-arg GIT_SHA=…);
+# an unset arg leaves git_sha None and the probes report "unknown". Placed after
+# the source COPY so a new SHA only busts this trailing layer, not the venv.
+ARG GIT_SHA=""
+ENV GIT_SHA=$GIT_SHA
+
 USER appuser
 EXPOSE 8000
 

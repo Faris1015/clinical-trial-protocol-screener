@@ -1,6 +1,9 @@
 # Multi-Agent Clinical Trial Protocol Screener
 
 [![CI](https://github.com/Faris1015/clinical-trial-protocol-screener/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Faris1015/clinical-trial-protocol-screener/actions/workflows/ci.yml)
+[![CD](https://github.com/Faris1015/clinical-trial-protocol-screener/actions/workflows/cd.yml/badge.svg?branch=main)](https://github.com/Faris1015/clinical-trial-protocol-screener/actions/workflows/cd.yml)
+
+**Live demo:** <https://screener-frontend.fly.dev>
 
 A multi-agent AI system that ingests clinical trial protocols (PDF or markdown), extracts
 eligibility criteria into a strict typed schema, cross-checks them against an FDA-style
@@ -381,6 +384,19 @@ Conventional Commits PR title (the squash-merge commit message).
 container files or dependency manifests change. Superseded runs on the same ref are
 cancelled automatically. Branch protection and merge settings are documented in
 [`CONTRIBUTING.md`](CONTRIBUTING.md#repository-settings).
+
+### CD
+
+Merge to `main` triggers [`cd.yml`](.github/workflows/cd.yml): it builds and
+pushes the backend + frontend images to GHCR (tagged with the commit SHA and
+`latest`), then deploys them to [Fly.io](https://fly.io) with a **zero-downtime
+rolling update** — new machines must pass the [`/ready`](#health--readiness)
+health check before the old ones are drained, so a broken build can't take the
+site down. A post-deploy [smoke test](scripts/smoke_test.sh) then verifies the
+live URL is serving the new build and can run a screening end-to-end. Secrets
+live in the `production` GitHub Environment (optionally behind a required
+reviewer). Full topology, one-time setup, and the **rollback** procedure are in
+[`docs/deployment.md`](docs/deployment.md).
 
 ## Configuration
 

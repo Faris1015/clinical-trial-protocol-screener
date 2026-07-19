@@ -15,7 +15,18 @@ RUN npm run build
 FROM nginx:1.27-alpine AS runtime
 
 # Static site config + SPA fallback + /api reverse proxy (incl. SSE tuning).
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+# Shipped as a template: the nginx image's entrypoint runs envsubst over
+# /etc/nginx/templates/*.template at startup and writes the result into
+# conf.d/. BACKEND_UPSTREAM defaults to the compose service name; Fly overrides
+# it to the backend app's private address. The FILTER limits substitution to
+# BACKEND_-prefixed vars so nginx's own $host/$uri runtime variables survive.
+ENV BACKEND_UPSTREAM=backend:8000 \
+    NGINX_ENVSUBST_FILTER=BACKEND_
+COPY default.conf.template /etc/nginx/templates/default.conf.template
+# Runs before nginx starts: writes /etc/nginx/resolver.conf so the templated
+# config can resolve the backend per-request (see the script + template).
+COPY 15-detect-resolver.sh /docker-entrypoint.d/15-detect-resolver.sh
+RUN chmod +x /docker-entrypoint.d/15-detect-resolver.sh
 COPY --from=build /app/dist /usr/share/nginx/html
 
 EXPOSE 80
