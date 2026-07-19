@@ -46,6 +46,13 @@ class Settings(BaseSettings):
     # --- API ---
     # Comma-separated list, e.g. "http://localhost:5173,https://screener.example.com"
     cors_origins: str = "http://localhost:5173"
+    # Single-service demo mode: point this at a built React bundle (a directory
+    # containing index.html) and the API also serves the SPA from the same
+    # origin, so one container hosts the whole demo with no CORS or second host.
+    # Unset (the default) in the split production topology, where nginx serves the
+    # SPA and reverse-proxies /api. See deploy/demo/Dockerfile and
+    # docs/free-demo-deploy.md.
+    frontend_dist: Path | None = None
 
     # --- API hardening (#15) ---
     # Reject uploads larger than this before buffering the whole body. 25 MiB
