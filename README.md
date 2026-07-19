@@ -324,6 +324,25 @@ currently stubs (`run_llm_semantic_review`). Numbers move with the model; treat
 them as a snapshot, not a contract. Reproduce with `make eval` (prints curated,
 real, and combined tables).
 
+#### Load testing
+
+Concurrent-load behaviour is measured with **Locust** driving the full reviewer
+journey (upload → hold SSE → approve → results) against a server in
+**stub-LLM mode** (`LLM_PROVIDER=stub`), which isolates app overhead from model
+latency.
+
+```bash
+docker compose -f docker-compose.loadtest.yml up --build   # backend, no Ollama
+make loadtest                                              # 50-user, 5-min run
+```
+
+A single instance sustains **50 concurrent screenings at p95 ≈ 12–21 ms with
+< 0.5 % errors and no memory growth over a 5-minute soak**. The load test also
+found and fixed a SQLite write-lock bug that failed ~97 % of uploads under
+concurrency. Full method, numbers, and analysis:
+[`docs/performance.md`](docs/performance.md) ·
+[`loadtest/README.md`](loadtest/README.md).
+
 ## Project structure
 
 ```

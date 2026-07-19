@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 
 import app.main as main
 from app.config import Settings
-from app.persistence import open_persistence
+from app.persistence import SqliteScreeningStore, open_persistence
 
 # A minimal protocol that clears the router's length + eligibility-marker gate.
 PROTOCOL = (
@@ -104,6 +104,26 @@ async def test_missing_thread_is_absent(tmp_path):
         assert await p.store.get_input("nope") is None
         # Updating a nonexistent row is a no-op, not an error.
         await p.store.set_status("nope", "done")
+    finally:
+        await p.aclose()
+
+
+async def test_sqlite_store_connection_is_autocommit(tmp_path):
+    """Regression (#10): the store connection MUST be in autocommit mode.
+
+    With Python's default implicit transactions, the shared store connection
+    fast-failed writes with "database is locked" under concurrent load (~76% of
+    creates at 50 users) — a write promoting an already-open implicit transaction
+    takes an immediate SQLITE_BUSY that busy_timeout can't absorb. Autocommit
+    (isolation_level=None) makes each write acquire the lock on the path where
+    busy_timeout IS honored, which dropped the same load to <0.5% errors. If this
+    regresses to a non-None isolation level, the load-test failure returns.
+    See docs/performance.md.
+    """
+    p = await open_persistence(_sqlite_settings(tmp_path))
+    try:
+        assert isinstance(p.store, SqliteScreeningStore)
+        assert p.store._conn.isolation_level is None
     finally:
         await p.aclose()
 
