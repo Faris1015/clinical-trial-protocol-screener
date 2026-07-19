@@ -1,0 +1,23 @@
+# Render Blueprint — one-click free deploy of the single-service demo.
+#
+# Builds deploy/demo/Dockerfile (React SPA + FastAPI in one image, stub LLM) and
+# runs it as a free web service. No credit card, no Ollama, no API key. Render
+# injects $PORT, which the image's CMD binds. Full runbook: docs/free-demo-deploy.md.
+#
+# Free plan caveats: the service sleeps after ~15 min idle (first hit cold-starts
+# ~50s), 512 MB RAM, and the disk is ephemeral — screenings reset on restart,
+# which is fine for a demo (the entrypoint reseeds the synthetic EHR on boot).
+services:
+  - type: web
+    name: protocol-screener-demo
+    runtime: docker
+    plan: free
+    dockerfilePath: ./deploy/demo/Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      # The image already defaults to stub mode; pinned here so it's explicit in
+      # the Render dashboard and can't drift.
+      - key: LLM_PROVIDER
+        value: stub

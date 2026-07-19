@@ -13,11 +13,13 @@ terminates with `__error__` instead of dying silently when a node blows up.
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
 from uuid import uuid4
 
 from fastapi import FastAPI, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from langgraph.graph.state import CompiledStateGraph
 from prometheus_fastapi_instrumentator import Instrumentator
 from slowapi import Limiter
@@ -289,3 +291,24 @@ async def approve_screening(request: Request, thread_id: str) -> dict:
 @limiter.limit(lambda: settings.rate_limit_read)
 async def get_state(request: Request, thread_id: str) -> dict:
     return await screening.get_screening_state(_store(), _graph(), thread_id)
+
+
+def mount_frontend(app: FastAPI, dist: Path | None) -> bool:
+    """Single-service demo mode: serve a built SPA bundle from this same app.
+
+    When `dist` points at a directory containing index.html, mount it at "/" so
+    one container hosts the whole demo (SPA + API, same origin, no CORS). Must be
+    called AFTER every API/operator route is registered: the catch-all mount is
+    matched last, so those routes always win; StaticFiles(html=True) then serves
+    index.html and the hashed assets, all this single-page app needs. Returns
+    whether it mounted. A no-op in the split production topology (dist unset —
+    nginx serves the SPA there). See deploy/demo/Dockerfile, docs/free-demo-deploy.md.
+    """
+    if not (dist and (dist / "index.html").is_file()):
+        return False
+    app.mount("/", StaticFiles(directory=str(dist), html=True), name="frontend")
+    log.info("frontend.mounted", path=str(dist))
+    return True
+
+
+mount_frontend(app, settings.frontend_dist)
