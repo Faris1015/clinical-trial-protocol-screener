@@ -2,9 +2,12 @@ name: Docker build
 
 # Catches Dockerfile rot without paying the build cost on every PR: this
 # workflow only triggers when container files or dependency manifests change.
+# PR-only by design — the PR is the gate to main, so the size budget + boot
+# smoke run before every merge, and cd.yml owns the build+push on main (running
+# both here would build the backend image twice per container-touching merge).
 on:
   pull_request:
-    paths: &container_paths
+    paths:
       - "**/Dockerfile*"
       - "docker-compose*.yml"
       - "backend/pyproject.toml"
@@ -13,9 +16,6 @@ on:
       - "backend/requirements.lock"
       - "frontend/package-lock.json"
       - ".github/workflows/docker.yml"
-  push:
-    branches: [main]
-    paths: *container_paths
 
 concurrency:
   group: docker-${{ github.ref }}

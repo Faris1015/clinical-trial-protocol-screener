@@ -1,0 +1,60 @@
+server {
+    listen 80;
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # Per-request upstream resolution. `resolver.conf` (written by
+    # 15-detect-resolver.sh at startup) points at the container's DNS server;
+    # because proxy_pass below targets a *variable* rather than a literal host,
+    # nginx resolves the backend on each request instead of once at config load.
+    # That means the frontend boots and serves the SPA even if the backend is
+    # briefly unresolvable — API calls 502 until it returns — instead of nginx
+    # failing to start. The upstream is templated so one image serves both
+    # topologies: docker-compose resolves the `backend` service name (default in
+    # the Dockerfile), while on Fly the backend is a separate app reached over
+    # the private network (screener-backend.flycast). Only BACKEND_-prefixed vars
+    # are substituted (NGINX_ENVSUBST_FILTER), so nginx's own $host/$uri/etc. and
+    # the $backend_host variable below survive envsubst untouched.
+    include /etc/nginx/resolver.conf;
+    set $backend_host "${BACKEND_UPSTREAM}";
+
+    # Reverse-proxy the API to the backend. With a variable proxy_pass and no URI
+    # part, nginx forwards the original request URI unchanged, so /api/screenings
+    # hits the backend's /api/screenings.
+    location /api/ {
+        proxy_pass http://$backend_host;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+
+        # SSE: the /stream endpoint is a long-lived event stream. Buffering
+        # would hold events back until the connection closed, so disable it and
+        # give the upstream a long read timeout.
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_set_header Connection "";
+        proxy_read_timeout 3600s;
+    }
+
+    # Expose the backend's liveness/readiness probes through the one public
+    # origin. On Fly the backend is private (flycast) with no public IP, so the
+    # CD smoke test and any uptime monitor reach /health and /ready here; in
+    # compose these proxy the same backend. Exact-match (`= /path`) so they never
+    # shadow a future SPA route of the same name.
+    location = /health {
+        proxy_pass http://$backend_host;
+        proxy_set_header Host $host;
+    }
+    location = /ready {
+        proxy_pass http://$backend_host;
+        proxy_set_header Host $host;
+    }
+
+    # SPA fallback: unknown routes serve index.html so client-side rendering
+    # owns routing, while real asset requests (200s) are served directly.
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
