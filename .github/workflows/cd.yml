@@ -1,14 +1,15 @@
-name: CD
+name: Build & publish images
 
-# Merge to main → images in GHCR → zero-downtime rollout on Fly → smoke test.
-# No manual step once the one-time infra + secrets are in place (see
-# docs/deployment.md). CI (ci.yml) is the merge gate; this only runs post-merge.
+# Merge to main → build and push the backend + frontend images to GHCR.
+# Deployment itself is handled by the hosting platform's own auto-deploy from the
+# repo (see docs/free-demo-deploy.md) — there is no deploy step here. CI (ci.yml)
+# is the merge gate; this only runs post-merge.
 on:
   push:
     branches: [main]
 
-# Never cancel a deploy mid-flight — a half-applied rollout is worse than a
-# queued one. Runs on main serialize behind this group.
+# Serialize runs on main behind one group so two quick merges don't race to push
+# the same :latest tag.
 concurrency:
   group: cd-main
   cancel-in-progress: false
@@ -20,9 +21,6 @@ permissions:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-    outputs:
-      sha: ${{ steps.vars.outputs.sha }}
-      prefix: ${{ steps.vars.outputs.prefix }}
     steps:
       - uses: actions/checkout@v4
 
@@ -49,7 +47,7 @@ jobs:
           context: backend
           push: true
           # GIT_SHA bakes the commit into the image so /health and /ready report
-          # exactly which build is live — the smoke test asserts on it.
+          # exactly which build is live.
           build-args: |
             GIT_SHA=${{ steps.vars.outputs.sha }}
           tags: |
@@ -68,64 +66,3 @@ jobs:
             ${{ steps.vars.outputs.prefix }}-frontend:latest
           cache-from: type=gha,scope=frontend
           cache-to: type=gha,scope=frontend,mode=max
-
-  deploy:
-    needs: build-and-push
-    runs-on: ubuntu-latest
-    # The `production` GitHub Environment holds FLY_API_TOKEN and can carry a
-    # required-reviewer rule, turning a merge into a gated promotion.
-    environment:
-      name: production
-      url: ${{ vars.PRODUCTION_URL || 'https://screener-frontend.fly.dev' }}
-    env:
-      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-      PREFIX: ${{ needs.build-and-push.outputs.prefix }}
-      SHA: ${{ needs.build-and-push.outputs.sha }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: superfly/flyctl-actions/setup-flyctl@master
-
-      # flyctl deploy waits for the new machines to pass the /ready health check
-      # defined in each config before draining the old ones, and fails the step
-      # if they never do — so a broken build can't take the site down. Backend
-      # first (frontend proxies to it), each rolling one machine at a time.
-      - name: Deploy backend (rolling, /ready-gated)
-        run: >
-          flyctl deploy
-          --config deploy/fly/backend.toml
-          --image "${PREFIX}-backend:${SHA}"
-
-      - name: Deploy frontend (rolling)
-        run: >
-          flyctl deploy
-          --config deploy/fly/frontend.toml
-          --image "${PREFIX}-frontend:${SHA}"
-
-  smoke-test:
-    needs: [build-and-push, deploy]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Post-deploy smoke test
-        # Verifies the live URL reports the just-deployed SHA and can drive a
-        # screening end-to-end. Failure here fails the workflow (GitHub alerts on
-        # a failed main run); wire an extra channel in the notify step below.
-        env:
-          BASE_URL: ${{ vars.PRODUCTION_URL || 'https://screener-frontend.fly.dev' }}
-          EXPECTED_SHA: ${{ needs.build-and-push.outputs.sha }}
-        run: bash scripts/smoke_test.sh
-
-      - name: Alert on failure
-        if: failure()
-        # Optional extra alert: posts to Slack only if the webhook secret exists,
-        # so it's a no-op until configured (GitHub's failed-run email always fires).
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-        run: |
-          if [ -n "${SLACK_WEBHOOK_URL:-}" ]; then
-            curl -fsS -X POST "$SLACK_WEBHOOK_URL" \
-              -H 'Content-Type: application/json' \
-              -d "{\"text\":\"🚨 CD smoke test failed for ${GITHUB_REPOSITORY}@${GITHUB_SHA::7} — run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\"}"
-          else
-            echo "SLACK_WEBHOOK_URL unset — relying on GitHub's failed-run notification."
-          fi
