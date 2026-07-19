@@ -38,6 +38,32 @@ class Settings(BaseSettings):
     # Comma-separated list, e.g. "http://localhost:5173,https://screener.example.com"
     cors_origins: str = "http://localhost:5173"
 
+    # --- API hardening (#15) ---
+    # Reject uploads larger than this before buffering the whole body. 25 MiB
+    # comfortably fits a 200-page protocol PDF while stopping 500 MB spam.
+    max_upload_bytes: int = Field(25 * 1024 * 1024, ge=1)
+    # Comma-separated content-type allowlist for uploads. A generic type
+    # (application/octet-stream or empty) falls back to a filename-extension
+    # check so browser uploads of .md/.txt files aren't rejected spuriously.
+    upload_content_types: str = "application/pdf,text/markdown,text/plain"
+    # slowapi limits (see https://limits.readthedocs.io for the "N/unit" syntax).
+    # Strict on the LLM-triggering create endpoint, generous on cheap reads.
+    rate_limit_create: str = "10/minute"
+    rate_limit_read: str = "120/minute"
+    # Toggle the limiter off entirely (tests set RATE_LIMIT_ENABLED=false so the
+    # suite isn't throttled by a process-wide in-memory counter).
+    rate_limit_enabled: bool = True
+    # Concurrent in-flight screenings (graph runs) per instance. Once saturated,
+    # new stream/approve requests get 429 + Retry-After instead of queueing.
+    max_concurrent_screenings: int = Field(4, ge=1)
+    # Retry-After (seconds) advertised when the concurrency gate is saturated.
+    concurrency_retry_after_seconds: int = Field(5, ge=1)
+    # SSE hygiene: emit a heartbeat comment every N seconds of silence, and
+    # reap a stream that produces nothing for the idle window (dead client or a
+    # wedged graph). idle must be a multiple-ish of heartbeat to be meaningful.
+    sse_heartbeat_seconds: float = Field(15.0, gt=0)
+    sse_idle_timeout_seconds: float = Field(120.0, gt=0)
+
     # --- Pipeline ---
     max_parse_attempts: int = Field(3, ge=1, le=10)
     rules_path: Path = APP_DIR / "rules" / "compliance_rules.yaml"
@@ -68,6 +94,10 @@ class Settings(BaseSettings):
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 
+    @property
+    def upload_content_type_set(self) -> frozenset[str]:
+        return frozenset(t.strip() for t in self.upload_content_types.split(",") if t.strip())
+
     @model_validator(mode="after")
     def _require_anthropic_key(self) -> "Settings":
         if self.llm_provider == "anthropic" and not self.anthropic_api_key:
@@ -83,6 +113,18 @@ class Settings(BaseSettings):
             raise ValueError(
                 "POSTGRES_DSN is required when CHECKPOINT_BACKEND=postgres. "
                 "Set it in the environment or in backend/.env."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _sse_idle_covers_a_heartbeat(self) -> "Settings":
+        # A stream must get at least one heartbeat before it can be reaped;
+        # otherwise the idle timer trips on the first tick and the heartbeat
+        # (dead-client detector) never fires.
+        if self.sse_idle_timeout_seconds < self.sse_heartbeat_seconds:
+            raise ValueError(
+                "SSE_IDLE_TIMEOUT_SECONDS must be >= SSE_HEARTBEAT_SECONDS "
+                f"({self.sse_idle_timeout_seconds} < {self.sse_heartbeat_seconds})."
             )
         return self
 

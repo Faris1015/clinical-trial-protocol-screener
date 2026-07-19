@@ -22,6 +22,7 @@ from app.graph.state import initial_state
 from app.logging_config import bind_contextvars, get_logger
 from app.services import sse
 from app.services.pdf import extract_eligibility_text
+from app.services.uploads import sanitize_filename
 
 if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
@@ -96,21 +97,36 @@ def _terminal_frame(snapshot: Snapshot) -> str:
     return sse.end_frame()
 
 
-async def create_screening(store: ScreeningStore, filename: str | None, raw: bytes) -> str:
-    """Parse the upload into eligibility text, persist it, and return its thread_id."""
-    if filename and filename.lower().endswith(".pdf"):
+async def create_screening(
+    store: ScreeningStore,
+    filename: str | None,
+    raw: bytes,
+    content_type: str | None = None,
+) -> str:
+    """Parse the upload into eligibility text, persist it, and return its thread_id.
+
+    The filename is sanitized to a traversal-free basename *before* it is stored
+    or logged — the raw name is attacker-controlled and only trusted to detect a
+    PDF (by extension or content type) so its bytes go through PyMuPDF, which
+    validates them and raises ExtractionError (422) on a non-PDF.
+    """
+    is_pdf = (filename or "").lower().endswith(".pdf") or (content_type or "").lower() == (
+        "application/pdf"
+    )
+    if is_pdf:
         text = extract_eligibility_text(raw)
     else:
         text = raw.decode("utf-8", errors="replace")
 
+    safe_filename = sanitize_filename(filename)
     thread_id = str(uuid4())
     bind_contextvars(thread_id=thread_id)
     # Persist the input durably so a restart between upload and stream — or a
     # second worker handling the stream — loses nothing. The graph's execution
     # state is rebuilt from initial_state() when the run first streams.
-    await store.create(thread_id, filename or "upload", text)
+    await store.create(thread_id, safe_filename, text)
     # PHI hygiene: log the size of the upload, never its contents.
-    log.info("screening.created", source_filename=filename or "upload", text_chars=len(text))
+    log.info("screening.created", source_filename=safe_filename, text_chars=len(text))
     return thread_id
 
 
