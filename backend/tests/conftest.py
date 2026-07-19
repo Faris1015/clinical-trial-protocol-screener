@@ -13,3 +13,9 @@ import os
 # shell or CI must not leak in and turn the isolated in-memory store into a
 # shared real database. Tests that need sqlite build their own Settings.
 os.environ["CHECKPOINT_BACKEND"] = "memory"
+
+# Rate limiting uses a process-wide in-memory counter keyed by client IP. Left
+# on, it would accumulate across the many requests the suite makes from the same
+# TestClient host and trip spuriously. Disable it globally; test_rate_limiting
+# re-enables the limiter locally to prove it works.
+os.environ["RATE_LIMIT_ENABLED"] = "false"

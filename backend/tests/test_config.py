@@ -20,6 +20,15 @@ def clean_env(monkeypatch):
         "RULES_PATH",
         "PATIENTS_PATH",
         "LOG_LEVEL",
+        "MAX_UPLOAD_BYTES",
+        "UPLOAD_CONTENT_TYPES",
+        "RATE_LIMIT_CREATE",
+        "RATE_LIMIT_READ",
+        "RATE_LIMIT_ENABLED",
+        "MAX_CONCURRENT_SCREENINGS",
+        "CONCURRENCY_RETRY_AFTER_SECONDS",
+        "SSE_HEARTBEAT_SECONDS",
+        "SSE_IDLE_TIMEOUT_SECONDS",
     ):
         monkeypatch.delenv(var, raising=False)
     get_settings.cache_clear()
@@ -80,4 +89,41 @@ def test_invalid_provider_rejected(monkeypatch):
 def test_parse_attempts_bounds(monkeypatch):
     monkeypatch.setenv("MAX_PARSE_ATTEMPTS", "0")
     with pytest.raises(ValueError):
+        Settings(_env_file=None)
+
+
+# --- API hardening settings (#15) ------------------------------------------
+
+
+def test_hardening_defaults():
+    s = Settings(_env_file=None)
+    assert s.max_upload_bytes == 25 * 1024 * 1024
+    assert s.rate_limit_enabled is True
+    assert s.max_concurrent_screenings == 4
+    assert s.upload_content_type_set == frozenset(
+        {"application/pdf", "text/markdown", "text/plain"}
+    )
+
+
+def test_upload_content_types_override(monkeypatch):
+    monkeypatch.setenv("UPLOAD_CONTENT_TYPES", "application/pdf, text/plain ")
+    s = Settings(_env_file=None)
+    assert s.upload_content_type_set == frozenset({"application/pdf", "text/plain"})
+
+
+def test_rate_limit_enabled_override(monkeypatch):
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "false")
+    assert Settings(_env_file=None).rate_limit_enabled is False
+
+
+def test_max_upload_bytes_must_be_positive(monkeypatch):
+    monkeypatch.setenv("MAX_UPLOAD_BYTES", "0")
+    with pytest.raises(ValueError):
+        Settings(_env_file=None)
+
+
+def test_idle_timeout_below_heartbeat_fails_fast(monkeypatch):
+    monkeypatch.setenv("SSE_HEARTBEAT_SECONDS", "30")
+    monkeypatch.setenv("SSE_IDLE_TIMEOUT_SECONDS", "10")
+    with pytest.raises(ValueError, match="SSE_IDLE_TIMEOUT_SECONDS"):
         Settings(_env_file=None)
