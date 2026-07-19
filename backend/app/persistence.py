@@ -297,11 +297,24 @@ async def _open_sqlite(settings: Settings) -> Persistence:
     # so it must be set on the first connection *before* the second opens, or
     # the switch deadlocks) lets readers and a single writer run concurrently —
     # and lets a second uvicorn worker share the same file without split-brain.
-    # busy_timeout makes a writer wait out a brief lock instead of erroring.
     saver_conn = await aiosqlite.connect(path)
     await saver_conn.execute("PRAGMA journal_mode=WAL")
-    store_conn = await aiosqlite.connect(path)
+    # isolation_level=None puts the store in autocommit mode. This is
+    # load-bearing, not a style choice (#10): with Python's *default* implicit
+    # transactions, the shared store connection fast-failed writes with "database
+    # is locked" under concurrent load (measured: ~76% of creates failed at
+    # 50 users), because a write that has to promote an already-open implicit
+    # transaction takes an *immediate* SQLITE_BUSY that busy_timeout does not
+    # cover. Autocommit issues each INSERT/UPDATE as a standalone statement that
+    # acquires the write lock directly — the path where busy_timeout IS honored,
+    # so a contended writer waits out the lock instead of erroring (measured: the
+    # same load dropped to <0.5% errors). The store only ever does
+    # single-statement writes, so it needs no multi-statement transactions.
+    # Full analysis and numbers: docs/performance.md.
+    store_conn = await aiosqlite.connect(path, isolation_level=None)
     for conn in (saver_conn, store_conn):
+        # Wait out a briefly-held write lock instead of erroring (honored on the
+        # direct write-lock path; see the autocommit note above).
         await conn.execute("PRAGMA busy_timeout=5000")
 
     checkpointer = AsyncSqliteSaver(saver_conn)

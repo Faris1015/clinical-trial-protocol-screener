@@ -27,12 +27,21 @@ class Settings(BaseSettings):
     )
 
     # --- LLM backend ---
-    llm_provider: Literal["ollama", "anthropic"] = "ollama"
+    # "stub" is a zero-inference, deterministic in-process model used for load
+    # testing (#10) and offline demos — it isolates app/pipeline performance
+    # from real model latency. Never enable it in production: it returns canned
+    # extractions, not real analysis.
+    llm_provider: Literal["ollama", "anthropic", "stub"] = "ollama"
     ollama_model: str = "llama3.1:8b"
     ollama_base_url: str = "http://localhost:11434"
     anthropic_model: str = "claude-sonnet-5"
     anthropic_api_key: str | None = None
     llm_temperature: float = Field(0.0, ge=0.0, le=1.0)
+    # Artificial per-call latency (seconds) for LLM_PROVIDER=stub. 0 measures the
+    # app's own overhead; a non-zero value models a slow backend so a load test
+    # can see how inference latency interacts with the threadpool + concurrency
+    # gate without needing a real GPU.
+    stub_latency_seconds: float = Field(0.0, ge=0.0)
 
     # --- API ---
     # Comma-separated list, e.g. "http://localhost:5173,https://screener.example.com"

@@ -53,6 +53,9 @@ def app_version() -> dict[str, str]:
 async def _check_llm() -> dict[str, object]:
     """Ping the configured LLM backend cheaply (no token spend)."""
     settings = get_settings()
+    if settings.llm_provider == "stub":
+        # No external backend to reach — the in-process stub is always ready.
+        return {"ok": True, "detail": "stub backend (no inference)"}
     if settings.llm_provider == "anthropic":
         url = "https://api.anthropic.com/v1/models"
         headers = {

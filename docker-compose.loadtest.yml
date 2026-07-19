@@ -1,0 +1,36 @@
+# Load-test stack (#10): backend only, in stub-LLM mode — no Ollama, no GPU.
+#
+#   docker compose -f docker-compose.loadtest.yml up --build
+#   make loadtest                      # from the repo root, in another shell
+#
+# LLM_PROVIDER=stub swaps real inference for a deterministic in-process model
+# (app/services/stub_llm.py) so the numbers reflect the app's own overhead —
+# routing, SSE fan-out, the concurrency gate, the checkpointer — not model
+# latency. STUB_LATENCY_SECONDS models a slow backend when you want to see how
+# inference time interacts with the threadpool + gate.
+#
+# Rate limiting is off and the concurrency gate is opened wide so the load test
+# measures throughput/latency rather than immediately tripping 429 backpressure;
+# lower MAX_CONCURRENT_SCREENINGS to observe the gate's behaviour on purpose.
+name: protocol-screener-loadtest
+
+services:
+  backend:
+    build: ./backend
+    environment:
+      - LLM_PROVIDER=stub
+      - STUB_LATENCY_SECONDS=${STUB_LATENCY_SECONDS:-0}
+      - PATIENTS_PATH=/data/patients.json
+      - SQLITE_PATH=/data/screenings.sqlite
+      - LOG_FORMAT=${LOG_FORMAT:-json}
+      - LOG_LEVEL=${LOG_LEVEL:-WARNING}
+      - RATE_LIMIT_ENABLED=false
+      - MAX_CONCURRENT_SCREENINGS=${MAX_CONCURRENT_SCREENINGS:-64}
+      - CORS_ORIGINS=http://localhost:8080
+    volumes:
+      - loadtest-data:/data
+    ports:
+      - "8000:8000"
+
+volumes:
+  loadtest-data:

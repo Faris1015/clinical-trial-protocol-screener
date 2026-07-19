@@ -84,7 +84,12 @@ def invoke_with_retry(runnable: Runnable, input_: Any) -> Any:
 def get_llm() -> BaseChatModel:
     settings = get_settings()
     llm: BaseChatModel
-    if settings.llm_provider == "anthropic":
+    if settings.llm_provider == "stub":
+        # Load-test / offline mode: no inference, deterministic timing (#10).
+        from app.services.stub_llm import StubChatModel
+
+        llm = StubChatModel(latency_seconds=settings.stub_latency_seconds)
+    elif settings.llm_provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
 
         llm = ChatAnthropic(

@@ -30,6 +30,12 @@ postgres = [
     "langgraph-checkpoint-postgres>=2.0",
     "psycopg[binary]>=3.2",
 ]
+# Load-testing harness (#10). Kept separate from `dev` so CI's lint/type/test
+# gate doesn't pull Locust and its Flask/gevent tree; install with
+# `pip install -e ".[loadtest]"` (or `.[dev,loadtest]`) to run `make loadtest`.
+loadtest = [
+    "locust>=2.31",
+]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
