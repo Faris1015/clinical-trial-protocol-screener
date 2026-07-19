@@ -86,6 +86,10 @@ class Settings(BaseSettings):
     git_sha: str | None = None
 
     # --- Observability ---
+    # Expose Prometheus metrics at GET /metrics (#7). Custom domain metrics are
+    # always recorded (negligible cost); this only gates the scrape endpoint so a
+    # deployment can keep it off the public surface if it scrapes out-of-band.
+    metrics_enabled: bool = True
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     # "console" = human-readable, colorized (dev); "json" = one object per line (prod).
     log_format: Literal["console", "json"] = "console"

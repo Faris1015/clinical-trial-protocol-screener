@@ -1,0 +1,15 @@
+# Load every dashboard JSON dropped into /var/lib/grafana/dashboards on startup,
+# so the starter pipeline dashboard is present the moment Grafana boots.
+apiVersion: 1
+
+providers:
+  - name: Screener
+    orgId: 1
+    type: file
+    disableDeletion: false
+    editable: true
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

@@ -20,6 +20,7 @@ dependencies = [
     "python-multipart>=0.0.9",
     "tenacity>=8.2",
     "structlog>=24.1",
+    "prometheus-fastapi-instrumentator>=7.0",
 ]
 
 [project.optional-dependencies]

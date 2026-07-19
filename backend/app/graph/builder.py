@@ -20,6 +20,7 @@ from app.graph.nodes.parser import parser_node, parser_router
 from app.graph.nodes.router import route_input, router_node
 from app.graph.state import ScreenerState, event
 from app.logging_config import get_logger
+from app.services.metrics import agent_node_duration_seconds, record_node_metrics
 
 log = get_logger("graph")
 
@@ -44,15 +45,18 @@ def _instrument(name: str, fn: NodeFn) -> NodeFn:
         try:
             result = fn(state)
         except Exception:
-            node_log.error(
-                "node.error",
-                duration_ms=round((time.perf_counter() - started) * 1000, 1),
-                exc_info=True,
-            )
+            elapsed = time.perf_counter() - started
+            # Record the duration of the failed run too, so a node that reliably
+            # errors still shows its latency; the terminal outcome isn't counted
+            # here — the exception propagates and is resolved upstream.
+            agent_node_duration_seconds.labels(agent=name).observe(elapsed)
+            node_log.error("node.error", duration_ms=round(elapsed * 1000, 1), exc_info=True)
             raise
+        elapsed = time.perf_counter() - started
+        record_node_metrics(name, state, result, elapsed)
         node_log.info(
             "node.finish",
-            duration_ms=round((time.perf_counter() - started) * 1000, 1),
+            duration_ms=round(elapsed * 1000, 1),
             outcome=result.get("current_step"),
         )
         return result

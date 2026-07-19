@@ -19,6 +19,7 @@ from app.graph.state import ScreenerState, event
 from app.logging_config import get_logger
 from app.schemas.review import SemanticReview
 from app.services.llm import get_llm, invoke_with_retry
+from app.services.metrics import critic_rejections_total
 
 log = get_logger("critic")
 
@@ -205,6 +206,11 @@ def critic_node(state: ScreenerState) -> dict:
 
     rejects = [f for f in findings if f["severity"] == "reject"]
     passed = not rejects
+
+    # Count each blocking finding by the rule that fired, so the dashboard shows
+    # which rules actually gate screenings (vs. which never trip in production).
+    for f in rejects:
+        critic_rejections_total.labels(rule_id=f["rule_id"]).inc()
 
     if passed:
         log.info("critic.passed", findings=len(findings))

@@ -10,6 +10,7 @@ anything else — above all schema-validation errors — propagates immediately
 so a deterministic failure is never retried.
 """
 
+import time
 from functools import lru_cache
 from typing import Any
 
@@ -20,6 +21,7 @@ from tenacity import Retrying, retry_if_exception, stop_after_attempt, wait_expo
 
 from app.config import get_settings
 from app.exceptions import LLMUnavailableError
+from app.services.metrics import llm_call_duration_seconds, llm_call_failures_total
 
 MAX_LLM_ATTEMPTS = 3
 
@@ -57,14 +59,25 @@ def invoke_with_retry(runnable: Runnable, input_: Any) -> Any:
         retry=retry_if_exception(is_transient),
         reraise=True,
     )
+    # One observation per logical call (retries folded into the span) so the
+    # duration histogram and failure counter share a denominator per provider.
+    provider = get_settings().llm_provider
+    started = time.perf_counter()
     try:
         return retryer(runnable.invoke, input_)
     except Exception as exc:
+        # Count only genuine backend failures (transient errors that exhausted
+        # retries) — a non-transient error means the backend *answered* and the
+        # output was unusable (schema violation, bad request). Lumping those in
+        # would turn this counter into false backend-outage alerts.
         if is_transient(exc):
+            llm_call_failures_total.labels(provider=provider).inc()
             raise LLMUnavailableError(
                 f"LLM backend unavailable after {MAX_LLM_ATTEMPTS} attempts: {exc}"
             ) from exc
         raise
+    finally:
+        llm_call_duration_seconds.labels(provider=provider).observe(time.perf_counter() - started)
 
 
 @lru_cache(maxsize=1)

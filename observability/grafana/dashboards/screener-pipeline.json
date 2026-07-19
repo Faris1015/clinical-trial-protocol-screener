@@ -1,0 +1,183 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "tags": ["screener", "pipeline"],
+  "time": { "from": "now-1h", "to": "now" },
+  "timezone": "browser",
+  "title": "Protocol Screener — Pipeline",
+  "uid": "screener-pipeline",
+  "version": 1,
+  "refresh": "10s",
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Screenings by outcome (total)",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (outcome) (screenings_total)",
+          "legendFormat": "{{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Screening throughput (runs/min by outcome)",
+      "gridPos": { "h": 6, "w": 16, "x": 8, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10, "stacking": { "mode": "normal" } } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (outcome) (rate(screenings_total[5m])) * 60",
+          "legendFormat": "{{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Agent node duration p95 (s)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (agent, le) (rate(agent_node_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{agent}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "End-to-end screening latency (sum of node p95, s)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(agent_node_duration_seconds_bucket[5m])))",
+          "legendFormat": "any node p95"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Critic rejections by rule (rate/min)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "bars", "fillOpacity": 60, "stacking": { "mode": "normal" } } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (rule_id) (rate(critic_rejections_total[5m])) * 60",
+          "legendFormat": "{{rule_id}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Parser attempts per screening (p50 / p95)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(parse_attempts_bucket[5m])))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(parse_attempts_bucket[5m])))",
+          "legendFormat": "p95"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "LLM call latency p95 by provider (s)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 22 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (provider, le) (rate(llm_call_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{provider}}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "LLM call failures (rate/min by provider)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 22 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 20 } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (provider) (rate(llm_call_failures_total[5m])) * 60",
+          "legendFormat": "{{provider}}"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "HTTP request rate by status (req/s)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 30 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (status) (rate(http_requests_total[5m]))",
+          "legendFormat": "{{status}}"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "HTTP request latency p95 by handler (s)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 30 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (handler, le) (rate(http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{handler}}"
+        }
+      ]
+    }
+  ]
+}

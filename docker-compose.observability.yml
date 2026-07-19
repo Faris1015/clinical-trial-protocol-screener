@@ -1,0 +1,48 @@
+# Observability overlay (#7): Prometheus + Grafana, wired to scrape the backend.
+#
+# Run alongside the main stack (shares the `protocol-screener` network so the
+# backend is reachable by service name):
+#
+#   docker compose -f docker-compose.yml -f docker-compose.observability.yml up
+#
+#   Prometheus  http://localhost:9090
+#   Grafana     http://localhost:3000  (anonymous viewer; admin/admin to edit)
+#
+# The "Protocol Screener — Pipeline" dashboard and the Prometheus datasource are
+# auto-provisioned, so a demo run renders end-to-end with no manual setup.
+name: protocol-screener
+
+services:
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=7d"
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    environment:
+      # Local-only demo credentials; anonymous viewer so the dashboard opens
+      # without a login. Never reuse these outside local development.
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      - GF_USERS_DEFAULT_THEME=light
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    ports:
+      - "3000:3000"
+
+volumes:
+  prometheus-data:
+  grafana-data:
