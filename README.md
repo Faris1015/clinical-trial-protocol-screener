@@ -3,7 +3,11 @@
 [![CI](https://github.com/Faris1015/clinical-trial-protocol-screener/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Faris1015/clinical-trial-protocol-screener/actions/workflows/ci.yml)
 [![CD](https://github.com/Faris1015/clinical-trial-protocol-screener/actions/workflows/cd.yml/badge.svg?branch=main)](https://github.com/Faris1015/clinical-trial-protocol-screener/actions/workflows/cd.yml)
 
-**Live demo:** <https://screener-frontend.fly.dev>
+**Deploy your own demo:** a one-container, zero-cost public demo — the React SPA
+and API served from a single image in stub-LLM mode, no credit card or API key —
+deploys to Render or a Hugging Face Space in a few clicks. See
+[Free demo deploy](docs/free-demo-deploy.md). To run the full stack locally,
+`docker compose up` (below).
 
 A multi-agent AI system that ingests clinical trial protocols (PDF or markdown), extracts
 eligibility criteria into a strict typed schema, cross-checks them against an FDA-style
@@ -115,6 +119,22 @@ echo "LLM_PROVIDER=anthropic"       >> .env
 echo "ANTHROPIC_API_KEY=sk-ant-..." >> .env
 docker compose up --build
 ```
+
+### One-container demo (stub LLM, no model)
+
+For a zero-dependency spin-up — no Ollama, no API key, no second container — the
+[`deploy/demo/Dockerfile`](deploy/demo/Dockerfile) builds the SPA into the backend
+image and serves both from one origin in `LLM_PROVIDER=stub` mode (deterministic,
+canned extractions; the full pipeline still runs end-to-end):
+
+```bash
+docker build -f deploy/demo/Dockerfile -t screener-demo .
+docker run --rm -p 8000:8000 screener-demo   # open http://localhost:8000
+```
+
+This is the image behind the free public demo — see
+[`docs/free-demo-deploy.md`](docs/free-demo-deploy.md) to host it on Render or a
+Hugging Face Space for free.
 
 ### Manual (local dev)
 
@@ -429,7 +449,7 @@ settings — lives in [`CONTRIBUTING.md`](CONTRIBUTING.md). In short:
 1. Pick an issue, branch from `main`: `feat/<issue>-<slug>` or `fix/<issue>-<slug>`
 2. Open a PR referencing the issue (`Closes #N`) — CI must pass (lint, types, tests, build)
 3. Squash-merge with a conventional-commit title (`feat:`, `fix:`, `test:`, `docs:`, `chore:`)
-4. Merge to `main` triggers CD: image build → registry → rolling deploy gated on `/ready`
+4. Merge to `main` triggers CD: backend + frontend images built and pushed to GHCR; the hosting platform auto-deploys from `main` (see [Free demo deploy](docs/free-demo-deploy.md))
 
 ### CI
 
@@ -445,15 +465,22 @@ cancelled automatically. Branch protection and merge settings are documented in
 ### CD
 
 Merge to `main` triggers [`cd.yml`](.github/workflows/cd.yml): it builds and
-pushes the backend + frontend images to GHCR (tagged with the commit SHA and
-`latest`), then deploys them to [Fly.io](https://fly.io) with a **zero-downtime
-rolling update** — new machines must pass the [`/ready`](#health--readiness)
-health check before the old ones are drained, so a broken build can't take the
-site down. A post-deploy [smoke test](scripts/smoke_test.sh) then verifies the
-live URL is serving the new build and can run a screening end-to-end. Secrets
-live in the `production` GitHub Environment (optionally behind a required
-reviewer). Full topology, one-time setup, and the **rollback** procedure are in
-[`docs/deployment.md`](docs/deployment.md).
+pushes the backend + frontend images to GHCR, each tagged with the commit SHA and
+`latest`, and bakes `GIT_SHA` into the backend so [`/health`](#health--readiness)
+and `/ready` report exactly which build is live. Images only build when relevant
+files change, and runs on `main` are serialized so two quick merges can't race the
+`:latest` tag.
+
+**Deployment itself is delegated to the hosting platform's own auto-deploy from
+the repo** — the free public demo rebuilds the single-container image straight
+from `main` on every push (Render blueprint via [`render.yaml`](render.yaml), or a
+Hugging Face Space). One-command setup for either is in
+[`docs/free-demo-deploy.md`](docs/free-demo-deploy.md).
+
+For a real deployment, [`docs/deployment.md`](docs/deployment.md) documents a full
+production topology — separate backend and nginx-frontend containers, a Postgres
+checkpointer, and dedicated LLM inference — with a [`/ready`](#health--readiness)-gated
+**zero-downtime rolling update** and a **rollback** procedure.
 
 ## Configuration
 
