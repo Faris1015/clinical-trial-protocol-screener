@@ -5,9 +5,9 @@ serves **both** the React SPA and the API from a single origin, in
 `LLM_PROVIDER=stub` mode (deterministic, no GPU, no API key). No CORS, no second
 host, no credit card.
 
-This is a **demo-only topology**, separate from production (which runs the
-backend and an nginx frontend as two containers with a real LLM — see
-[`docs/deployment.md`](deployment.md)). Nothing here changes that path.
+This is a **demo-only topology**, separate from a real production deployment
+(which would run the backend and an nginx frontend as two containers with a real
+LLM and a durable Postgres checkpointer).
 
 ## What makes it free
 
