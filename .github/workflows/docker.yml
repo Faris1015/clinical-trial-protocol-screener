@@ -21,6 +21,10 @@ concurrency:
   group: docker-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
+# Least privilege: builds images and smoke-tests them, never writes to the repo.
+permissions:
+  contents: read
+
 jobs:
   build-images:
     runs-on: ubuntu-latest
