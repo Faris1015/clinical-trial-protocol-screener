@@ -477,10 +477,11 @@ from `main` on every push (Render blueprint via [`render.yaml`](render.yaml), or
 Hugging Face Space). One-command setup for either is in
 [`docs/free-demo-deploy.md`](docs/free-demo-deploy.md).
 
-For a real deployment, [`docs/deployment.md`](docs/deployment.md) documents a full
-production topology — separate backend and nginx-frontend containers, a Postgres
-checkpointer, and dedicated LLM inference — with a [`/ready`](#health--readiness)-gated
-**zero-downtime rolling update** and a **rollback** procedure.
+A production deployment would instead run the published backend and
+nginx-frontend images as separate containers with a durable Postgres checkpointer
+(`CHECKPOINT_BACKEND=postgres`) and a real LLM backend, fronted by a
+[`/ready`](#health--readiness)-gated rolling update — but that path isn't wired
+into this repo's CD.
 
 ## Configuration
 

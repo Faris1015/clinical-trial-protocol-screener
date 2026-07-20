@@ -28,12 +28,12 @@ server {
     # nginx resolves the backend on each request instead of once at config load.
     # That means the frontend boots and serves the SPA even if the backend is
     # briefly unresolvable — API calls 502 until it returns — instead of nginx
-    # failing to start. The upstream is templated so one image serves both
-    # topologies: docker-compose resolves the `backend` service name (default in
-    # the Dockerfile), while on Fly the backend is a separate app reached over
-    # the private network (screener-backend.flycast). Only BACKEND_-prefixed vars
-    # are substituted (NGINX_ENVSUBST_FILTER), so nginx's own $host/$uri/etc. and
-    # the $backend_host variable below survive envsubst untouched.
+    # failing to start. The upstream is templated (`BACKEND_UPSTREAM`, defaulting
+    # to the `backend` service name in the Dockerfile) so the same image works
+    # wherever the API lives — the docker-compose `backend` service, or any host
+    # reached under a different name. Only BACKEND_-prefixed vars are substituted
+    # (NGINX_ENVSUBST_FILTER), so nginx's own $host/$uri/etc. and the
+    # $backend_host variable below survive envsubst untouched.
     include /etc/nginx/resolver.conf;
     set $backend_host "${BACKEND_UPSTREAM}";
 
@@ -72,10 +72,9 @@ server {
     }
 
     # Expose the backend's liveness/readiness probes through the one public
-    # origin. On Fly the backend is private (flycast) with no public IP, so the
-    # CD smoke test and any uptime monitor reach /health and /ready here; in
-    # compose these proxy the same backend. Exact-match (`= /path`) so they never
-    # shadow a future SPA route of the same name.
+    # origin so an uptime monitor can reach /health and /ready even when the
+    # backend has no public route of its own. Exact-match (`= /path`) so they
+    # never shadow a future SPA route of the same name.
     location = /health {
         proxy_pass http://$backend_host;
         proxy_set_header Host $host;
