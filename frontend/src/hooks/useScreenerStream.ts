@@ -19,7 +19,7 @@ export function useScreenerStream(threadId: string | null) {
     setError(null);
     setPhase("running");
 
-    const es = new EventSource(`/api/screenings/${threadId}/stream`);
+    const es = new EventSource(`/api/screenings/${encodeURIComponent(threadId)}/stream`);
     es.onmessage = (e) => {
       const msg: StreamMessage = JSON.parse(e.data);
       if (msg.node === "__interrupt__") {

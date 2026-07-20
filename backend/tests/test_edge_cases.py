@@ -6,8 +6,10 @@ every patient lands in needs-review.
 from typing import cast
 
 import pymupdf
+import pytest
 
 import app.graph.nodes.matcher as matcher_mod
+from app.exceptions import ExtractionError
 from app.graph.nodes.matcher import evaluate_patient, matcher_node
 from app.graph.state import ScreenerState
 from app.services.pdf import extract_eligibility_text
@@ -43,6 +45,20 @@ def test_pdf_without_eligibility_section_returns_all_text():
     text = extract_eligibility_text(pdf)
     assert "logistics" in text
     assert "parking" in text
+
+
+def test_pdf_over_page_limit_rejected_before_rendering():
+    # A "PDF bomb" defense: a document with more pages than max_pages is
+    # rejected with ExtractionError (422) instead of materializing every page.
+    pdf = _pdf("one", "two", "three")
+    with pytest.raises(ExtractionError, match="exceeding the 2-page limit"):
+        extract_eligibility_text(pdf, max_pages=2)
+
+
+def test_pdf_within_page_limit_still_extracts():
+    pdf = _pdf("Inclusion criteria: age 18+.", "Exclusion criteria: pregnancy.")
+    text = extract_eligibility_text(pdf, max_pages=10)
+    assert "Inclusion criteria" in text
 
 
 # --- 0-patient database ----------------------------------------------------

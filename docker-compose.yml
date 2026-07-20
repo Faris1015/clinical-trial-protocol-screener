@@ -60,8 +60,12 @@ services:
     depends_on:
       ollama-pull:
         condition: service_completed_successfully
+    # Loopback-only: the browser reaches the API through the frontend proxy on
+    # :8080. This direct port is for local debugging, so don't publish the
+    # unauthenticated backend on 0.0.0.0 where the LAN could hit it. The frontend
+    # still reaches it over the compose network by service name.
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
 
   frontend:
     build: ./frontend

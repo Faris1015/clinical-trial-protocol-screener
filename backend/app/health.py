@@ -96,8 +96,11 @@ async def _run(name: str, check: Callable[[], Awaitable[dict[str, object]]]) -> 
         log.warning("ready.check_timeout", check=name)
         return name, {"ok": False, "detail": f"timed out after {CHECK_TIMEOUT_S}s"}
     except Exception as exc:  # noqa: BLE001 — a probe must convert any failure into a status
+        # Full exception text (which can carry filesystem paths, the LLM backend
+        # URL, or DB DSN fragments) goes to the server log only; /ready is public
+        # via nginx, so the response body gets a generic, stable label.
         log.warning("ready.check_failed", check=name, error=type(exc).__name__, detail=str(exc))
-        return name, {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
+        return name, {"ok": False, "detail": "check failed"}
 
 
 async def readiness(store: ScreeningStore) -> tuple[bool, dict[str, dict]]:

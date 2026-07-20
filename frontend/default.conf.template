@@ -4,6 +4,24 @@ server {
     root /usr/share/nginx/html;
     index index.html;
 
+    # Don't advertise the nginx version on responses/error pages.
+    server_tokens off;
+
+    # Bound request bodies at the edge to match the backend's 25 MiB upload cap
+    # (default is 1m, which would silently 413 legitimate protocol PDFs).
+    client_max_body_size 26m;
+
+    # Security headers, applied to every response (including proxied ones) via
+    # `always`. No location below sets add_header, so these are inherited
+    # everywhere. The SPA loads only same-origin hashed JS/CSS, so a strict
+    # default-src 'self' holds; 'unsafe-inline' on styles covers React's inline
+    # style attributes. frame-ancestors 'none' blocks clickjacking of the
+    # human-in-the-loop approval gate.
+    add_header X-Frame-Options DENY always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header Referrer-Policy strict-origin-when-cross-origin always;
+    add_header Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
+
     # Per-request upstream resolution. `resolver.conf` (written by
     # 15-detect-resolver.sh at startup) points at the container's DNS server;
     # because proxy_pass below targets a *variable* rather than a literal host,
@@ -19,9 +37,28 @@ server {
     include /etc/nginx/resolver.conf;
     set $backend_host "${BACKEND_UPSTREAM}";
 
-    # Reverse-proxy the API to the backend. With a variable proxy_pass and no URI
-    # part, nginx forwards the original request URI unchanged, so /api/screenings
-    # hits the backend's /api/screenings.
+    # SSE: the /stream endpoint is a long-lived event stream. Buffering would
+    # hold events back until the connection closed, so disable it and give the
+    # upstream a long read timeout. Scoped to *only* the stream route (a regex
+    # location, which nginx matches ahead of the /api/ prefix below) so the
+    # hour-long timeout can't pin a worker connection on the ordinary
+    # request/response API endpoints.
+    location ~ ^/api/screenings/[^/]+/stream$ {
+        proxy_pass http://$backend_host;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_set_header Connection "";
+        proxy_read_timeout 3600s;
+    }
+
+    # Reverse-proxy the rest of the API to the backend. With a variable
+    # proxy_pass and no URI part, nginx forwards the original request URI
+    # unchanged, so /api/screenings hits the backend's /api/screenings.
     location /api/ {
         proxy_pass http://$backend_host;
         proxy_http_version 1.1;
@@ -29,13 +66,9 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
 
-        # SSE: the /stream endpoint is a long-lived event stream. Buffering
-        # would hold events back until the connection closed, so disable it and
-        # give the upstream a long read timeout.
-        proxy_buffering off;
-        proxy_cache off;
-        proxy_set_header Connection "";
-        proxy_read_timeout 3600s;
+        # Ordinary request/response endpoints: keep the default read timeout so a
+        # wedged upstream request fails fast instead of holding a connection.
+        proxy_read_timeout 60s;
     }
 
     # Expose the backend's liveness/readiness probes through the one public

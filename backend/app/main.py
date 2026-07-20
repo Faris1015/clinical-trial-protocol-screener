@@ -10,6 +10,7 @@ one handler — clients get a JSON body, never a stack trace. The SSE stream
 terminates with `__error__` instead of dying silently when a node blows up.
 """
 
+import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -40,6 +41,12 @@ from app.services.uploads import read_upload_capped, validate_content_type
 # of the INFO access log so they don't drown the request stream. /metrics is
 # scraped by Prometheus on the same cadence, so it belongs here too.
 _QUIET_PATHS = frozenset({"/health", "/ready", "/metrics"})
+
+# A client-supplied X-Request-ID is echoed into every log line for the request
+# and reflected in the response header. Constrain it to a short, safe charset so
+# it can't be used to forge/inject log lines (console format) or bloat logs; an
+# out-of-spec value is dropped in favor of a freshly minted UUID.
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
 # Resolve settings at import time so a misconfigured deployment fails at
 # startup (e.g. LLM_PROVIDER=anthropic without ANTHROPIC_API_KEY), not
@@ -119,11 +126,13 @@ async def correlation_middleware(
 ) -> Response:
     """Bind a per-request `request_id` into every log line and echo it back.
 
-    A client-supplied `X-Request-ID` is honored (so a trace spans services);
-    otherwise one is minted. `thread_id` is bound later, inside the handlers
-    that know it, and rides the same contextvars into the graph nodes.
+    A client-supplied `X-Request-ID` is honored (so a trace spans services) when
+    it matches `_REQUEST_ID_RE`; otherwise one is minted. `thread_id` is bound
+    later, inside the handlers that know it, and rides the same contextvars into
+    the graph nodes.
     """
-    request_id = request.headers.get("x-request-id") or str(uuid4())
+    incoming = request.headers.get("x-request-id")
+    request_id = incoming if incoming and _REQUEST_ID_RE.match(incoming) else str(uuid4())
     clear_contextvars()
     bind_contextvars(request_id=request_id)
     quiet = request.url.path in _QUIET_PATHS
@@ -248,7 +257,12 @@ async def create_screening(request: Request, file: UploadFile) -> dict:
     validate_content_type(file.content_type, file.filename, settings.upload_content_type_set)
     raw = await read_upload_capped(file, settings.max_upload_bytes)
     thread_id = await screening.create_screening(
-        _store(), file.filename, raw, content_type=file.content_type
+        _store(),
+        file.filename,
+        raw,
+        content_type=file.content_type,
+        max_pdf_pages=settings.max_pdf_pages,
+        max_text_chars=settings.max_protocol_text_chars,
     )
     return {"thread_id": thread_id}
 

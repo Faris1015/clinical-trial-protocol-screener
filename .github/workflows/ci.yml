@@ -11,6 +11,11 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
+# Least privilege: this workflow only reads the repo. Installing deps runs
+# untrusted transitive code, so don't hand it a write-capable GITHUB_TOKEN.
+permissions:
+  contents: read
+
 jobs:
   backend:
     runs-on: ubuntu-latest

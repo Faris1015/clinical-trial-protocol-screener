@@ -25,7 +25,9 @@ export default function App() {
   }
 
   async function approve() {
-    const res = await fetch(`/api/screenings/${threadId}/approve`, { method: "POST" });
+    const res = await fetch(`/api/screenings/${encodeURIComponent(threadId!)}/approve`, {
+      method: "POST",
+    });
     if (!res.ok) {
       // e.g. 503 when the patient store is unavailable — the screening stays
       // parked at the gate, so show the error instead of crashing on undefined.
