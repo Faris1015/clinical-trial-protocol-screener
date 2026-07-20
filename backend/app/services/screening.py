@@ -10,6 +10,7 @@ imports the graph builder directly.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any, Protocol
 from uuid import uuid4
@@ -102,6 +103,9 @@ async def create_screening(
     filename: str | None,
     raw: bytes,
     content_type: str | None = None,
+    *,
+    max_pdf_pages: int | None = None,
+    max_text_chars: int | None = None,
 ) -> str:
     """Parse the upload into eligibility text, persist it, and return its thread_id.
 
@@ -109,14 +113,21 @@ async def create_screening(
     or logged — the raw name is attacker-controlled and only trusted to detect a
     PDF (by extension or content type) so its bytes go through PyMuPDF, which
     validates them and raises ExtractionError (422) on a non-PDF.
+
+    PDF parsing is CPU-bound and offloaded to a thread so a large document can't
+    stall the event loop for every other in-flight request. The extracted text is
+    truncated to `max_text_chars` so the downstream LLM prompts are bounded
+    regardless of upload size.
     """
     is_pdf = (filename or "").lower().endswith(".pdf") or (content_type or "").lower() == (
         "application/pdf"
     )
     if is_pdf:
-        text = extract_eligibility_text(raw)
+        text = await asyncio.to_thread(extract_eligibility_text, raw, max_pdf_pages)
     else:
         text = raw.decode("utf-8", errors="replace")
+    if max_text_chars is not None:
+        text = text[:max_text_chars]
 
     safe_filename = sanitize_filename(filename)
     thread_id = str(uuid4())

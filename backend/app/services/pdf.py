@@ -12,12 +12,20 @@ from app.exceptions import ExtractionError
 SECTION_HINTS = ["inclusion criteria", "exclusion criteria", "eligibility", "study population"]
 
 
-def extract_eligibility_text(pdf_bytes: bytes) -> str:
+def extract_eligibility_text(pdf_bytes: bytes, max_pages: int | None = None) -> str:
     # pymupdf signals unreadable input with FileDataError/EmptyFileError,
     # which subclass RuntimeError and ValueError respectively.
     try:
         doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
-        pages = [doc[i].get_text() for i in range(doc.page_count)]
+        page_count = doc.page_count
+    except (RuntimeError, ValueError) as exc:
+        raise ExtractionError(f"Could not read PDF: {exc}") from exc
+    # Bound the work before materializing text: a small-but-many-page PDF can
+    # sit under the byte cap yet expand to hundreds of MB of extracted text.
+    if max_pages is not None and page_count > max_pages:
+        raise ExtractionError(f"PDF has {page_count} pages, exceeding the {max_pages}-page limit.")
+    try:
+        pages = [doc[i].get_text() for i in range(page_count)]
     except (RuntimeError, ValueError) as exc:
         raise ExtractionError(f"Could not read PDF: {exc}") from exc
     if not pages:

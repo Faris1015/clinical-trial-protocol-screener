@@ -108,6 +108,16 @@ async def test_create_defaults_missing_filename_to_upload():
     assert stored.source_filename == "upload"
 
 
+async def test_create_truncates_text_to_cap():
+    # A large non-PDF upload is truncated to max_text_chars before it is stored
+    # (and thus before it reaches the Parser/Critic prompts).
+    store = InMemoryScreeningStore()
+    thread_id = await screening.create_screening(store, "big.md", b"x" * 10_000, max_text_chars=100)
+    stored = await store.get_input(thread_id)
+    assert stored is not None
+    assert len(stored.raw_protocol_text) == 100
+
+
 async def test_create_corrupt_pdf_raises_extraction_error():
     from app.exceptions import ExtractionError
 

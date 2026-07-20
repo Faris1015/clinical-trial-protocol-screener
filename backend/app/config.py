@@ -58,6 +58,17 @@ class Settings(BaseSettings):
     # Reject uploads larger than this before buffering the whole body. 25 MiB
     # comfortably fits a 200-page protocol PDF while stopping 500 MB spam.
     max_upload_bytes: int = Field(25 * 1024 * 1024, ge=1)
+    # Upper bound on the protocol text handed to the pipeline. The byte cap
+    # above bounds the *transport*, but a 25 MiB markdown/txt upload — or a
+    # text-dense PDF — decodes to millions of characters that are then fed to
+    # the Parser *and* the Critic on every parse attempt. Truncate to a sane
+    # budget so a crafted upload can't drive unbounded token spend / context
+    # overflow. 200k chars (~50k tokens) dwarfs any real eligibility section.
+    max_protocol_text_chars: int = Field(200_000, ge=1000)
+    # Reject a PDF whose page count is implausible for a protocol *before*
+    # rendering every page into memory (a decompression/"PDF bomb" defense).
+    # Protocols run 80-200 pages; 2000 is generous headroom.
+    max_pdf_pages: int = Field(2000, ge=1)
     # Comma-separated content-type allowlist for uploads. A generic type
     # (application/octet-stream or empty) falls back to a filename-extension
     # check so browser uploads of .md/.txt files aren't rejected spuriously.

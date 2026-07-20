@@ -29,8 +29,10 @@ services:
       - CORS_ORIGINS=http://localhost:8080
     volumes:
       - loadtest-data:/data
+    # Loopback-only: this stack runs unthrottled (RATE_LIMIT_ENABLED=false, wide
+    # concurrency) for load testing — keep it off the LAN.
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
 
 volumes:
   loadtest-data:
