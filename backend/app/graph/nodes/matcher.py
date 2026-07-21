@@ -223,9 +223,7 @@ def build_verdict_cache(
     llm_bound = [
         c
         for c in categoricals
-        if any(
-            not _fast_present(_norm(c["value"]), tnorm) for tnorm in term_by_norm
-        )
+        if any(not _fast_present(_norm(c["value"]), tnorm) for tnorm in term_by_norm)
     ]
     done = 0
     for c in categoricals:

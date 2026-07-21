@@ -92,13 +92,15 @@ class ResumeGraph:
     (so the approvable pre-check passes), astream yields `updates`, then a later
     aget_state reports `after` (the terminal state for the final frame)."""
 
-    def __init__(self, updates: list[dict], after: FakeSnapshot, gate: tuple = ("matcher",)):
+    def __init__(
+        self, updates: list[dict | tuple], after: FakeSnapshot, gate: tuple = ("matcher",)
+    ):
         self.updates = updates
         self.after = after
         self.gate = gate
         self._state_calls = 0
 
-    async def astream(self, *_a: object, **_k: object) -> AsyncIterator[dict]:
+    async def astream(self, *_a: object, **_k: object) -> AsyncIterator[dict | tuple]:
         for update in self.updates:
             yield update
 
