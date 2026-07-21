@@ -296,9 +296,29 @@ async def stream_screening(request: Request, thread_id: str) -> StreamingRespons
 
 @app.post("/api/screenings/{thread_id}/approve")
 @limiter.limit(lambda: settings.rate_limit_create)
-async def approve_screening(request: Request, thread_id: str) -> dict:
-    with active_screenings.slot():
-        return await screening.approve_screening(_store(), _graph(), thread_id)
+async def approve_screening(request: Request, thread_id: str) -> StreamingResponse:
+    # Mirror the stream route: the matcher can run for minutes on a local model,
+    # so hold a concurrency slot for its lifetime and stream its progress rather
+    # than blocking the POST until the whole cohort is scored (which times out
+    # the client and provokes duplicate approve clicks). Eager validation inside
+    # approve_screening raises before the response commits, so the slot acquired
+    # here is released on that path too.
+    active_screenings.acquire()
+    try:
+        frames = await screening.approve_screening(_store(), _graph(), thread_id)
+    except BaseException:
+        active_screenings.release()
+        raise
+    guarded = release_after(frames, active_screenings)
+    heartbeated = sse.with_heartbeats(
+        guarded,
+        heartbeat_seconds=settings.sse_heartbeat_seconds,
+        # The matcher emits progress between calls (resetting this clock), but a
+        # single slow cohort-mapping call needs a longer window than the pre-
+        # approval phase.
+        idle_timeout_seconds=settings.sse_matcher_idle_timeout_seconds,
+    )
+    return StreamingResponse(heartbeated, media_type="text/event-stream")
 
 
 @app.get("/api/screenings/{thread_id}/state")

@@ -109,6 +109,27 @@ def test_true_small_cell_patient_matches_via_fast_path():
     assert evaluate_patient(sclc, crit, cache)["eligible"] is True
 
 
+def test_build_verdict_cache_reports_progress_per_llm_call():
+    """on_progress fires once per LLM-bound criterion (the hook the matcher uses
+    to keep the approve SSE stream alive between slow calls)."""
+    crit = _criteria(
+        inclusion_categorical=[_cat("small cell lung cancer")],
+        exclusion_categorical=[_cat("prior platinum chemotherapy", category="prior_treatment")],
+    )
+    patient = _patient("P1", diagnoses=["non-small cell lung cancer"], medications=["carboplatin"])
+    calls: list = []
+    ticks: list[tuple[int, int]] = []
+    build_verdict_cache(
+        crit,
+        [patient],
+        _make_mapper({}, calls),
+        on_progress=lambda done, total: ticks.append((done, total)),
+    )
+    # One tick per LLM call, counting up, with a stable denominator.
+    assert len(ticks) == len(calls) == 2
+    assert ticks == [(0, 2), (1, 2)]
+
+
 # --- Semantic equivalence (platinum / carboplatin) --------------------------
 
 

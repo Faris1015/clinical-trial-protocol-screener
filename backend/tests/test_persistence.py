@@ -204,10 +204,15 @@ def test_screening_resumes_from_interrupt_after_restart(durable_app):
         assert state["pending"] == ["matcher"]
         assert state["values"]["parsed_criteria"]["trial_title"] == "Test Trial"
 
-        # And approval resumes past the interrupt and runs the matcher.
-        approved = client.post(f"/api/screenings/{thread_id}/approve")
-        assert approved.status_code == 200
-        matched = approved.json()["matched_patients"]
+        # And approval resumes past the interrupt and STREAMS the matcher.
+        with client.stream("POST", f"/api/screenings/{thread_id}/approve") as approved:
+            assert approved.status_code == 200
+            frames = [
+                json.loads(line.removeprefix("data: "))
+                for line in approved.iter_lines()
+                if line.startswith("data: ")
+            ]
+        matched = next(f for f in frames if f["node"] == "matcher")["update"]["matched_patients"]
         assert len(matched) == 1
         assert matched[0]["patient_id"] == "p1"
 

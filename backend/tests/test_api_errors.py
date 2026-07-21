@@ -177,17 +177,20 @@ def test_stream_awaiting_approval_terminates_with_interrupt(client, thread_id, m
     assert events[-1]["node"] == "__interrupt__"
 
 
-# --- approve: datastore failure → 503, screening stays approvable -----------
+# --- approve: datastore failure mid-stream → terminal __error__ frame -------
 
 
-def test_approve_with_corrupt_patient_store_returns_503(client, thread_id, monkeypatch):
+def test_approve_with_corrupt_patient_store_streams_error_frame(client, thread_id, monkeypatch):
     monkeypatch.setattr(main, "graph", FakeGraph(DataStoreError("patients.json is corrupt")))
-    response = client.post(f"/api/screenings/{thread_id}/approve")
-    assert response.status_code == 503
-    body = response.json()
-    assert body["error"] == "DataStoreError"
-    assert "patients.json" in body["detail"]
-    # The server is still alive and the screening is still parked at the gate
+    # The matcher streams now, so a mid-run store failure can't be an HTTP status
+    # (headers already sent): it's a 200 event-stream terminated by __error__.
+    with client.stream("POST", f"/api/screenings/{thread_id}/approve") as response:
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        events = _sse_events(response)
+    assert events[-1]["node"] == "__error__"
+    assert "patients.json" in events[-1]["message"]
+    # The server is still alive and the screening still exists (checkpoint parked).
     assert client.get(f"/api/screenings/{thread_id}/state").status_code == 200
 
 

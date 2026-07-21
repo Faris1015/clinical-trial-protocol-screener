@@ -16,6 +16,10 @@ from collections.abc import AsyncIterator
 INTERRUPT = "__interrupt__"
 ERROR = "__error__"
 END = "__end__"
+# Intra-node progress (currently only the matcher): a long node emits these so
+# the stream produces real frames — resetting the idle-timeout clock and giving
+# the UI a live signal — before its single terminal update arrives.
+PROGRESS = "__progress__"
 
 # A heartbeat is an SSE *comment* line (leading colon). Browsers' EventSource
 # ignores it — it never fires `onmessage` — so it keeps the connection warm and
@@ -32,6 +36,12 @@ def frame(payload: dict) -> str:
 def update_frame(node: str, update: dict) -> str:
     """A graph node's state update. `update` must already be JSON-serializable."""
     return frame({"node": node, "update": update})
+
+
+def progress_frame(data: dict) -> str:
+    """A long node's mid-flight progress (non-terminal). `data` is the payload a
+    node emitted via LangGraph's custom stream writer."""
+    return frame({"node": PROGRESS, "update": data})
 
 
 def interrupt_frame() -> str:

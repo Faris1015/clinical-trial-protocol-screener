@@ -31,8 +31,11 @@ services:
     environment:
       - OLLAMA_HOST=http://ollama:11434
     # Pulls the model into the shared volume, then exits. ~4.7GB on first run;
-    # subsequent runs are cached by the ollama-models volume.
-    entrypoint: ["ollama", "pull", "llama3.1:8b"]
+    # subsequent runs are cached by the ollama-models volume. Kept in sync with
+    # the backend via the same OLLAMA_MODEL variable (compose interpolates it).
+    # qwen2.5:7b (~6 GiB to load) fits Docker Desktop's default VM; qwen2.5:14b
+    # needs ~10.7 GiB and will 500 unless you raise the VM memory limit.
+    entrypoint: ["ollama", "pull", "${OLLAMA_MODEL:-qwen2.5:7b}"]
     restart: "no"
 
   backend:
@@ -52,6 +55,9 @@ services:
       # Switch to hosted Claude with `LLM_PROVIDER=anthropic ANTHROPIC_API_KEY=...`
       # in a root .env (ollama/ollama-pull still start but go unused).
       - LLM_PROVIDER=${LLM_PROVIDER:-ollama}
+      # Same default as ollama-pull above so the backend requests the tag that
+      # was actually pulled. Override both by exporting OLLAMA_MODEL.
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:7b}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
     volumes:
       # Holds the generated patients.json (and the durable checkpointer DB once

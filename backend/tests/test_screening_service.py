@@ -87,6 +87,31 @@ class ApprovingGraph:
         return self.result
 
 
+class ResumeGraph:
+    """Models the /approve resume: the first aget_state reports the matcher gate
+    (so the approvable pre-check passes), astream yields `updates`, then a later
+    aget_state reports `after` (the terminal state for the final frame)."""
+
+    def __init__(
+        self, updates: list[dict | tuple], after: FakeSnapshot, gate: tuple = ("matcher",)
+    ):
+        self.updates = updates
+        self.after = after
+        self.gate = gate
+        self._state_calls = 0
+
+    async def astream(self, *_a: object, **_k: object) -> AsyncIterator[dict | tuple]:
+        for update in self.updates:
+            yield update
+
+    async def aget_state(self, _config: object) -> FakeSnapshot:
+        self._state_calls += 1
+        return FakeSnapshot(pending=self.gate) if self._state_calls == 1 else self.after
+
+    async def ainvoke(self, *_a: object) -> dict:  # pragma: no cover - approve streams now
+        raise NotImplementedError
+
+
 # --- create --------------------------------------------------------------
 
 
@@ -219,32 +244,62 @@ async def test_stream_unexpected_error_hides_detail():
 # --- approve -------------------------------------------------------------
 
 
-async def test_approve_returns_matches_and_sets_status():
+async def test_approve_streams_matcher_update_and_marks_done():
     store = InMemoryScreeningStore()
     thread_id = await screening.create_screening(store, "p.md", b"x")
-    graph = ApprovingGraph(
-        result={"matched_patients": [{"id": "P1"}], "events": [], "current_step": "done"}
+    graph = ResumeGraph(
+        updates=[{"matcher": {"matched_patients": [{"patient_id": "P1"}], "current_step": "done"}}],
+        after=FakeSnapshot(values={"current_step": "done"}),
     )
-    result = await screening.approve_screening(store, graph, thread_id)
-    assert result["matched_patients"] == [{"id": "P1"}]
+    frames = _frames(await _drain(await screening.approve_screening(store, graph, thread_id)))
+    assert {
+        "node": "matcher",
+        "update": {"matched_patients": [{"patient_id": "P1"}], "current_step": "done"},
+    } in frames
+    assert frames[-1] == {"node": sse.END}
     assert (await store.list())[0].status == "done"
+
+
+async def test_approve_relays_custom_progress_frames():
+    store = InMemoryScreeningStore()
+    thread_id = await screening.create_screening(store, "p.md", b"x")
+    # A list stream_mode makes the graph yield (mode, chunk) tuples; a "custom"
+    # chunk is the matcher's mid-flight progress and must surface as a
+    # non-terminal __progress__ frame before the matcher's terminal update.
+    graph = ResumeGraph(
+        updates=[
+            ("custom", {"phase": "matching", "done": 0, "total": 2}),
+            ("updates", {"matcher": {"matched_patients": [{"patient_id": "P1"}]}}),
+        ],
+        after=FakeSnapshot(values={"current_step": "done"}),
+    )
+    frames = _frames(await _drain(await screening.approve_screening(store, graph, thread_id)))
+    assert {"node": sse.PROGRESS, "update": {"phase": "matching", "done": 0, "total": 2}} in frames
+    assert any(f["node"] == "matcher" for f in frames)
+    assert frames[-1] == {"node": sse.END}
 
 
 async def test_approve_when_not_awaiting_raises_409_error():
     store = InMemoryScreeningStore()
     thread_id = await screening.create_screening(store, "p.md", b"x")
+    # Eager pre-check raises before any frame is yielded → becomes a 409, not a
+    # mid-stream error.
     with pytest.raises(ScreeningNotApprovableError):
         await screening.approve_screening(store, ApprovingGraph(pending=()), thread_id)
 
 
-async def test_approve_domain_error_propagates_and_leaves_screening_parked():
+async def test_approve_domain_error_streams_error_frame_and_marks_failed():
     store = InMemoryScreeningStore()
     thread_id = await screening.create_screening(store, "p.md", b"x")
+    # A matcher DataStoreError fires mid-stream, so it can't be an HTTP status:
+    # it terminates the approve stream with an __error__ frame (mirroring the
+    # initial stream). The graph checkpoint stays parked at the gate, so a retry
+    # once the store is fixed still resumes.
     graph = RaisingGraph(DataStoreError("patients.json is corrupt"))
-    with pytest.raises(DataStoreError):
-        await screening.approve_screening(store, graph, thread_id)
-    # Status untouched — the screening can be retried once the store is fixed.
-    assert (await store.list())[0].status == "routing"
+    frames = _frames(await _drain(await screening.approve_screening(store, graph, thread_id)))
+    assert frames[-1]["node"] == sse.ERROR
+    assert "patients.json is corrupt" in frames[-1]["message"]
+    assert (await store.list())[0].status == "failed"
 
 
 # --- state ---------------------------------------------------------------

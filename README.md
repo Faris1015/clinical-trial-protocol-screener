@@ -90,7 +90,7 @@ data gets touched.
 | Orchestration | **LangGraph** (StateGraph, checkpointer, conditional edges, interrupts) |
 | API | **FastAPI** with SSE streaming of graph events |
 | Validation | **Pydantic v2** — schemas double as LLM structured-output contracts |
-| LLM | **Ollama** (`llama3.1:8b`) locally, or hosted Claude via the same interface |
+| LLM | **Ollama** (`qwen2.5:7b`) locally, or hosted Claude via the same interface |
 | Frontend | **React + TypeScript + Vite** — live pipeline visualization |
 | Synthetic data | Seeded Faker-based EHR generator (reproducible demos) |
 
@@ -106,7 +106,7 @@ docker compose up --build
 ```
 
 Then open **http://localhost:8080**. On the first run Ollama downloads
-`llama3.1:8b` (~4.7GB) before the backend starts — subsequent runs reuse the
+`qwen2.5:7b` (~4.7GB) before the backend starts — subsequent runs reuse the
 cached model volume. Synthetic patients are generated automatically into a
 data volume on first start. `depends_on` health conditions order startup so the
 frontend only comes up once the backend is healthy; check with
@@ -151,7 +151,7 @@ python -m app.data.generate_ehr          # generate synthetic patients
 uvicorn app.main:app --reload --port 8000
 ```
 
-Requires [Ollama](https://ollama.com) running locally with `ollama pull llama3.1:8b`,
+Requires [Ollama](https://ollama.com) running locally with `ollama pull qwen2.5:7b`,
 or set `ANTHROPIC_API_KEY` and `LLM_PROVIDER=anthropic`.
 
 #### Frontend
@@ -300,49 +300,60 @@ under a documented convention (in-vocab numerics → quantitative; concrete term
 → categorical; unrepresentable medical criteria → `unparseable`; administrative
 text → omitted). Details in [`backend/evals/`](backend/evals/README.md).
 
-**Baseline** — `llama3.1:8b` via Ollama (`make eval`; local 8B model, no
-fine-tuning). The two origins are read differently, on purpose:
+**Default model** — `qwen2.5:7b` via Ollama (`make eval`; local 7B, no
+fine-tuning). Chosen to run within a 16 GB / default-Docker footprint (see
+[Configuration](#configuration)). For comparison, reproduce the larger and
+smaller models with `OLLAMA_MODEL=qwen2.5:14b make eval` or
+`OLLAMA_MODEL=llama3.1:8b make eval`. The two origins are read differently, on
+purpose:
 
 *Curated set — labels are exhaustive, so precision **and** recall are both
 meaningful:*
 
 | Criterion type | Gold | Precision | Recall |
 |---|---|---|---|
-| inclusion_quantitative | 17 | 0.67 | 0.71 |
-| inclusion_categorical | 4 | 0.80 | 1.00 |
+| inclusion_quantitative | 17 | 0.80 | 0.71 |
+| inclusion_categorical | 4 | 0.50 | 0.75 |
 | exclusion_quantitative | 2 | 1.00 | 1.00 |
-| exclusion_categorical | 7 | 0.22 | 0.29 |
-| unparseable | 1 | 1.00 | 1.00 |
-| **overall** | **31** | **0.60** | **0.68** |
+| exclusion_categorical | 7 | 0.62 | 0.71 |
+| unparseable | 1 | 1.00 | 0.00 |
+| **overall** | **31** | **0.71** | **0.71** |
 
 *Real set (ClinicalTrials.gov) — labels are a curated subset, so **read recall**;
 precision is a confounded floor (the model is charged a false positive for every
-real criterion we deliberately omitted — e.g. 21 administrative items it dumped
-into `unparseable`), not a fair metric:*
+real criterion we deliberately did not label), not a fair metric:*
 
 | Criterion type | Gold | Recall |
 |---|---|---|
-| inclusion_quantitative | 4 | 0.25 |
-| inclusion_categorical | 7 | 0.29 |
+| inclusion_quantitative | 4 | 0.50 |
+| inclusion_categorical | 7 | 0.43 |
 | exclusion_quantitative | 3 | 0.33 |
-| exclusion_categorical | 16 | 0.06 |
+| exclusion_categorical | 16 | 0.50 |
 | unparseable | 8 | 0.00 |
-| **overall** | **38** | **0.13** |
+| **overall** | **38** | **0.37** |
 
-Category-label accuracy (diagnostic, not in P/R): **0.78** (7/9 matched
+Category-label accuracy (diagnostic, not in P/R): **0.47** (9/19 matched
 categoricals).
 
-**Reading.** On clean, in-vocabulary input the 8B model is dependable at exactly
-what the deterministic Critic leans on — numeric thresholds (`exclusion_quantitative`
-1.00/1.00) and routing vague criteria to `unparseable`. Its weak spot is
-categorical exclusions (over-extraction + inclusion/exclusion bucket confusion,
-not category mislabeling). On raw ClinicalTrials.gov text recall collapses to
-~0.13: a small local model under-extracts the criteria that matter from long,
-messy protocols. That gap — clean vs. real — is the headline finding, and the
-concrete case for a larger model and the LLM semantic-review layer the Critic
-currently stubs (`run_llm_semantic_review`). Numbers move with the model; treat
-them as a snapshot, not a contract. Reproduce with `make eval` (prints curated,
-real, and combined tables).
+**Reading.** On the **curated** set `qwen2.5:7b` is the strongest of the three
+models tried — overall **0.71/0.71**, ahead of both `llama3.1:8b` (0.60/0.68) and
+`qwen2.5:14b` (0.58/0.61). Numeric extraction is solid (`exclusion_quantitative`
+1.00/1.00, `inclusion_quantitative` 0.80 precision) and it captures the
+categorical exclusions the larger 14B model oddly dropped (0.62/0.71 vs. 0.12/0.14)
+— exactly what the deterministic Critic leans on. On the **real set** overall
+recall is **0.37 — 2.8× the 8B baseline's 0.13**: on long, messy
+ClinicalTrials.gov text it recovers far more of the criteria that drive screening.
+`qwen2.5:14b` edges it there (0.47) but needs ~10.7 GiB to load, so 7B captures
+most of the real-world gain within the memory budget — the reason it is the
+default. Two caveats: (1) curated gold counts are tiny (1–2 per some types), so a
+single miss swings a row hard — `unparseable` 1.00 → 0.00 is one missed item, not
+a trend; (2) `unparseable` recall is 0.00 on **both** sets — the model tends to
+extract borderline criteria as concrete values rather than routing genuinely
+vague ones to `unparseable`, so the deterministic Critic's vague-language rules
+(which key off the protocol text, not the `unparseable` list) remain the real
+backstop, and the LLM semantic pass (`run_llm_semantic_review`) catches
+contradictions on top. Numbers move with the model; treat them as a snapshot, not
+a contract. Reproduce with `make eval` (prints curated, real, and combined tables).
 
 #### Load testing
 
@@ -495,7 +506,7 @@ with a clear message instead of erroring mid-screening.
 | Variable | Default | Purpose |
 |---|---|---|
 | `LLM_PROVIDER` | `ollama` | `ollama` (local) or `anthropic` (hosted) |
-| `OLLAMA_MODEL` | `llama3.1:8b` | Local model tag |
+| `OLLAMA_MODEL` | `qwen2.5:7b` | Local model tag (~4.7GB, ~6GiB to load; fits 16GB RAM and Docker's default VM) |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server address |
 | `ANTHROPIC_MODEL` | `claude-sonnet-5` | Hosted model id |
 | `ANTHROPIC_API_KEY` | — | **Required** when `LLM_PROVIDER=anthropic` |

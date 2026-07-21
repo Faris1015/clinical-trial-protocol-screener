@@ -1,6 +1,12 @@
 """Tests for Parser post-processing (LLM extraction is mocked elsewhere)."""
 
-from app.graph.nodes.parser import _dedupe_categoricals
+import pytest
+
+from app.graph.nodes.parser import (
+    _clean_source_text,
+    _dedupe_categoricals,
+    _normalize_source_text,
+)
 from app.schemas.criteria import CriteriaSchema
 
 
@@ -64,3 +70,62 @@ def test_distinct_terms_preserved():
     out = _dedupe_categoricals(s)
     assert [c.value for c in out.inclusion_categorical] == ["type 2 diabetes mellitus"]
     assert len(out.exclusion_categorical) == 2
+
+
+# --- source_text normalization ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # The observed artifact: section header + list number folded in.
+        (
+            "Patients meeting any of the following are excluded: 1. Prior systemic "
+            "therapy for the current malignancy within 4 weeks.",
+            "Prior systemic therapy for the current malignancy within 4 weeks.",
+        ),
+        # Bare leading list marker, no header.
+        (
+            "2. Systolic blood pressure > 150 mmHg at screening.",
+            "Systolic blood pressure > 150 mmHg at screening.",
+        ),
+        ("- Active, uncontrolled infection.", "Active, uncontrolled infection."),
+        # Clean sentences are untouched.
+        ("eGFR >= 60 mL/min/1.73m2.", "eGFR >= 60 mL/min/1.73m2."),
+        (
+            "Histologically confirmed advanced solid tumor.",
+            "Histologically confirmed advanced solid tumor.",
+        ),
+        # False-positive guard: a mid-sentence colon NOT followed by a list item
+        # must survive intact.
+        ("Prior treatment completed: see appendix.", "Prior treatment completed: see appendix."),
+    ],
+)
+def test_clean_source_text(raw: str, expected: str):
+    assert _clean_source_text(raw) == expected
+
+
+def test_normalize_source_text_applies_across_all_groups():
+    s = _schema(
+        exclusion_categorical=[
+            {
+                "category": "prior_treatment",
+                "value": "prior systemic therapy",
+                "negated": False,
+                "source_text": "Patients are excluded if any apply: 1. prior systemic therapy.",
+            }
+        ],
+        inclusion_quantitative=[
+            {
+                "attribute": "egfr",
+                "operator": ">=",
+                "value": 60,
+                "value_high": None,
+                "unit": "mL/min/1.73m2",
+                "source_text": "eGFR >= 60 mL/min/1.73m2.",
+            }
+        ],
+    )
+    out = _normalize_source_text(s)
+    assert out.exclusion_categorical[0].source_text == "prior systemic therapy."
+    assert out.inclusion_quantitative[0].source_text == "eGFR >= 60 mL/min/1.73m2."  # untouched

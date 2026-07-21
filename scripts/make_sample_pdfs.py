@@ -15,6 +15,13 @@ Each PDF targets a different code path in the pipeline:
                              (it should still find and extract just the right pages).
   04_not_a_protocol.pdf      A meeting-minutes document with no eligibility section.
                              Should be rejected by the Router.
+  05_clean_pass.pdf          Fully compliant protocol engineered to clear every
+                             screening layer on the first pass: explicit numeric
+                             lab thresholds (all within plausible ranges), an
+                             explicit lower age bound, no vague organ-function
+                             language, and no childbearing/pregnancy keywords —
+                             so no deterministic Critic rule can fire and the
+                             LLM semantic pass finds no contradictions.
 
 Run:  python scripts/make_sample_pdfs.py
 Output: sample_pdfs/*.pdf
@@ -147,6 +154,44 @@ DIABETES = [
 ]
 
 
+# Engineered to pass every screening layer on the first parse. Design notes:
+#   RENAL-001  : eGFR stated numerically -> has_quant, rule cannot fire even
+#                though "renal"/"egfr" appear in the text.
+#   HEPATIC-001: no "hepatic"/"liver"/"bilirubin"/"organ function" keywords, so
+#                the vague-language rule has nothing to key off.
+#   BP-001/002 : systolic 150 (in 90-200), diastolic 95 (in 50-130).
+#   PLT-001    : platelets >= 100 (in 10-1000, written x10^9/L, not multiplied out).
+#   ANC-001    : ANC >= 1.5 (in 0.1-50).
+#   AGE-001    : explicit lower age bound "Age >= 18 years".
+#   PREG-001   : no "childbearing"/"pregnan" keywords, so the rule cannot fire.
+# All bounds are internally consistent and units match their attributes, so the
+# LLM semantic second pass has no contradiction to report.
+CLEAN_PASS = [
+    ("title", "Protocol CLN-2025-042"),
+    ("h1", "A Phase II Study of Investigational Agent BX-11 in Advanced Solid Tumors"),
+    ("gap", ""),
+    ("h1", "Section 5. Study Population and Eligibility"),
+    ("h2", "5.1 Inclusion Criteria"),
+    ("body", "Patients must meet all of the following to be eligible:"),
+    ("body",
+     "1. Age >= 18 years at the time of consent.\n"
+     "2. Histologically or cytologically confirmed advanced solid tumor.\n"
+     "3. ECOG performance status <= 1.\n"
+     "4. Estimated glomerular filtration rate (eGFR) >= 60 mL/min/1.73m2.\n"
+     "5. Absolute neutrophil count >= 1.5 x 10^9/L.\n"
+     "6. Platelet count >= 100 x 10^9/L.\n"
+     "7. Left ventricular ejection fraction >= 50%."),
+    ("gap", ""),
+    ("h2", "5.2 Exclusion Criteria"),
+    ("body", "Patients meeting any of the following are excluded:"),
+    ("body",
+     "1. Prior systemic therapy for the current malignancy within 4 weeks.\n"
+     "2. Systolic blood pressure > 150 mmHg at screening.\n"
+     "3. Diastolic blood pressure > 95 mmHg at screening.\n"
+     "4. Active, uncontrolled infection requiring intravenous antibiotics."),
+]
+
+
 def long_protocol() -> list[tuple[str, str]]:
     filler = (
         "This section is provided for background and does not contain eligibility "
@@ -238,6 +283,7 @@ def main() -> None:
         ("02_diabetes_cardio.pdf", DIABETES),
         ("03_long_protocol.pdf", long_protocol()),
         ("04_not_a_protocol.pdf", NOT_A_PROTOCOL),
+        ("05_clean_pass.pdf", CLEAN_PASS),
     ]
     for name, blocks in jobs:
         doc = render(blocks)

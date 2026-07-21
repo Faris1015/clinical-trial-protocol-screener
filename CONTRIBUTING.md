@@ -37,7 +37,7 @@ uvicorn app.main:app --reload --port 8000
 ```
 
 Requires [Ollama](https://ollama.com) running locally with
-`ollama pull llama3.1:8b`, or set `ANTHROPIC_API_KEY` and
+`ollama pull qwen2.5:7b`, or set `ANTHROPIC_API_KEY` and
 `LLM_PROVIDER=anthropic`. Copy `backend/.env.example` to `backend/.env` for the
 authoritative list of configuration variables.
 
