@@ -65,13 +65,20 @@ async def test_upload_stream_interrupt_approve_happy_path(monkeypatch):
             assert state["pending"] == ["matcher"]
             assert state["values"]["compliance_passed"] is True
 
-            # 5. Approve — resumes past the gate and runs the real Matcher.
-            approve = await client.post(f"/api/screenings/{thread_id}/approve")
-            assert approve.status_code == 200
-            body = approve.json()
-            assert isinstance(body["matched_patients"], list)
-            assert len(body["matched_patients"]) > 0
-            assert all("patient_id" in p for p in body["matched_patients"])
+            # 5. Approve — resumes past the gate and STREAMS the real Matcher.
+            approve_lines: list[str] = []
+            async with client.stream("POST", f"/api/screenings/{thread_id}/approve") as approve:
+                assert approve.status_code == 200
+                assert approve.headers["content-type"].startswith("text/event-stream")
+                async for line in approve.aiter_lines():
+                    approve_lines.append(line)
+            approve_frames = _sse_frames(approve_lines)
+            matcher_frames = [f for f in approve_frames if f["node"] == "matcher"]
+            assert matcher_frames, "matcher update should stream"
+            matched = matcher_frames[-1]["update"]["matched_patients"]
+            assert isinstance(matched, list) and len(matched) > 0
+            assert all("patient_id" in p for p in matched)
+            assert approve_frames[-1]["node"] == "__end__"
 
             # 6. Final status is terminal.
             listing = (await client.get("/api/screenings")).json()

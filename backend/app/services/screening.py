@@ -197,22 +197,61 @@ async def stream_screening(
     return generate()
 
 
-async def approve_screening(store: ScreeningStore, graph: ScreeningGraph, thread_id: str) -> dict:
-    """Resume a screening past the human-in-the-loop gate and return its result."""
+async def approve_screening(
+    store: ScreeningStore, graph: ScreeningGraph, thread_id: str
+) -> AsyncIterator[str]:
+    """Resume past the human-in-the-loop gate and STREAM the matcher over SSE.
+
+    The matcher makes LLM calls over the whole cohort and can run for minutes on
+    a local model. Streaming it — instead of blocking the POST until it returns —
+    keeps approval responsive (a slow model no longer times out the client) and
+    reuses the exact frame/error contract `stream_screening` uses: the matcher's
+    node update carries `matched_patients`, then a terminal frame closes the run.
+
+    Validation is eager (raising before any frame is yielded) so an unknown
+    thread or a screening not at the gate becomes an HTTP error, not a frame
+    buried after the response headers are already sent. That second check also
+    rejects an approve on an already-finished screening (its `next` is empty).
+    """
     config = await _require_thread(store, thread_id)
     bind_contextvars(thread_id=thread_id)
     if not (await graph.aget_state(config)).next:
         raise ScreeningNotApprovableError("screening is not awaiting approval")
     log.info("screening.approved")
-    # Resume past the interrupt_before=["matcher"] gate. A DataStoreError from
-    # the matcher propagates to the error handler (503) and the screening stays
-    # parked at the gate, so approval can be retried once fixed.
-    result = await graph.ainvoke(None, config)
-    await store.set_status(thread_id, str(result.get("current_step") or "done"))
-    return {
-        "matched_patients": result["matched_patients"],
-        "events": jsonable_encoder(result["events"]),
-    }
+
+    async def generate() -> AsyncIterator[str]:
+        # Mirrors stream_screening's generator: an exception mid-stream can't be
+        # an HTTP status (headers already sent), so the terminal __error__ frame
+        # is the only error channel and must catch everything.
+        try:
+            # None input resumes from the interrupt_before=["matcher"] checkpoint.
+            # Two stream modes: "updates" carries the matcher's terminal node
+            # result; "custom" carries its mid-flight progress (see matcher's
+            # _progress_emitter) so the stream emits real frames during the long
+            # LLM matching pass, keeping the idle-timeout reaper from killing a
+            # working run. With a list mode LangGraph yields (mode, chunk) tuples;
+            # the fakes yield bare dicts, so treat a non-tuple as an update chunk.
+            async for item in graph.astream(None, config, stream_mode=["updates", "custom"]):
+                mode, chunk = item if isinstance(item, tuple) else ("updates", item)
+                if mode == "custom":
+                    yield sse.progress_frame(jsonable_encoder(chunk))
+                    continue
+                for node, update in chunk.items():
+                    yield sse.update_frame(node, jsonable_encoder(update))
+            snapshot = await graph.aget_state(config)
+            await store.set_status(thread_id, _status_from_snapshot(snapshot))
+            yield _terminal_frame(snapshot)
+            log.info("screening.approve_finished")
+        except ScreenerError as exc:
+            log.warning("screening.approve_error", error=type(exc).__name__, detail=str(exc))
+            await store.set_status(thread_id, "failed")
+            yield sse.error_frame(str(exc))
+        except Exception:  # noqa: BLE001 — last-resort terminator, detail stays server-side
+            log.error("screening.approve_crashed", exc_info=True)
+            await store.set_status(thread_id, "failed")
+            yield sse.error_frame("Screening failed unexpectedly — check server logs.")
+
+    return generate()
 
 
 async def get_screening_state(store: ScreeningStore, graph: ScreeningGraph, thread_id: str) -> dict:

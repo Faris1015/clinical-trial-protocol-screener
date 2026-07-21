@@ -32,8 +32,14 @@ class Settings(BaseSettings):
     # from real model latency. Never enable it in production: it returns canned
     # extractions, not real analysis.
     llm_provider: Literal["ollama", "anthropic", "stub"] = "ollama"
-    ollama_model: str = "llama3.1:8b"
+    ollama_model: str = "qwen2.5:7b"
     ollama_base_url: str = "http://localhost:11434"
+    # Hard ceiling on tokens generated per LLM call. Bounds a degenerate
+    # repetition loop (observed: a small model emitting 50k+ tokens on one
+    # malformed structured-output attempt, hanging the whole screening) while
+    # sitting well above any real parser/critic/matcher output. Ollama-only —
+    # hosted providers cap output themselves.
+    ollama_num_predict: int = Field(4096, ge=1)
     anthropic_model: str = "claude-sonnet-5"
     anthropic_api_key: str | None = None
     llm_temperature: float = Field(0.0, ge=0.0, le=1.0)
@@ -90,6 +96,11 @@ class Settings(BaseSettings):
     # wedged graph). idle must be a multiple-ish of heartbeat to be meaningful.
     sse_heartbeat_seconds: float = Field(15.0, gt=0)
     sse_idle_timeout_seconds: float = Field(120.0, gt=0)
+    # The matcher streams progress between LLM calls (which reset the idle clock),
+    # but a single cohort-mapping call on a slow local model can itself run for a
+    # while, so the approve stream gets a longer idle window than the pre-approval
+    # phase before the reaper trips.
+    sse_matcher_idle_timeout_seconds: float = Field(300.0, gt=0)
 
     # --- Pipeline ---
     max_parse_attempts: int = Field(3, ge=1, le=10)

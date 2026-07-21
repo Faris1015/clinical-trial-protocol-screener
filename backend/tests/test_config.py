@@ -11,6 +11,7 @@ def clean_env(monkeypatch):
     for var in (
         "LLM_PROVIDER",
         "OLLAMA_MODEL",
+        "OLLAMA_NUM_PREDICT",
         "OLLAMA_BASE_URL",
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_MODEL",
@@ -29,6 +30,7 @@ def clean_env(monkeypatch):
         "CONCURRENCY_RETRY_AFTER_SECONDS",
         "SSE_HEARTBEAT_SECONDS",
         "SSE_IDLE_TIMEOUT_SECONDS",
+        "SSE_MATCHER_IDLE_TIMEOUT_SECONDS",
     ):
         monkeypatch.delenv(var, raising=False)
     get_settings.cache_clear()
@@ -42,13 +44,21 @@ def test_defaults_load_without_any_env():
     assert s.max_parse_attempts == 3
     assert s.cors_origin_list == ["http://localhost:5173"]
     assert s.rules_path.is_file()
+    # Generation cap defaults high enough for any real extraction, low enough to
+    # bound a runaway loop.
+    assert s.ollama_num_predict == 4096
+    # The approve/matcher stream gets a longer idle window than the base stream.
+    assert s.sse_idle_timeout_seconds == 120.0
+    assert s.sse_matcher_idle_timeout_seconds == 300.0
 
 
 def test_env_overrides(monkeypatch):
     monkeypatch.setenv("OLLAMA_MODEL", "mistral:7b")
+    monkeypatch.setenv("OLLAMA_NUM_PREDICT", "1024")
     monkeypatch.setenv("MAX_PARSE_ATTEMPTS", "5")
     s = Settings(_env_file=None)
     assert s.ollama_model == "mistral:7b"
+    assert s.ollama_num_predict == 1024
     assert s.max_parse_attempts == 5
 
 

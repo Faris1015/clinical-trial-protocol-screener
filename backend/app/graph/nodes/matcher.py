@@ -21,6 +21,7 @@ from collections.abc import Callable
 from operator import eq, ge, gt, le, lt
 
 from langchain_core.exceptions import OutputParserException
+from langgraph.config import get_stream_writer
 from pydantic import ValidationError
 
 from app.config import get_settings
@@ -192,7 +193,10 @@ def _map_terms_via_llm(criterion_value: str, terms: list[str]) -> dict[str, str]
 
 
 def build_verdict_cache(
-    criteria: dict, patients: list[dict], mapper: TermMapper = _map_terms_via_llm
+    criteria: dict,
+    patients: list[dict],
+    mapper: TermMapper = _map_terms_via_llm,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> dict[tuple[str, str], str]:
     """Resolve the ambiguous categorical tail once for the whole cohort.
 
@@ -201,6 +205,10 @@ def build_verdict_cache(
     per `(criterion_value, term)`. An unavailable LLM degrades to "uncertain" for
     that criterion's terms → the affected patients land in needs-review rather than
     being silently passed or failed.
+
+    `on_progress(done, total)` is called before each LLM mapper call. Each call
+    can take tens of seconds on a local model, so this lets the caller emit a
+    keepalive/progress signal between them (see matcher_node).
     """
     categoricals = criteria["inclusion_categorical"] + criteria["exclusion_categorical"]
     # One representative original spelling per normalized term, for the prompt.
@@ -210,6 +218,16 @@ def build_verdict_cache(
             term_by_norm.setdefault(_norm(t), t)
 
     cache: dict[tuple[str, str], str] = {}
+    # Only criteria with an ambiguous tail actually make an LLM call; count those
+    # for a meaningful progress denominator.
+    llm_bound = [
+        c
+        for c in categoricals
+        if any(
+            not _fast_present(_norm(c["value"]), tnorm) for tnorm in term_by_norm
+        )
+    ]
+    done = 0
     for c in categoricals:
         cval = _norm(c["value"])
         candidates = {
@@ -219,6 +237,9 @@ def build_verdict_cache(
         }
         if not candidates:
             continue
+        if on_progress is not None:
+            on_progress(done, len(llm_bound))
+        done += 1
         try:
             verdicts = mapper(c["value"], list(candidates.values()))
         except LLMUnavailableError as exc:
@@ -240,9 +261,11 @@ def build_verdict_cache(
 def load_patients() -> list[dict]:
     """Read the synthetic EHR; a missing or corrupt file is a DataStoreError.
 
-    Raised (not absorbed into state) on purpose: the matcher only runs inside
-    the synchronous /approve request, where the FastAPI handler turns this
-    into a 503 and the checkpointed screening stays resumable at the gate.
+    Raised (not absorbed into state) on purpose: it fires at the very start of
+    the matcher, before any state advances, so the checkpoint stays parked at
+    the gate and approval is retryable once the store is fixed. Approval now
+    streams (see services.screening.approve_screening), so this surfaces as a
+    terminal __error__ frame on the approve SSE stream rather than a 503.
     """
     path = get_settings().patients_path
     try:
@@ -256,11 +279,30 @@ def load_patients() -> list[dict]:
     return patients
 
 
+def _progress_emitter() -> Callable[[int, int], None]:
+    """A callback that pushes matcher progress onto the graph's custom stream.
+
+    `get_stream_writer()` only works inside a streaming graph run; called
+    anywhere else (direct unit tests, a non-streaming invoke) it raises, so we
+    degrade to a no-op. Emitted events reach the approve SSE stream as
+    `__progress__` frames — see services.screening.approve_screening.
+    """
+    try:
+        writer = get_stream_writer()
+    except RuntimeError:
+        return lambda _done, _total: None
+
+    def emit(done: int, total: int) -> None:
+        writer({"phase": "matching", "done": done, "total": total})
+
+    return emit
+
+
 def matcher_node(state: ScreenerState) -> dict:
     criteria = state["parsed_criteria"]
     assert criteria is not None, "matcher runs after parser — parsed_criteria is set"
     patients = load_patients()
-    verdicts = build_verdict_cache(criteria, patients)
+    verdicts = build_verdict_cache(criteria, patients, on_progress=_progress_emitter())
     evaluations = [evaluate_patient(p, criteria, verdicts) for p in patients]
     eligible = [e for e in evaluations if e["eligible"] and not e["needs_review"]]
     review = [e for e in evaluations if e["needs_review"]]

@@ -10,6 +10,8 @@ failing lands the screening in a terminal `failed` state with a user-visible
 event instead of an unhandled exception killing the stream.
 """
 
+import re
+
 from langchain_core.exceptions import OutputParserException
 from langchain_core.runnables import Runnable
 from pydantic import ValidationError
@@ -32,7 +34,9 @@ value=0 or a placeholder).
 with the matching category — even though it has no number. `unparseable` is ONLY for \
 criteria that imply a numeric threshold but state none (e.g. "adequate organ function"); \
 never put a diagnosis or a plainly-checkable term there.
-3. `source_text` must be copied verbatim from the protocol. Extract ONLY from the protocol \
+3. `source_text` must be copied verbatim from the protocol, but ONLY the single \
+criterion sentence — do not prepend the section header (e.g. "Patients are excluded if any \
+of the following apply:") or its list number ("1.", "2."). Extract ONLY from the protocol \
 text; never copy a reviewer's revision feedback into any field.
 4. Exclusion criteria describing a required ABSENCE go in exclusion lists, not inclusion \
 with negated=true.
@@ -64,6 +68,37 @@ def _extract_criteria(structured_llm: Runnable, prompt: str) -> CriteriaSchema:
             ),
         ]
         return _validate(invoke_with_retry(structured_llm, repair))
+
+
+# A leading list enumeration ("1.", "2)", "- ", "• ").
+_LIST_MARKER = re.compile(r"^\s*(?:\d+[.)]|[-•*])\s+")
+# A section header the model sometimes folds into a criterion's source_text: a
+# short clause ending in a colon *immediately followed by a list item*. Anchoring
+# on the trailing list marker keeps this high-precision — it fires on
+# "Patients are excluded if any apply: 1. ..." but never on a legitimate
+# mid-sentence colon like "Prior treatment completed: see appendix".
+_PREAMBLE_BEFORE_LIST = re.compile(r"^\s*[^:\n]{1,120}:\s+(?=(?:\d+[.)]|[-•*])\s)")
+
+
+def _clean_source_text(text: str) -> str:
+    """Strip a folded-in section header and/or list enumeration from a verbatim
+    `source_text`. Display-only cleanup — the Matcher keys off `value`/`attribute`,
+    never `source_text` — so this only tidies the audit column, never a decision."""
+    cleaned = _PREAMBLE_BEFORE_LIST.sub("", text, count=1)
+    cleaned = _LIST_MARKER.sub("", cleaned, count=1)
+    return cleaned.strip() or text.strip()
+
+
+def _normalize_source_text(criteria: CriteriaSchema) -> CriteriaSchema:
+    for group in (
+        criteria.inclusion_quantitative,
+        criteria.inclusion_categorical,
+        criteria.exclusion_quantitative,
+        criteria.exclusion_categorical,
+    ):
+        for c in group:
+            c.source_text = _clean_source_text(c.source_text)
+    return criteria
 
 
 def _dedupe_categoricals(criteria: CriteriaSchema) -> CriteriaSchema:
@@ -134,7 +169,7 @@ def parser_node(state: ScreenerState) -> dict:
             "screening aborted."
         )
 
-    result = _dedupe_categoricals(result)
+    result = _normalize_source_text(_dedupe_categoricals(result))
     n_inc = len(result.inclusion_quantitative) + len(result.inclusion_categorical)
     n_exc = len(result.exclusion_quantitative) + len(result.exclusion_categorical)
     log.info(

@@ -104,5 +104,8 @@ def get_llm() -> BaseChatModel:
             model=settings.ollama_model,
             base_url=settings.ollama_base_url,
             temperature=settings.llm_temperature,
+            # Cap generation so a degenerate loop can't run unbounded and hang
+            # the screening (see Settings.ollama_num_predict).
+            num_predict=settings.ollama_num_predict,
         )
     return llm
