@@ -452,6 +452,26 @@ Phase 4 (make it excellent):   #15 hardening → #16 intelligence → #7 metrics
 Phase 1 first because every later PR then lands through CI with lint/type/test gates —
 the guardrails pay for themselves on all subsequent work.
 
+### TrialGate v2 — product & experience layer
+
+With the production-hardening pillars above complete, the next initiative is the
+**product & experience layer**, tracked under the
+[TrialGate v2 epic (#46)](../../issues/46): a rename to **TrialGate**, a
+**Next.js** frontend migration, **authentication**, and the reviewer-facing
+features that make the pipeline demoable end-to-end.
+
+| Pillar | Issues | What it delivers |
+|---|---|---|
+| **A · Frontend platform** | [#47](../../issues/47) `P1` · [#48](../../issues/48) `P1` · [#49](../../issues/49) `P2` | Next.js + TypeScript migration, dashboard shell (sidebar nav, Tailwind, shadcn/ui), skeletons + Framer Motion |
+| **B · Auth & access** | [#50](../../issues/50) `P1` | Authentication + reviewer/admin roles + login; gates the patient-matching step |
+| **C · Core features** | [#51](../../issues/51) `P1` · [#52](../../issues/52) `P1` · [#53](../../issues/53) `P1` | Past-runs history, human-readable Critic/Matcher output, human-in-the-loop edit-and-rerun |
+| **D · Audit & reporting** | [#54](../../issues/54) `P2` · [#55](../../issues/55) `P2` · [#56](../../issues/56) `P2` · [#57](../../issues/57) `P3` · [#58](../../issues/58) `P3` · [#59](../../issues/59) `P3` | Provenance highlighting, event timeline, downloadable report, rules viewer, in-app metrics, run comparison |
+| **E · Platform extras** | [#60](../../issues/60) `P3` · [#61](../../issues/61) `P3` | Notify-on-gate/escalation, batch upload |
+| **F · Rebrand** | [#62](../../issues/62) `P1` | Rename the product to TrialGate across docs & code (repo slug unchanged) |
+
+Suggested order: **F1 → A1 → A2 → B1** (foundation), then **C1 → C2 → C3**
+(core), then D1–D3 + A3 (depth), then the remaining P3 items.
+
 ## Development workflow
 
 The full flow — local setup, branching, PRs, conventional commits, and repo
