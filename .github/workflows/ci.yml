@@ -77,5 +77,11 @@ jobs:
         run: npm run format:check
       - name: Typecheck (tsc)
         run: npm run typecheck
-      - name: Build
-        run: npm run build
+      - name: Build (next export)
+        # Both container images COPY frontend/out — `next build` exiting 0 is not
+        # enough, the static export has to actually be there. A missing
+        # out/index.html means `output: "export"` was dropped from next.config.ts,
+        # which would break the image builds instead of this job.
+        run: |
+          npm run build
+          test -f out/index.html

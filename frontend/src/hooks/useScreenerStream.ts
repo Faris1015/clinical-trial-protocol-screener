@@ -1,5 +1,7 @@
+"use client";
+
 import { useCallback, useEffect, useState } from "react";
-import type { StateUpdate, StreamMessage } from "../types";
+import type { StateUpdate, StreamMessage } from "@/types";
 
 export type NodeState = { status: string; update: StateUpdate };
 export type Phase = "idle" | "running" | "awaiting_approval" | "done" | "failed";
@@ -10,12 +12,18 @@ export type Phase = "idle" | "running" | "awaiting_approval" | "done" | "failed"
  *
  * Two producers share the same frame contract: the initial GET /stream
  * (EventSource, below) and the POST /approve stream that resumes the matcher
- * (consumed in App via fetch — EventSource can't POST). Both funnel frames
+ * (consumed by the caller via fetch — EventSource can't POST). Both funnel frames
  * through `applyFrame`, so the wire handling lives in exactly one place.
+ *
+ * One screening per mount: `threadId` seeds the initial phase and is expected to
+ * be fixed for the lifetime of the component. Callers start a new screening by
+ * remounting on a `key` (see ScreeningRun's use in app/page.tsx) rather than
+ * swapping the prop, which is what keeps the previous run's node states from
+ * bleeding into the next one without a cascading state reset inside an effect.
  */
 export function useScreenerStream(threadId: string | null) {
   const [nodeStates, setNodeStates] = useState<Record<string, NodeState>>({});
-  const [phase, setPhase] = useState<Phase>("idle");
+  const [phase, setPhase] = useState<Phase>(threadId ? "running" : "idle");
   const [error, setError] = useState<string | null>(null);
 
   // Apply one parsed frame to state. Returns true when the frame is terminal
@@ -63,9 +71,6 @@ export function useScreenerStream(threadId: string | null) {
 
   useEffect(() => {
     if (!threadId) return;
-    setNodeStates({});
-    setError(null);
-    setPhase("running");
 
     const es = new EventSource(`/api/screenings/${encodeURIComponent(threadId)}/stream`);
     es.onmessage = (e) => {

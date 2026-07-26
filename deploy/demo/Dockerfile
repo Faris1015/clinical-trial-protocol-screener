@@ -1,6 +1,7 @@
-# Single-service demo image: one container serving BOTH the React SPA and the
-# FastAPI API, in stub-LLM mode — no Ollama, no Anthropic key, no second host,
-# no CORS. Built for free/no-credit-card hosts (Hugging Face Spaces, Render).
+# Single-service demo image: one container serving BOTH the Next.js frontend
+# (statically exported — no Node server) and the FastAPI API, in stub-LLM mode —
+# no Ollama, no Anthropic key, no second host, no CORS. Built for
+# free/no-credit-card hosts (Hugging Face Spaces, Render).
 # Full runbook: docs/free-demo-deploy.md.
 #
 # BUILD CONTEXT IS THE REPO ROOT (not backend/), so it can pull in both apps:
@@ -9,14 +10,16 @@
 # The production topology (backend/Dockerfile + frontend/Dockerfile behind nginx,
 # real LLM) is unchanged — this is a separate, demo-only image.
 
-# --- Stage 1: build the React bundle -----------------------------------------
+# --- Stage 1: build the Next.js static export --------------------------------
 FROM node:22-alpine AS web
 WORKDIR /web
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
 COPY frontend/ ./
-# The SPA calls the API with relative /api paths, so no API base URL is needed —
-# it's same-origin with the FastAPI app that serves this bundle.
+# The app calls the API with relative /api paths, so no API base URL is needed —
+# it's same-origin with the FastAPI app that serves this bundle. `next build`
+# with `output: "export"` (next.config.ts) emits a static `out/` tree, which is
+# what keeps this a single-process image: no Node server at runtime.
 RUN npm run build
 
 # --- Stage 2: resolve backend deps into a venv (mirrors backend/Dockerfile) ---
@@ -36,8 +39,8 @@ COPY --from=builder /venv /venv
 ENV PATH="/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    # Demo defaults — zero-inference stub LLM, SPA served from this app, and all
-    # writable state on the (ephemeral) /data dir the entrypoint seeds.
+    # Demo defaults — zero-inference stub LLM, frontend served from this app,
+    # and all writable state on the (ephemeral) /data dir the entrypoint seeds.
     LLM_PROVIDER=stub \
     FRONTEND_DIST=/app/frontend_dist \
     PATIENTS_PATH=/data/patients.json \
@@ -46,7 +49,7 @@ ENV PATH="/venv/bin:$PATH" \
 
 WORKDIR /app
 COPY --chown=appuser:appuser backend/app ./app
-COPY --from=web --chown=appuser:appuser /web/dist ./frontend_dist
+COPY --from=web --chown=appuser:appuser /web/out ./frontend_dist
 COPY backend/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
     && mkdir -p /data \

@@ -1,9 +1,9 @@
 # Free demo deployment (no credit card)
 
-A one-container, zero-cost public demo of TrialGate: the FastAPI backend
-serves **both** the React SPA and the API from a single origin, in
-`LLM_PROVIDER=stub` mode (deterministic, no GPU, no API key). No CORS, no second
-host, no credit card.
+A one-container, zero-cost public demo of TrialGate: the FastAPI backend serves
+**both** the statically exported Next.js frontend and the API from a single
+origin, in `LLM_PROVIDER=stub` mode (deterministic, no GPU, no API key). No CORS,
+no second host, no credit card.
 
 This is a **demo-only topology**, separate from a real production deployment
 (which would run the backend and an nginx frontend as two containers with a real
@@ -16,9 +16,10 @@ LLM and a durable Postgres checkpointer).
   (routing → parse → critique → HITL gate → match), but the analysis is fixed, so
   there's no inference cost. Swap to a real model later by setting
   `LLM_PROVIDER=anthropic` + `ANTHROPIC_API_KEY` (that part is not free).
-- **One image** ([`deploy/demo/Dockerfile`](../deploy/demo/Dockerfile)) — builds
-  the SPA and copies it into the backend image; FastAPI serves it via
-  `FRONTEND_DIST` (see [`app/main.py`](../backend/app/main.py)).
+- **One image** ([`deploy/demo/Dockerfile`](../deploy/demo/Dockerfile)) — runs
+  `next build` (which emits a static `out/` tree, no Node server) and copies it
+  into the backend image; FastAPI serves it via `FRONTEND_DIST` (see
+  [`app/main.py`](../backend/app/main.py)).
 - **Ephemeral SQLite** — no managed database. Screenings reset when the instance
   restarts; the synthetic EHR is reseeded on boot. Fine for a demo.
 

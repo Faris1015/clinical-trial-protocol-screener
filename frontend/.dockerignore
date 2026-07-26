@@ -1,6 +1,9 @@
 # Keep the build context lean; node_modules is rebuilt via `npm ci` in-image.
 node_modules/
-dist/
+# Next build artifacts — the image builds its own; a host copy would be stale.
+.next/
+out/
+tsconfig.tsbuildinfo
 .env
 .env.*
 Dockerfile

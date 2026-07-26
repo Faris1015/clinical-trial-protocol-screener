@@ -1,4 +1,4 @@
-# Hugging Face Space Dockerfile — single-service demo (React SPA + FastAPI,
+# Hugging Face Space Dockerfile — single-service demo (Next.js export + FastAPI,
 # stub LLM) in ONE free container. A Space is its own git repo, so this file is
 # self-contained: it clones the project at build time rather than COPYing from a
 # build context. Mirrors deploy/demo/Dockerfile in the main repo.
@@ -12,10 +12,12 @@ ARG REPO_URL=https://github.com/Faris1015/clinical-trial-protocol-screener
 ARG REPO_REF=main
 RUN git clone --depth 1 --branch "${REPO_REF}" "${REPO_URL}" /src
 
-# --- Build the React bundle --------------------------------------------------
+# --- Build the Next.js static export -----------------------------------------
 FROM node:22-alpine AS web
 WORKDIR /web
 COPY --from=source /src/frontend/ ./
+# `output: "export"` (next.config.ts) makes this a static `out/` tree, so the
+# runtime below stays a single uvicorn process serving both the app and the API.
 RUN npm ci && npm run build
 
 # --- Resolve backend deps into a venv ----------------------------------------
@@ -43,7 +45,7 @@ ENV PATH="/venv/bin:$PATH" \
 
 WORKDIR /app
 COPY --from=source --chown=appuser:appuser /src/backend/app ./app
-COPY --from=web --chown=appuser:appuser /web/dist ./frontend_dist
+COPY --from=web --chown=appuser:appuser /web/out ./frontend_dist
 COPY --from=source /src/backend/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
     && mkdir -p /data \

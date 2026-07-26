@@ -1,4 +1,4 @@
-import type { PatientEvaluation } from "../types";
+import type { PatientEvaluation } from "@/types";
 
 export function PatientMatchTable({ patients }: { patients: PatientEvaluation[] }) {
   if (!patients.length) return null;

@@ -12,8 +12,16 @@ htmlcov/
 
 # Node
 node_modules/
-dist/
 *.local
+
+# Next.js (frontend/): dev+build cache, the static export, and tsc's incremental
+# state. next-env.d.ts IS committed (Next's convention) so a clean checkout has
+# the ambient types before any build runs; it is committed in the `next build`
+# form, which is what CI and both images produce. `next dev` rewrites its one
+# import to `.next/dev/types/…` — a local-only flip, safe to discard.
+frontend/.next/
+frontend/out/
+frontend/tsconfig.tsbuildinfo
 
 # Env / secrets
 .env

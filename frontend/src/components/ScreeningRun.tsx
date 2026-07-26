@@ -1,28 +1,26 @@
+"use client";
+
 import { useState } from "react";
-import { useScreenerStream } from "./hooks/useScreenerStream";
-import { AgentCard } from "./components/AgentCard";
-import { CriteriaTable } from "./components/CriteriaTable";
-import { PatientMatchTable } from "./components/PatientMatchTable";
-import type { PatientEvaluation, StreamMessage } from "./types";
-import "./styles.css";
+import { useScreenerStream } from "@/hooks/useScreenerStream";
+import { AgentCard } from "@/components/AgentCard";
+import { CriteriaTable } from "@/components/CriteriaTable";
+import { PatientMatchTable } from "@/components/PatientMatchTable";
+import type { PatientEvaluation, StreamMessage } from "@/types";
 
 const AGENTS = ["router", "parser", "critic", "matcher"];
 
-export default function App() {
-  const [threadId, setThreadId] = useState<string | null>(null);
+/**
+ * One screening: the live pipeline, the parsed criteria, the approval gate and
+ * the resulting cohort. All of its state belongs to a single `threadId`, so the
+ * caller mounts it under `key={threadId}` and a new upload gets a clean instance
+ * instead of a hand-rolled reset (see useScreenerStream).
+ *
+ * `threadId` is null before the first upload — the idle pipeline still renders,
+ * it just has no stream to subscribe to.
+ */
+export function ScreeningRun({ threadId }: { threadId: string | null }) {
   const [matches, setMatches] = useState<PatientEvaluation[]>([]);
   const { nodeStates, phase, setPhase, error, setError, applyFrame } = useScreenerStream(threadId);
-
-  async function upload(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const body = new FormData();
-    body.append("file", file);
-    const res = await fetch("/api/screenings", { method: "POST", body });
-    const { thread_id } = (await res.json()) as { thread_id: string };
-    setMatches([]);
-    setThreadId(thread_id);
-  }
 
   async function approve() {
     // Flip to "running" first: it hides the approval banner (and its button),
@@ -73,17 +71,7 @@ export default function App() {
     phase === "running" ? ([...AGENTS].reverse().find((a) => nodeStates[a]) ?? null) : null;
 
   return (
-    <div className="app">
-      <header>
-        <h1>TrialGate</h1>
-        <p>Multi-agent · LangGraph · deterministic validation · human-in-the-loop</p>
-      </header>
-
-      <label className="upload">
-        Upload protocol (PDF or .md)
-        <input type="file" accept=".pdf,.md,.txt" onChange={upload} />
-      </label>
-
+    <>
       <section className="pipeline">
         {AGENTS.map((id) => (
           <AgentCard key={id} id={id} active={id === activeAgent} state={nodeStates[id]} />
@@ -108,6 +96,6 @@ export default function App() {
       )}
 
       {matches.length > 0 && <PatientMatchTable patients={matches} />}
-    </div>
+    </>
   );
 }

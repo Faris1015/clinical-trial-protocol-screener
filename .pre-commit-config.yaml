@@ -23,14 +23,16 @@ repos:
         name: eslint (frontend)
         entry: bash -c 'cd frontend && npm run --silent lint'
         language: system
-        files: ^frontend/src/.*\.(ts|tsx)$
+        # Root configs (next.config.ts, eslint.config.mjs) are linted too, so
+        # match them alongside src/.
+        files: ^frontend/.*\.(ts|tsx|mjs)$
         pass_filenames: false
 
       - id: prettier
         name: prettier check (frontend)
         entry: bash -c 'cd frontend && npm run --silent format:check'
         language: system
-        files: ^frontend/src/.*\.(ts|tsx|css)$
+        files: ^frontend/.*\.(ts|tsx|css|mjs)$
         pass_filenames: false
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
