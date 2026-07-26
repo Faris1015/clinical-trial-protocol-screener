@@ -1,6 +1,6 @@
 # Free demo deployment (no credit card)
 
-A one-container, zero-cost public demo of the screener: the FastAPI backend
+A one-container, zero-cost public demo of TrialGate: the FastAPI backend
 serves **both** the React SPA and the API from a single origin, in
 `LLM_PROVIDER=stub` mode (deterministic, no GPU, no API key). No CORS, no second
 host, no credit card.
@@ -25,8 +25,8 @@ LLM and a durable Postgres checkpointer).
 ## Try it locally first
 
 ```bash
-docker build -f deploy/demo/Dockerfile -t screener-demo .
-docker run --rm -p 8000:8000 screener-demo
+docker build -f deploy/demo/Dockerfile -t trialgate-demo .
+docker run --rm -p 8000:8000 trialgate-demo
 # open http://localhost:8000  — upload a protocol, approve, see matches
 ```
 

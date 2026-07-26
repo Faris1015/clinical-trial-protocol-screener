@@ -7,7 +7,7 @@
 aiosqlite==0.22.1
     # via
     #   langgraph-checkpoint-sqlite
-    #   protocol-screener (pyproject.toml)
+    #   trialgate (pyproject.toml)
 annotated-doc==0.0.4
     # via fastapi
 annotated-types==0.7.0
@@ -39,9 +39,9 @@ distro==1.9.0
 docstring-parser==0.18.0
     # via anthropic
 faker==40.28.1
-    # via protocol-screener (pyproject.toml)
+    # via trialgate (pyproject.toml)
 fastapi==0.139.0
-    # via protocol-screener (pyproject.toml)
+    # via trialgate (pyproject.toml)
 h11==0.16.0
     # via
     #   httpcore
@@ -68,7 +68,7 @@ jsonpatch==1.33
 jsonpointer==3.1.1
     # via jsonpatch
 langchain-anthropic==1.4.8
-    # via protocol-screener (pyproject.toml)
+    # via trialgate (pyproject.toml)
 langchain-core==1.4.9
     # via
     #   langchain-anthropic
@@ -78,20 +78,20 @@ langchain-core==1.4.9
     #   langgraph-prebuilt
     #   langgraph-sdk
 langchain-ollama==1.1.0
-    # via protocol-screener (pyproject.toml)
+    # via trialgate (pyproject.toml)
 langchain-protocol==0.0.18
     # via
     #   langchain-core
     #   langgraph-sdk
 langgraph==1.2.9
-    # via protocol-screener (pyproject.toml)
+    # via trialgate (pyproject.toml)
 langgraph-checkpoint==4.1.1
     # via
     #   langgraph
     #   langgraph-checkpoint-sqlite
     #   langgraph-prebuilt
 langgraph-checkpoint-sqlite==3.1.0
-    # via protocol-screener (pyproject.toml)
+    # via trialgate (pyproject.toml)
 langgraph-prebuilt==1.1.0
     # via langgraph
 langgraph-sdk==0.4.2
@@ -116,7 +116,7 @@ packaging==26.2
 prometheus-client==0.25.0
     # via prometheus-fastapi-instrumentator
 prometheus-fastapi-instrumentator==8.0.2
-    # via protocol-screener (pyproject.toml)
+    # via trialgate (pyproject.toml)
 pydantic==2.13.4
     # via
     #   anthropic
@@ -126,24 +126,24 @@ pydantic==2.13.4
     #   langgraph
     #   langsmith
     #   ollama
-    #   protocol-screener (pyproject.toml)
     #   pydantic-settings
+    #   trialgate (pyproject.toml)
 pydantic-core==2.46.4
     # via pydantic
 pydantic-settings==2.14.2
-    # via protocol-screener (pyproject.toml)
+    # via trialgate (pyproject.toml)
 pymupdf==1.28.0
-    # via protocol-screener (pyproject.toml)
+    # via trialgate (pyproject.toml)
 python-dotenv==1.2.2
     # via
     #   pydantic-settings
     #   uvicorn
 python-multipart==0.0.32
-    # via protocol-screener (pyproject.toml)
+    # via trialgate (pyproject.toml)
 pyyaml==6.0.3
     # via
     #   langchain-core
-    #   protocol-screener (pyproject.toml)
+    #   trialgate (pyproject.toml)
     #   uvicorn
 requests==2.34.2
     # via
@@ -152,7 +152,7 @@ requests==2.34.2
 requests-toolbelt==1.0.0
     # via langsmith
 slowapi==0.1.10
-    # via protocol-screener (pyproject.toml)
+    # via trialgate (pyproject.toml)
 sniffio==1.3.1
     # via
     #   anthropic
@@ -164,11 +164,11 @@ starlette==1.3.1
     #   fastapi
     #   prometheus-fastapi-instrumentator
 structlog==26.1.0
-    # via protocol-screener (pyproject.toml)
+    # via trialgate (pyproject.toml)
 tenacity==9.1.4
     # via
     #   langchain-core
-    #   protocol-screener (pyproject.toml)
+    #   trialgate (pyproject.toml)
 typing-extensions==4.16.0
     # via
     #   anthropic
@@ -194,7 +194,7 @@ uuid-utils==0.17.0
     #   langchain-core
     #   langsmith
 uvicorn==0.51.0
-    # via protocol-screener (pyproject.toml)
+    # via trialgate (pyproject.toml)
 uvloop==0.22.1
     # via uvicorn
 watchfiles==1.2.0

@@ -8,7 +8,7 @@
 #   Prometheus  http://localhost:9090
 #   Grafana     http://localhost:3000  (anonymous viewer; admin/admin to edit)
 #
-# The "Protocol Screener — Pipeline" dashboard and the Prometheus datasource are
+# The "TrialGate — Pipeline" dashboard and the Prometheus datasource are
 # auto-provisioned, so a demo run renders end-to-end with no manual setup.
 name: protocol-screener
 

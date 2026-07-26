@@ -75,7 +75,7 @@ export default function App() {
   return (
     <div className="app">
       <header>
-        <h1>Clinical Trial Protocol Screener</h1>
+        <h1>TrialGate</h1>
         <p>Multi-agent · LangGraph · deterministic validation · human-in-the-loop</p>
       </header>
 

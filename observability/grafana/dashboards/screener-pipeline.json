@@ -6,7 +6,7 @@
   "tags": ["screener", "pipeline"],
   "time": { "from": "now-1h", "to": "now" },
   "timezone": "browser",
-  "title": "Protocol Screener — Pipeline",
+  "title": "TrialGate — Pipeline",
   "uid": "screener-pipeline",
   "version": 1,
   "refresh": "10s",

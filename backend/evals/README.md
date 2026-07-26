@@ -73,7 +73,7 @@ under a fixed, documented convention (a judgment call, applied consistently):
   organ function"), or compound clauses no single criterion captures (e.g. an
   `LVEF <50% OR LVEF ≥50% and …` disjunction).
 - **omitted** — purely administrative / logistical / temporal criteria that are
-  not medical eligibility constraints the screener evaluates (informed consent,
+  not medical eligibility constraints TrialGate evaluates (informed consent,
   device MRI contraindications, enrollment-timing windows, legal-protection
   clauses).
 

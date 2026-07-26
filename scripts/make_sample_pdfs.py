@@ -1,4 +1,4 @@
-"""Generate sample protocol PDFs for manually testing the screener.
+"""Generate sample protocol PDFs for manually testing TrialGate.
 
 Each PDF targets a different code path in the pipeline:
 

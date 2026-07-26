@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for working on the Clinical Trial Protocol Screener. This document is the
+Thanks for working on TrialGate. This document is the
 single source of truth for how a change goes from idea → branch → PR → `main`.
 Every contributor (including future you) follows the same rails.
 
