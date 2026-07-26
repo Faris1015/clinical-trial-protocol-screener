@@ -1,6 +1,6 @@
 # Performance & load testing (#10)
 
-How the screener behaves under concurrent load, the bottleneck the load test
+How TrialGate behaves under concurrent load, the bottleneck the load test
 found and fixed, and the known limits of a single instance.
 
 The harness is [`loadtest/locustfile.py`](../loadtest/locustfile.py); how to run

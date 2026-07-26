@@ -1,4 +1,4 @@
-"""Shared LangGraph state for the protocol screener.
+"""Shared LangGraph state for the TrialGate screening pipeline.
 
 Every node reads from and writes partial updates to this state. The `events`
 field uses an append reducer so all nodes can log without clobbering each other

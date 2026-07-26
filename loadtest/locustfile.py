@@ -1,4 +1,4 @@
-"""Locust load test for the protocol screener — the real user journey (#10).
+"""Locust load test for TrialGate — the real user journey (#10).
 
 Each simulated user runs the full flow a reviewer does:
 
@@ -38,7 +38,7 @@ from locust import HttpUser, between, task
 # separate, CPU-bound concern measured on its own (see docs/performance.md).
 PROTOCOL_TEXT = (
     "# Phase II Single-Arm Study (load-test fixture)\n\n"
-    "This is a synthetic protocol used only for load testing the screener.\n\n"
+    "This is a synthetic protocol used only for load testing TrialGate.\n\n"
     "## Inclusion criteria\n"
     "- Age 18 years or older at the time of consent.\n"
     "- Adequate bone marrow and organ function per investigator assessment.\n\n"

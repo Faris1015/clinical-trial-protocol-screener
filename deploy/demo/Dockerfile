@@ -4,7 +4,7 @@
 # Full runbook: docs/free-demo-deploy.md.
 #
 # BUILD CONTEXT IS THE REPO ROOT (not backend/), so it can pull in both apps:
-#   docker build -f deploy/demo/Dockerfile -t screener-demo .
+#   docker build -f deploy/demo/Dockerfile -t trialgate-demo .
 #
 # The production topology (backend/Dockerfile + frontend/Dockerfile behind nginx,
 # real LLM) is unchanged — this is a separate, demo-only image.

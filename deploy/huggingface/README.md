@@ -1,5 +1,5 @@
 ---
-title: Clinical Trial Protocol Screener
+title: TrialGate
 emoji: 🧪
 colorFrom: blue
 colorTo: indigo
@@ -8,9 +8,9 @@ app_port: 8000
 pinned: false
 ---
 
-# Clinical Trial Protocol Screener — live demo
+# TrialGate — live demo
 
-Multi-agent (LangGraph + FastAPI) clinical-trial protocol screener running in
+Multi-agent (LangGraph + FastAPI) clinical-trial protocol screening running in
 **stub-LLM mode** — deterministic, zero-inference, so it's free to host and needs
 no GPU or API key. Upload a protocol (PDF or markdown), watch the agent pipeline
 run, approve at the human-in-the-loop gate, and see the patient matches.

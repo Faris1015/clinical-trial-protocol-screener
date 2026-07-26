@@ -44,7 +44,7 @@ def app_version() -> dict[str, str]:
     on every probe. Callers spread the result into a fresh dict, never mutate it.
     """
     try:
-        version = pkg_version("protocol-screener")
+        version = pkg_version("trialgate")
     except PackageNotFoundError:  # pragma: no cover - only when not pip-installed
         version = "unknown"
     return {"version": version, "commit": get_settings().git_sha or "unknown"}

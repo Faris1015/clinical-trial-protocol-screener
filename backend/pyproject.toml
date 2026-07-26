@@ -1,7 +1,7 @@
 [project]
-name = "protocol-screener"
+name = "trialgate"
 version = "0.1.0"
-description = "Multi-agent clinical trial protocol screener (LangGraph + FastAPI)"
+description = "TrialGate — multi-agent clinical trial protocol screening (LangGraph + FastAPI)"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",

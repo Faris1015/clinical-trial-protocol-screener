@@ -1,7 +1,13 @@
-# Multi-Agent Clinical Trial Protocol Screener
+# TrialGate
+
+**Multi-agent clinical trial protocol screening, with a human at the gate.**
 
 [![CI](https://github.com/Faris1015/clinical-trial-protocol-screener/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Faris1015/clinical-trial-protocol-screener/actions/workflows/ci.yml)
 [![CD](https://github.com/Faris1015/clinical-trial-protocol-screener/actions/workflows/cd.yml/badge.svg?branch=main)](https://github.com/Faris1015/clinical-trial-protocol-screener/actions/workflows/cd.yml)
+
+> The product is named **TrialGate**; the GitHub repository slug remains
+> `clinical-trial-protocol-screener`, so clone URLs, badges, and existing links
+> are unchanged.
 
 **Deploy your own demo:** a one-container, zero-cost public demo — the React SPA
 and API served from a single image in stub-LLM mode, no credit card or API key —
@@ -9,10 +15,11 @@ deploys to Render or a Hugging Face Space in a few clicks. See
 [Free demo deploy](docs/free-demo-deploy.md). To run the full stack locally,
 `docker compose up` (below).
 
-A multi-agent AI system that ingests clinical trial protocols (PDF or markdown), extracts
-eligibility criteria into a strict typed schema, cross-checks them against an FDA-style
-compliance rules database, and deterministically matches them against a synthetic patient
-EHR — with a human-in-the-loop approval gate before any patient data is touched.
+TrialGate is a multi-agent AI system that ingests clinical trial protocols (PDF or
+markdown), extracts eligibility criteria into a strict typed schema, cross-checks them
+against an FDA-style compliance rules database, and deterministically matches them against
+a synthetic patient EHR — with a human-in-the-loop approval gate before any patient data
+is touched.
 
 > **Disclaimer:** This project uses fully synthetic patient data and simplified compliance
 > rules. It is a demonstration of enterprise multi-agent orchestration patterns, not a
@@ -128,8 +135,8 @@ image and serves both from one origin in `LLM_PROVIDER=stub` mode (deterministic
 canned extractions; the full pipeline still runs end-to-end):
 
 ```bash
-docker build -f deploy/demo/Dockerfile -t screener-demo .
-docker run --rm -p 8000:8000 screener-demo   # open http://localhost:8000
+docker build -f deploy/demo/Dockerfile -t trialgate-demo .
+docker run --rm -p 8000:8000 trialgate-demo   # open http://localhost:8000
 ```
 
 This is the image behind the free public demo — see
@@ -210,7 +217,7 @@ main stack:
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.observability.yml up
 #   Prometheus  http://localhost:9090
-#   Grafana     http://localhost:3000   ("Protocol Screener — Pipeline" dashboard)
+#   Grafana     http://localhost:3000   ("TrialGate — Pipeline" dashboard)
 ```
 
 Run a screening (upload → stream → approve) and the dashboard renders the funnel,

@@ -1,6 +1,6 @@
 # Sample protocol PDFs
 
-Test fixtures for manually exercising the screener. Upload them via the frontend
+Test fixtures for manually exercising TrialGate. Upload them via the frontend
 (or `POST /api/screenings`). Regenerate with `python scripts/make_sample_pdfs.py`.
 
 | File | What it exercises | Expected behavior |

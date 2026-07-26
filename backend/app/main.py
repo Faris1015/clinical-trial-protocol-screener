@@ -1,4 +1,4 @@
-"""FastAPI app: HTTP edge for the screener — routing, error contract, logging.
+"""FastAPI app: HTTP edge for TrialGate — routing, error contract, logging.
 
 Routes are thin translators: they read the request, resolve the wired
 dependencies (store, graph), and hand off to `app.services.screening`, which
@@ -98,7 +98,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         graph = None
 
 
-app = FastAPI(title="Clinical Trial Protocol Screener", lifespan=lifespan)
+app = FastAPI(title="TrialGate", lifespan=lifespan)
 # slowapi reads the limiter off app.state and its handler turns a tripped limit
 # into a 429 (with Retry-After) that our error contract shape wraps below.
 app.state.limiter = limiter
