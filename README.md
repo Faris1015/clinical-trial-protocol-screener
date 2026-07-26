@@ -9,9 +9,9 @@
 > `clinical-trial-protocol-screener`, so clone URLs, badges, and existing links
 > are unchanged.
 
-**Deploy your own demo:** a one-container, zero-cost public demo — the React SPA
-and API served from a single image in stub-LLM mode, no credit card or API key —
-deploys to Render or a Hugging Face Space in a few clicks. See
+**Deploy your own demo:** a one-container, zero-cost public demo — the Next.js
+frontend and API served from a single image in stub-LLM mode, no credit card or
+API key — deploys to Render or a Hugging Face Space in a few clicks. See
 [Free demo deploy](docs/free-demo-deploy.md). To run the full stack locally,
 `docker compose up` (below).
 
@@ -56,7 +56,7 @@ data gets touched.
          │  Agent 4: Matcher       │  pure-Python comparison vs synthetic EHR
          └────────────┬────────────┘
                       ▼
-         [ React dashboard: live agent execution, criteria provenance, match results ]
+        [ Next.js dashboard: live agent execution, criteria provenance, match results ]
 ```
 
 ### Key design decisions
@@ -98,7 +98,7 @@ data gets touched.
 | API | **FastAPI** with SSE streaming of graph events |
 | Validation | **Pydantic v2** — schemas double as LLM structured-output contracts |
 | LLM | **Ollama** (`qwen2.5:7b`) locally, or hosted Claude via the same interface |
-| Frontend | **React + TypeScript + Vite** — live pipeline visualization |
+| Frontend | **Next.js (App Router) + TypeScript** — static export, live pipeline visualization |
 | Synthetic data | Seeded Faker-based EHR generator (reproducible demos) |
 
 ## Quickstart
@@ -130,9 +130,9 @@ docker compose up --build
 ### One-container demo (stub LLM, no model)
 
 For a zero-dependency spin-up — no Ollama, no API key, no second container — the
-[`deploy/demo/Dockerfile`](deploy/demo/Dockerfile) builds the SPA into the backend
-image and serves both from one origin in `LLM_PROVIDER=stub` mode (deterministic,
-canned extractions; the full pipeline still runs end-to-end):
+[`deploy/demo/Dockerfile`](deploy/demo/Dockerfile) builds the frontend into the
+backend image and serves both from one origin in `LLM_PROVIDER=stub` mode
+(deterministic, canned extractions; the full pipeline still runs end-to-end):
 
 ```bash
 docker build -f deploy/demo/Dockerfile -t trialgate-demo .
@@ -166,8 +166,14 @@ or set `ANTHROPIC_API_KEY` and `LLM_PROVIDER=anthropic`.
 ```bash
 cd frontend
 npm install
-npm run dev                              # http://localhost:5173
+npm run dev                              # http://localhost:3000
 ```
+
+`next dev` proxies `/api/*` to `http://localhost:8000` (override with
+`NEXT_DEV_API_UPSTREAM`), so the browser talks to one origin in dev exactly as it
+does in the deployed images. `npm run build` produces a static export in
+`frontend/out` — see [`next.config.ts`](frontend/next.config.ts) for why, and for
+what changes if a route ever needs request-time rendering.
 
 </details>
 
@@ -400,9 +406,12 @@ backend/
       llm.py, pdf.py           # LLM factory, PDF eligibility-section extraction
   tests/
 frontend/
+  next.config.ts               # Static export, /api dev proxy
   src/
+    app/                       # App Router: layout shell + `/` (new screening)
     hooks/useScreenerStream.ts # SSE consumption of graph events
-    components/                # PipelineGraph, AgentCard, CriteriaTable, matches
+    components/                # ScreeningRun, AgentCard, CriteriaTable, matches
+    types.ts                   # Shared API contract, mirrors the Pydantic schemas
 ```
 
 ## Production roadmap
@@ -493,7 +502,7 @@ settings — lives in [`CONTRIBUTING.md`](CONTRIBUTING.md). In short:
 
 Every PR and push to `main` runs [`ci.yml`](.github/workflows/ci.yml): parallel backend
 (ruff, mypy, pytest with a ratcheting coverage gate) and frontend (eslint, prettier, tsc,
-vite build) jobs. A [`pr-title.yml`](.github/workflows/pr-title.yml) check enforces a
+`next build`) jobs. A [`pr-title.yml`](.github/workflows/pr-title.yml) check enforces a
 Conventional Commits PR title (the squash-merge commit message).
 [`docker.yml`](.github/workflows/docker.yml) rebuilds images only when
 container files or dependency manifests change. Superseded runs on the same ref are
@@ -538,7 +547,7 @@ with a clear message instead of erroring mid-screening.
 | `ANTHROPIC_MODEL` | `claude-sonnet-5` | Hosted model id |
 | `ANTHROPIC_API_KEY` | — | **Required** when `LLM_PROVIDER=anthropic` |
 | `LLM_TEMPERATURE` | `0.0` | Sampling temperature (0–1) |
-| `CORS_ORIGINS` | `http://localhost:5173` | Comma-separated allowed origins |
+| `CORS_ORIGINS` | `http://localhost:3000` | Comma-separated allowed origins |
 | `MAX_PARSE_ATTEMPTS` | `3` | Parser retries before human escalation (1–10) |
 | `RULES_PATH` | `app/rules/compliance_rules.yaml` | Compliance rules database |
 | `PATIENTS_PATH` | `app/data/patients.json` | Synthetic EHR location |

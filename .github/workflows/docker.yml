@@ -15,6 +15,9 @@ on:
       # regenerated pin set) must re-run the container build + smoke test.
       - "backend/requirements.lock"
       - "frontend/package-lock.json"
+      # Owns the frontend build's output mode and directory (`output: "export"`
+      # → out/), which is what both frontend images COPY.
+      - "frontend/next.config.ts"
       - ".github/workflows/docker.yml"
 
 concurrency:
@@ -74,3 +77,32 @@ jobs:
           docker compose down -v
       - name: Build frontend image (no push)
         run: docker build -t screener-frontend frontend
+      - name: Smoke-test frontend serves the export
+        # The nginx config resolves its upstream per request, so the image boots
+        # and serves the app with no backend present — which makes this a pure
+        # test of the static-serving half: the exported home route, a genuine 404
+        # for an unexported path (`try_files ... =404` + error_page), and a CSP
+        # that permits the inline RSC payload scripts a Next export ships. That
+        # last one has no other guard: tighten script-src and every page still
+        # returns 200 while the app silently never hydrates.
+        run: |
+          docker run -d --name fe -p 8080:80 screener-frontend
+          ok=0
+          for _ in $(seq 1 15); do
+            if curl -fsS http://localhost:8080/ >/dev/null 2>&1; then ok=1; break; fi
+            sleep 2
+          done
+          if [ "$ok" != 1 ]; then
+            echo "::error::frontend did not serve / within 30s"
+            docker logs fe; docker rm -f fe; exit 1
+          fi
+          fail() { echo "::error::$1"; docker logs fe; docker rm -f fe; exit 1; }
+          curl -fsS http://localhost:8080/ | grep -q "TrialGate" \
+            || fail "home route did not render the app shell"
+          [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/nope)" = 404 ] \
+            || fail "unexported path did not 404"
+          curl -sI http://localhost:8080/ | grep -i content-security-policy \
+            | grep -q "script-src 'self' 'unsafe-inline'" \
+            || fail "CSP no longer allows the export's inline RSC scripts — the app would not hydrate"
+          echo "frontend healthy"
+          docker rm -f fe

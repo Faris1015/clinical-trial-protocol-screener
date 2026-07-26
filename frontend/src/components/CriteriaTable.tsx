@@ -1,4 +1,4 @@
-import type { CriteriaSchema } from "../types";
+import type { CriteriaSchema } from "@/types";
 
 export function CriteriaTable({ criteria }: { criteria: CriteriaSchema | null }) {
   if (!criteria) return null;

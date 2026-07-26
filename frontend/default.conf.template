@@ -13,20 +13,30 @@ server {
 
     # Security headers, applied to every response (including proxied ones) via
     # `always`. No location below sets add_header, so these are inherited
-    # everywhere. The SPA loads only same-origin hashed JS/CSS, so a strict
+    # everywhere. The app loads only same-origin hashed JS/CSS, so a strict
     # default-src 'self' holds; 'unsafe-inline' on styles covers React's inline
     # style attributes. frame-ancestors 'none' blocks clickjacking of the
     # human-in-the-loop approval gate.
+    #
+    # script-src needs 'unsafe-inline' because a statically exported Next app
+    # ships its React Server Component payload as inline
+    # `self.__next_f.push(...)` scripts, whose content changes every build — so
+    # neither a hash allowlist nor a nonce (which needs a request-time server)
+    # can cover them. The exposure is bounded: no user input reaches the
+    # document, every script and fetch target is same-origin, and the API
+    # responses are JSON read through fetch/EventSource, never evaluated.
+    # Restoring nonce-based script-src is part of dropping `output: "export"`
+    # for a real Next server (see next.config.ts).
     add_header X-Frame-Options DENY always;
     add_header X-Content-Type-Options nosniff always;
     add_header Referrer-Policy strict-origin-when-cross-origin always;
-    add_header Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
 
     # Per-request upstream resolution. `resolver.conf` (written by
     # 15-detect-resolver.sh at startup) points at the container's DNS server;
     # because proxy_pass below targets a *variable* rather than a literal host,
     # nginx resolves the backend on each request instead of once at config load.
-    # That means the frontend boots and serves the SPA even if the backend is
+    # That means the frontend boots and serves the app even if the backend is
     # briefly unresolvable — API calls 502 until it returns — instead of nginx
     # failing to start. The upstream is templated (`BACKEND_UPSTREAM`, defaulting
     # to the `backend` service name in the Dockerfile) so the same image works
@@ -74,7 +84,7 @@ server {
     # Expose the backend's liveness/readiness probes through the one public
     # origin so an uptime monitor can reach /health and /ready even when the
     # backend has no public route of its own. Exact-match (`= /path`) so they
-    # never shadow a future SPA route of the same name.
+    # never shadow a future app route of the same name.
     location = /health {
         proxy_pass http://$backend_host;
         proxy_set_header Host $host;
@@ -84,9 +94,17 @@ server {
         proxy_set_header Host $host;
     }
 
-    # SPA fallback: unknown routes serve index.html so client-side rendering
-    # owns routing, while real asset requests (200s) are served directly.
+    # Next's static export writes one directory per route (`trailingSlash: true`),
+    # so `$uri/` resolves /runs → /runs/index.html and real assets are served
+    # directly by `$uri`. A path with no exported page is a genuine 404, not a
+    # client-side route, so it gets Next's own 404 page rather than an index.html
+    # rewrite that would render the home route under the wrong URL.
     location / {
-        try_files $uri $uri/ /index.html;
+        try_files $uri $uri/ =404;
+    }
+
+    error_page 404 /404.html;
+    location = /404.html {
+        internal;
     }
 }

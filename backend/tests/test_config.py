@@ -42,7 +42,7 @@ def test_defaults_load_without_any_env():
     s = Settings(_env_file=None)
     assert s.llm_provider == "ollama"
     assert s.max_parse_attempts == 3
-    assert s.cors_origin_list == ["http://localhost:5173"]
+    assert s.cors_origin_list == ["http://localhost:3000"]
     assert s.rules_path.is_file()
     # Generation cap defaults high enough for any real extraction, low enough to
     # bound a runaway loop.
@@ -63,10 +63,10 @@ def test_env_overrides(monkeypatch):
 
 
 def test_cors_origins_comma_separated(monkeypatch):
-    monkeypatch.setenv("CORS_ORIGINS", "http://localhost:5173, https://screener.example.com")
+    monkeypatch.setenv("CORS_ORIGINS", "http://localhost:3000, https://screener.example.com")
     s = Settings(_env_file=None)
     assert s.cors_origin_list == [
-        "http://localhost:5173",
+        "http://localhost:3000",
         "https://screener.example.com",
     ]
 

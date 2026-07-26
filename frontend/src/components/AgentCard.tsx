@@ -1,4 +1,4 @@
-import type { NodeState } from "../hooks/useScreenerStream";
+import type { NodeState } from "@/hooks/useScreenerStream";
 
 const LABELS: Record<string, string> = {
   router: "1 · Router",

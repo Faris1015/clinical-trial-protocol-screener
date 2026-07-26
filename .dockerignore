@@ -1,0 +1,36 @@
+# Build context for the repo-root images (deploy/demo/Dockerfile). The
+# per-service images have their own .dockerignore next to their Dockerfile.
+#
+# node_modules matters for correctness, not just size: deploy/demo runs `npm ci`
+# and only then `COPY frontend/ ./`, so a populated host node_modules would
+# overwrite the freshly installed one — and Next ships platform-specific
+# binaries (@next/swc-darwin-arm64 vs -linux-*), so a macOS tree would break the
+# linux build.
+node_modules/
+frontend/.next/
+frontend/out/
+frontend/tsconfig.tsbuildinfo
+
+# Python local state — never wanted in an image.
+.venv/
+venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Generated / local-only
+backend/*.sqlite
+backend/*.sqlite-shm
+backend/*.sqlite-wal
+graphify-out/
+CLAUDE.local.md
+.git/
+.github/
+.env
+.env.*
+!.env.example
+.DS_Store

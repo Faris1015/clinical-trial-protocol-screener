@@ -67,7 +67,7 @@ docker run --rm -v "$PWD":/w -w /w python:3.11-slim \
 ```bash
 cd frontend
 npm install
-npm run dev                                   # http://localhost:5173
+npm run dev                                   # http://localhost:3000
 ```
 
 ### Git hooks (recommended)

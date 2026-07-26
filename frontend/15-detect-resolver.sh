@@ -2,7 +2,7 @@
 # Point nginx's resolver at the container's own DNS server, written to an include
 # the server block pulls in. Paired with the variable proxy_pass in
 # default.conf.template, this makes the /api upstream resolve *per request*
-# instead of once at startup — so the frontend boots and serves the SPA even
+# instead of once at startup — so the frontend boots and serves the app even
 # when the backend is momentarily unresolvable (API calls just 502 until it's
 # back) rather than nginx refusing to start.
 #

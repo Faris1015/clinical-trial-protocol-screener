@@ -328,15 +328,17 @@ async def get_state(request: Request, thread_id: str) -> dict:
 
 
 def mount_frontend(app: FastAPI, dist: Path | None) -> bool:
-    """Single-service demo mode: serve a built SPA bundle from this same app.
+    """Single-service demo mode: serve the built frontend bundle from this app.
 
     When `dist` points at a directory containing index.html, mount it at "/" so
-    one container hosts the whole demo (SPA + API, same origin, no CORS). Must be
-    called AFTER every API/operator route is registered: the catch-all mount is
-    matched last, so those routes always win; StaticFiles(html=True) then serves
-    index.html and the hashed assets, all this single-page app needs. Returns
-    whether it mounted. A no-op in the split production topology (dist unset —
-    nginx serves the SPA there). See deploy/demo/Dockerfile, docs/free-demo-deploy.md.
+    one container hosts the whole demo (frontend + API, same origin, no CORS).
+    Must be called AFTER every API/operator route is registered: the catch-all
+    mount is matched last, so those routes always win. `html=True` then gives us
+    exactly what the frontend's static export needs — index.html at "/", the
+    hashed assets, `<route>/index.html` for each non-root route (Next writes one
+    directory per route), and 404.html for an unknown path. Returns whether it
+    mounted. A no-op in the split production topology (dist unset — nginx serves
+    the bundle there). See deploy/demo/Dockerfile, docs/free-demo-deploy.md.
     """
     if not (dist and (dist / "index.html").is_file()):
         return False

@@ -1,6 +1,10 @@
 # Multi-stage: Node builds the static bundle, nginx serves it and reverse-
 # proxies /api to the backend so the browser only ever talks to one origin
 # (no CORS in the container stack — the proxy makes /api same-origin).
+#
+# "static bundle" is literal even on Next: next.config.ts sets
+# `output: "export"`, so `next build` emits a plain `out/` tree with no Node
+# server to run at request time — nginx stays the whole runtime.
 FROM node:22-alpine AS build
 WORKDIR /app
 
@@ -14,7 +18,8 @@ RUN npm run build
 
 FROM nginx:1.27-alpine AS runtime
 
-# Static site config + SPA fallback + /api reverse proxy (incl. SSE tuning).
+# Static site config + per-route directory resolution + /api reverse proxy
+# (incl. SSE tuning).
 # Shipped as a template: the nginx image's entrypoint runs envsubst over
 # /etc/nginx/templates/*.template at startup and writes the result into
 # conf.d/. BACKEND_UPSTREAM defaults to the compose service name; Fly overrides
@@ -27,7 +32,7 @@ COPY default.conf.template /etc/nginx/templates/default.conf.template
 # config can resolve the backend per-request (see the script + template).
 COPY 15-detect-resolver.sh /docker-entrypoint.d/15-detect-resolver.sh
 RUN chmod +x /docker-entrypoint.d/15-detect-resolver.sh
-COPY --from=build /app/dist /usr/share/nginx/html
+COPY --from=build /app/out /usr/share/nginx/html
 
 EXPOSE 80
 # Use 127.0.0.1, not localhost: busybox wget tries only the first resolved

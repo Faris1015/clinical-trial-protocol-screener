@@ -50,13 +50,17 @@ class Settings(BaseSettings):
     stub_latency_seconds: float = Field(0.0, ge=0.0)
 
     # --- API ---
-    # Comma-separated list, e.g. "http://localhost:5173,https://screener.example.com"
-    cors_origins: str = "http://localhost:5173"
-    # Single-service demo mode: point this at a built React bundle (a directory
-    # containing index.html) and the API also serves the SPA from the same
-    # origin, so one container hosts the whole demo with no CORS or second host.
-    # Unset (the default) in the split production topology, where nginx serves the
-    # SPA and reverse-proxies /api. See deploy/demo/Dockerfile and
+    # Comma-separated list, e.g. "http://localhost:3000,https://screener.example.com"
+    # The default is the Next dev server's port. It is a fallback for hitting this
+    # API directly from a browser page: `next dev` proxies /api itself, so the
+    # normal dev flow is same-origin and never reaches CORS.
+    cors_origins: str = "http://localhost:3000"
+    # Single-service demo mode: point this at the frontend's built bundle (a
+    # directory containing index.html — `frontend/out`, from `next build` with
+    # `output: "export"`) and the API also serves the app from the same origin, so
+    # one container hosts the whole demo with no CORS or second host. Unset (the
+    # default) in the split production topology, where nginx serves the bundle and
+    # reverse-proxies /api. See deploy/demo/Dockerfile and
     # docs/free-demo-deploy.md.
     frontend_dist: Path | None = None
 
