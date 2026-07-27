@@ -1,7 +1,10 @@
 "use client";
 
 import { useState } from "react";
+import { AlertTriangle, Upload } from "lucide-react";
 import { ScreeningRun } from "@/components/ScreeningRun";
+import { PageHeader } from "@/components/shell/page-header";
+import { Card, CardContent } from "@/components/ui/card";
 
 /**
  * New-screening route: upload a protocol, then watch that screening run. A client
@@ -47,16 +50,52 @@ export default function NewScreeningPage() {
 
   return (
     <>
-      <label className="upload">
-        Upload protocol (PDF or .md)
-        <input type="file" accept=".pdf,.md,.txt" onChange={upload} />
-      </label>
+      <PageHeader
+        title="New Screening"
+        description="Upload a trial protocol to parse its eligibility criteria and match a cohort."
+      />
 
-      {uploadError && <div className="banner failed">{uploadError}</div>}
+      <div className="space-y-4">
+        {/* A <label> wrapping a real file input, rather than a Button that proxies
+            a click at the input: the whole dropzone is the label, so it stays the
+            native control — keyboard activation, the OS picker, and screen-reader
+            semantics all come for free, and no browser lets a picker be opened
+            without a user gesture anyway.
 
-      {/* Keyed by thread: a second upload mounts a fresh run rather than mixing
-          the new stream's frames into the previous screening's state. */}
-      <ScreeningRun key={threadId ?? "idle"} threadId={threadId} />
+            The input is sr-only rather than hidden: `display:none` would take it
+            out of the tab order, whereas this keeps it focusable, and
+            focus-within paints the ring on the dropzone so that focus is
+            visible. */}
+        <label
+          className="border-border bg-card hover:border-primary/60 hover:bg-accent/40 focus-within:border-primary focus-within:ring-ring/50 flex cursor-pointer flex-col items-center gap-2 rounded-lg border border-dashed px-6 py-8 text-center transition-colors focus-within:ring-3"
+          data-region="upload"
+        >
+          <Upload className="text-muted-foreground size-5" aria-hidden="true" />
+          <span className="text-sm font-medium">Upload protocol</span>
+          <span className="text-muted-foreground text-xs">PDF, Markdown or plain text</span>
+          <input type="file" accept=".pdf,.md,.txt" onChange={upload} className="sr-only" />
+        </label>
+
+        {uploadError && (
+          <Card
+            data-region="upload-error"
+            role="alert"
+            className="border-destructive/40 bg-destructive/10"
+          >
+            <CardContent className="flex items-start gap-2.5 text-sm">
+              <AlertTriangle
+                className="text-destructive mt-0.5 size-4 shrink-0"
+                aria-hidden="true"
+              />
+              <span>{uploadError}</span>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Keyed by thread: a second upload mounts a fresh run rather than mixing
+            the new stream's frames into the previous screening's state. */}
+        <ScreeningRun key={threadId ?? "idle"} threadId={threadId} />
+      </div>
     </>
   );
 }

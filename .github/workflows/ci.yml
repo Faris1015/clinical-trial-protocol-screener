@@ -82,6 +82,17 @@ jobs:
         # enough, the static export has to actually be there. A missing
         # out/index.html means `output: "export"` was dropped from next.config.ts,
         # which would break the image builds instead of this job.
+        #
+        # The per-route directories are asserted too: `trailingSlash: true` is what
+        # makes both static hosts resolve /runs → /runs/index.html. Drop it and
+        # every sidebar destination 404s in the containers while this job, and
+        # `next dev`, stay green.
         run: |
           npm run build
           test -f out/index.html
+          for route in runs review rules metrics design; do
+            test -f "out/$route/index.html" || {
+              echo "::error::out/$route/index.html missing — trailingSlash or the route is gone"
+              exit 1
+            }
+          done

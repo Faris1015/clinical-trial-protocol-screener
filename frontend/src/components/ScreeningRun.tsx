@@ -1,10 +1,13 @@
 "use client";
 
 import { useState } from "react";
+import { AlertTriangle, CheckCircle2 } from "lucide-react";
 import { useScreenerStream } from "@/hooks/useScreenerStream";
 import { AgentCard } from "@/components/AgentCard";
 import { CriteriaTable } from "@/components/CriteriaTable";
 import { PatientMatchTable } from "@/components/PatientMatchTable";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
 import type { PatientEvaluation, StreamMessage } from "@/types";
 
 const AGENTS = ["router", "parser", "critic", "matcher"];
@@ -71,31 +74,47 @@ export function ScreeningRun({ threadId }: { threadId: string | null }) {
     phase === "running" ? ([...AGENTS].reverse().find((a) => nodeStates[a]) ?? null) : null;
 
   return (
-    <>
-      <section className="pipeline">
+    <div className="space-y-4" data-phase={phase}>
+      {/* One column per agent on desktop; two on phones, where four would crush
+          the detail text to unreadable width. */}
+      <section className="grid grid-cols-2 gap-3 lg:grid-cols-4" aria-label="Pipeline">
         {AGENTS.map((id) => (
           <AgentCard key={id} id={id} active={id === activeAgent} state={nodeStates[id]} />
         ))}
       </section>
 
       {phase === "failed" && (
-        <div className="banner failed">
-          {error ?? "Could not converge — escalated to human review after 3 attempts."}
-        </div>
+        <Card
+          data-region="banner-failed"
+          role="alert"
+          className="border-status-warn/40 bg-status-warn-soft"
+        >
+          <CardContent className="flex items-start gap-2.5 text-sm">
+            <AlertTriangle className="text-status-warn mt-0.5 size-4 shrink-0" aria-hidden="true" />
+            <span>
+              {error ?? "Could not converge — escalated to human review after 3 attempts."}
+            </span>
+          </CardContent>
+        </Card>
       )}
 
       {parsed && <CriteriaTable criteria={parsed} />}
 
       {phase === "awaiting_approval" && (
-        <div className="banner approval">
-          <span>
-            Compliance checks passed. Review the criteria above, then approve patient matching.
-          </span>
-          <button onClick={approve}>Approve → run matching</button>
-        </div>
+        <Card data-region="banner-approval" className="border-primary/40 bg-primary/10">
+          <CardContent className="flex flex-col gap-3 text-sm sm:flex-row sm:items-center">
+            <CheckCircle2 className="text-primary size-4 shrink-0" aria-hidden="true" />
+            <span className="flex-1">
+              Compliance checks passed. Review the criteria above, then approve patient matching.
+            </span>
+            <Button onClick={approve} size="lg" className="shrink-0">
+              Approve → run matching
+            </Button>
+          </CardContent>
+        </Card>
       )}
 
       {matches.length > 0 && <PatientMatchTable patients={matches} />}
-    </>
+    </div>
   );
 }

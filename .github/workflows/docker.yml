@@ -99,6 +99,14 @@ jobs:
           fail() { echo "::error::$1"; docker logs fe; docker rm -f fe; exit 1; }
           curl -fsS http://localhost:8080/ | grep -q "TrialGate" \
             || fail "home route did not render the app shell"
+          # The sidebar is prerendered into every route, so its presence is what
+          # proves the shell survived the export — and a nav destination resolving
+          # through nginx's `try_files $uri/` is what proves trailingSlash still
+          # gives each route its own directory.
+          curl -fsS http://localhost:8080/ | grep -q "Review Queue" \
+            || fail "home route did not render the sidebar navigation"
+          curl -fsS http://localhost:8080/runs/ | grep -q "Past Runs" \
+            || fail "/runs/ did not resolve to its exported directory index"
           [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/nope)" = 404 ] \
             || fail "unexported path did not 404"
           curl -sI http://localhost:8080/ | grep -i content-security-policy \
