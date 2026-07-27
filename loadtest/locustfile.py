@@ -14,6 +14,13 @@ the checkpointer — not real model inference. ``STUB_LATENCY_SECONDS`` on the
 server models a slow backend when you want to see how inference time interacts
 with the threadpool and the concurrency gate.
 
+Auth (#50): every ``/api`` route needs a session, so each simulated user signs in
+once ``on_start`` and reuses the cookie for its journeys — matching a real
+reviewer, and keeping scrypt's deliberate cost out of the measured path. Point
+``LOADTEST_EMAIL`` / ``LOADTEST_PASSWORD`` at an account on the target server (the
+defaults are the demo accounts), or run the server with ``AUTH_ENABLED=false`` to
+measure the pipeline with the auth layer out of the picture entirely.
+
 Invoke via ``make loadtest`` (headless, 50 users) or directly:
 
     locust -f loadtest/locustfile.py --host http://localhost:8000
@@ -56,6 +63,11 @@ STREAM_TIMEOUT_S = float(os.environ.get("LOADTEST_STREAM_TIMEOUT", "60"))
 # Terminal SSE sentinels the frontend branches on (see app/services/sse.py).
 _TERMINALS = {"__interrupt__", "__end__", "__error__"}
 
+# Credentials for the run. Defaults are the built-in demo account, which is what a
+# server started with no AUTH_USERS accepts (#50).
+LOADTEST_EMAIL = os.environ.get("LOADTEST_EMAIL", "reviewer@trialgate.local")
+LOADTEST_PASSWORD = os.environ.get("LOADTEST_PASSWORD", "trialgate-reviewer")
+
 
 class ScreenerUser(HttpUser):
     """One reviewer running the upload -> stream -> approve -> results journey."""
@@ -63,6 +75,33 @@ class ScreenerUser(HttpUser):
     # Real reviewers pause between actions; a small think-time keeps the load
     # closed-loop rather than a synthetic hammer that only measures the client.
     wait_time = between(0.5, 2.0)
+
+    def on_start(self) -> None:
+        """Sign in once per simulated user; the session cookie rides on `self.client`.
+
+        Logging in per journey instead would put a scrypt verification in every
+        iteration and measure password hashing rather than the pipeline. A failure
+        here is reported and left alone — the journey tasks will surface it as 401s
+        rather than this silently looking like a healthy run.
+        """
+        with self.client.post(
+            "/api/auth/login",
+            json={"email": LOADTEST_EMAIL, "password": LOADTEST_PASSWORD},
+            name="POST /api/auth/login",
+            catch_response=True,
+        ) as resp:
+            if resp.status_code == 200:
+                resp.success()
+            elif resp.status_code == 429:
+                # The login limiter is per IP, so a large spawn burst from one host
+                # trips it. Expected backpressure, not a defect; this user's
+                # journeys will 401 and be counted there.
+                resp.success()
+            else:
+                resp.failure(
+                    f"login failed: {resp.status_code} "
+                    f"(set LOADTEST_EMAIL/LOADTEST_PASSWORD, or run with AUTH_ENABLED=false)"
+                )
 
     @task
     def screen_protocol(self) -> None:

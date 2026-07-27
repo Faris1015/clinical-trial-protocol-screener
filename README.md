@@ -77,6 +77,13 @@ data gets touched.
 - **Human-in-the-loop at the right place.** The graph compiles with
   `interrupt_before=["matcher"]` — a human approves the parsed criteria before patient
   matching runs.
+- **The gate has a name attached.** Clearing it requires an authenticated
+  reviewer, and the approver's identity is written into the checkpoint
+  (`approved_by`, `approved_by_role`, `approved_at`, plus an event-log entry)
+  *before* the matcher resumes — so the authorization to touch patient data is
+  durable even if matching then fails. Auth lives in the backend rather than
+  NextAuth because the frontend is a static export with no request-time server;
+  [`app/auth.py`](backend/app/auth.py) has the full reasoning.
 - **Append-only event log in graph state** (`Annotated[list, operator.add]` reducer)
   powers the frontend's live "which agent owns the token" visualization for free.
 - **Layered by responsibility: routes → services → graph → nodes.** Route handlers
@@ -113,7 +120,8 @@ that pulls its model on first run:
 docker compose up --build
 ```
 
-Then open **http://localhost:8080**. On the first run Ollama downloads
+Then open **http://localhost:8080** and sign in with a demo account (below). On
+the first run Ollama downloads
 `qwen2.5:7b` (~4.7GB) before the backend starts — subsequent runs reuse the
 cached model volume. Synthetic patients are generated automatically into a
 data volume on first start. `depends_on` health conditions order startup so the
@@ -139,6 +147,8 @@ backend image and serves both from one origin in `LLM_PROVIDER=stub` mode
 docker build -f deploy/demo/Dockerfile -t trialgate-demo .
 docker run --rm -p 8000:8000 trialgate-demo   # open http://localhost:8000
 ```
+
+Sign in with a demo account (see [Authentication & roles](#authentication--roles)).
 
 This is the image behind the free public demo — see
 [`docs/free-demo-deploy.md`](docs/free-demo-deploy.md) to host it on Render or a
@@ -178,17 +188,63 @@ what changes if a route ever needs request-time rendering.
 
 </details>
 
+### Authentication & roles
+
+The human-in-the-loop gate is the point where patient data gets touched, so it is
+gated to authorized reviewers — and the approver's identity is recorded in the
+run's audit trail. Two roles:
+
+| Role | Can |
+|---|---|
+| **reviewer** | Upload protocols, review criteria, and clear the approval gate |
+| **admin** | Everything a reviewer can, plus manage accounts and compliance rules |
+
+Out of the box (no `AUTH_USERS` configured) two demo accounts are seeded:
+
+| Email | Password | Role |
+|---|---|---|
+| `reviewer@trialgate.local` | `trialgate-reviewer` | reviewer |
+| `admin@trialgate.local` | `trialgate-admin` | admin |
+
+> **These are published demo credentials for the synthetic-data demo.** For any
+> real deployment set `AUTH_SECRET` and `AUTH_USERS`, and
+> `AUTH_DEMO_USERS=false`. Provision an account by minting a hash:
+>
+> ```bash
+> cd backend && python -m app.auth hash        # prompts, prints an scrypt hash
+> # then: AUTH_USERS=jane@example.com:reviewer:scrypt$16384$8$1$...
+> ```
+
+Unauthenticated browsers are redirected to `/login`; every `/api` route answers
+`401` without a session and `403` when the role doesn't cover the action.
+Sessions are signed, expiring tokens in an httpOnly `SameSite=Strict` cookie —
+[`backend/app/auth.py`](backend/app/auth.py) documents why the backend owns auth
+rather than NextAuth (the frontend is a static export with no request-time
+server), and how CSRF is handled.
+
 ### Run a screening
 
 ```bash
-curl -X POST http://localhost:8000/api/screenings -F "file=@protocol.pdf"
-curl -N http://localhost:8000/api/screenings/<thread_id>/stream
-curl -X POST http://localhost:8000/api/screenings/<thread_id>/approve
-curl http://localhost:8000/api/screenings        # list all screenings (newest first)
+# 1. Sign in; -c/-b keep the session cookie in a jar between calls.
+curl -X POST http://localhost:8000/api/auth/login -c cookies.txt \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"reviewer@trialgate.local","password":"trialgate-reviewer"}'
+
+# 2. Screen a protocol.
+curl -b cookies.txt -X POST http://localhost:8000/api/screenings -F "file=@protocol.pdf"
+curl -b cookies.txt -N http://localhost:8000/api/screenings/<thread_id>/stream
+curl -b cookies.txt -X POST http://localhost:8000/api/screenings/<thread_id>/approve
+curl -b cookies.txt http://localhost:8000/api/screenings   # list all (newest first)
 ```
 
 State is durable: a screening parked at the human-approval gate survives a
 server restart or deploy and stays resumable (see [Configuration](#configuration)).
+After approval, the run's state carries `approved_by`, `approved_by_role`, and
+`approved_at`, plus a `human`/`approved` entry in its event log:
+
+```bash
+curl -b cookies.txt http://localhost:8000/api/screenings/<thread_id>/state
+```
 
 ### Health & readiness
 
@@ -549,6 +605,13 @@ with a clear message instead of erroring mid-screening.
 | `ANTHROPIC_API_KEY` | — | **Required** when `LLM_PROVIDER=anthropic` |
 | `LLM_TEMPERATURE` | `0.0` | Sampling temperature (0–1) |
 | `CORS_ORIGINS` | `http://localhost:3000` | Comma-separated allowed origins |
+| `AUTH_ENABLED` | `true` | Gate `/api` behind a session; `false` only for single-user local runs / load tests |
+| `AUTH_SECRET` | — | Session signing key. **Required in production** — unset means a random per-process key (sessions die on restart, replicas reject each other) |
+| `AUTH_USERS` | — | Accounts as `email:role:hash` entries; mint a hash with `python -m app.auth hash`. **Replaces** the demo accounts |
+| `AUTH_DEMO_USERS` | `true` | Seed the published demo accounts when `AUTH_USERS` is empty; set `false` in production |
+| `AUTH_SESSION_TTL_SECONDS` | `28800` | Session lifetime (8h) |
+| `AUTH_COOKIE_SECURE` | `false` | Add the cookie's `Secure` attribute; set `true` behind TLS |
+| `RATE_LIMIT_LOGIN` | `10/minute` | Per-IP cap on login attempts |
 | `MAX_PARSE_ATTEMPTS` | `3` | Parser retries before human escalation (1–10) |
 | `RULES_PATH` | `app/rules/compliance_rules.yaml` | Compliance rules database |
 | `PATIENTS_PATH` | `app/data/patients.json` | Synthetic EHR location |

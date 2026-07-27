@@ -1,5 +1,6 @@
-import { BarChart3, ClipboardCheck, FilePlus2, History, Scale } from "lucide-react";
+import { BarChart3, ClipboardCheck, FilePlus2, History, Scale, Users } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
+import type { Role } from "@/lib/api";
 
 export type NavItem = {
   href: string;
@@ -7,6 +8,12 @@ export type NavItem = {
   icon: LucideIcon;
   /** Issue that fills this route in; undefined once the route is real. */
   pendingIssue?: number;
+  /**
+   * Minimum role that sees this entry (#50). Presentation only — the route's data
+   * is protected by the API's own 403, so hiding an entry never *is* the
+   * enforcement, it just avoids showing someone a door they can't open.
+   */
+  minRole?: Role;
 };
 
 /**
@@ -22,6 +29,7 @@ export const NAV_ITEMS: NavItem[] = [
   { href: "/review", label: "Review Queue", icon: ClipboardCheck, pendingIssue: 53 },
   { href: "/rules", label: "Rules", icon: Scale, pendingIssue: 57 },
   { href: "/metrics", label: "Metrics", icon: BarChart3, pendingIssue: 58 },
+  { href: "/admin", label: "Accounts", icon: Users, minRole: "admin" },
 ];
 
 /**

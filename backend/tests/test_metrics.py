@@ -16,6 +16,7 @@ import app.graph.nodes.matcher as matcher_mod
 import app.graph.nodes.parser as parser_mod
 import app.main as main
 import app.services.llm as llm_mod
+from tests.auth_helpers import sign_in
 from tests.fakes import (
     FAKE_PATIENTS,
     PROTOCOL_TEXT,
@@ -42,7 +43,9 @@ def _sample(name: str, labels: dict[str, str] | None = None) -> float:
 
 
 def _client() -> AsyncClient:
-    return AsyncClient(transport=ASGITransport(app=main.app), base_url="http://test")
+    client = AsyncClient(transport=ASGITransport(app=main.app), base_url="http://test")
+    sign_in(client)
+    return client
 
 
 async def _drive_to_gate(client: AsyncClient) -> str:

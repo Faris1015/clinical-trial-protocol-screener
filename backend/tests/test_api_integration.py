@@ -17,6 +17,7 @@ import app.graph.nodes.critic as critic_mod
 import app.graph.nodes.matcher as matcher_mod
 import app.graph.nodes.parser as parser_mod
 import app.main as main
+from tests.auth_helpers import REVIEWER, sign_in
 from tests.fakes import FAKE_PATIENTS, PROTOCOL_TEXT, FakeChatModel, good_criteria
 
 
@@ -34,6 +35,7 @@ async def test_upload_stream_interrupt_approve_happy_path(monkeypatch):
     async with main.lifespan(main.app):
         transport = ASGITransport(app=main.app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
+            sign_in(client)
             # 1. Upload a plain-text protocol.
             upload = await client.post(
                 "/api/screenings",
@@ -84,6 +86,19 @@ async def test_upload_stream_interrupt_approve_happy_path(monkeypatch):
             listing = (await client.get("/api/screenings")).json()
             assert listing[0]["status"] == "done"
 
+            # 7. The run's audit trail names who authorized touching patient data
+            #    (#50) — read back through the real checkpointer, not the request
+            #    that wrote it.
+            final = (await client.get(f"/api/screenings/{thread_id}/state")).json()["values"]
+            assert final["approved_by"] == REVIEWER.email
+            assert final["approved_by_role"] == REVIEWER.role
+            assert final["approved_at"]
+            approval_events = [
+                e for e in final["events"] if e["agent"] == "human" and e["status"] == "approved"
+            ]
+            assert len(approval_events) == 1
+            assert REVIEWER.email in approval_events[0]["detail"]
+
 
 async def test_approve_before_streaming_is_conflict(monkeypatch):
     """Approving a screening that has not reached the gate is a clean 409, not a
@@ -94,6 +109,7 @@ async def test_approve_before_streaming_is_conflict(monkeypatch):
     async with main.lifespan(main.app):
         transport = ASGITransport(app=main.app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
+            sign_in(client)
             upload = await client.post(
                 "/api/screenings",
                 files={"file": ("protocol.md", PROTOCOL_TEXT.encode(), "text/markdown")},

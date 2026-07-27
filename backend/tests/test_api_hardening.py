@@ -7,11 +7,13 @@ from fastapi.testclient import TestClient
 
 import app.main as main
 from app.services.concurrency import ConcurrencyLimiter
+from tests.auth_helpers import sign_in
 
 
 @pytest.fixture
 def client():
     with TestClient(main.app, raise_server_exceptions=False) as c:
+        sign_in(c)
         yield c
 
 

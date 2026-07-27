@@ -59,6 +59,13 @@ services:
       # was actually pulled. Override both by exporting OLLAMA_MODEL.
       - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:7b}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # Auth (#50). No AUTH_USERS, so the built-in demo accounts apply — sign in
+      # at http://localhost:8080 as reviewer@trialgate.local / trialgate-reviewer
+      # (or admin@trialgate.local / trialgate-admin). A fixed AUTH_SECRET keeps
+      # sessions alive across `docker compose restart`; override both for anything
+      # beyond local use. See backend/.env.example.
+      - AUTH_SECRET=${AUTH_SECRET:-local-compose-session-key-not-for-production}
+      - AUTH_USERS=${AUTH_USERS:-}
     volumes:
       # Holds the generated patients.json (and the durable checkpointer DB once
       # #2 lands) so screening data survives container restarts.
@@ -67,9 +74,10 @@ services:
       ollama-pull:
         condition: service_completed_successfully
     # Loopback-only: the browser reaches the API through the frontend proxy on
-    # :8080. This direct port is for local debugging, so don't publish the
-    # unauthenticated backend on 0.0.0.0 where the LAN could hit it. The frontend
-    # still reaches it over the compose network by service name.
+    # :8080. This direct port is for local debugging — the API requires a session
+    # now (#50), but it still shouldn't be published on 0.0.0.0 where the LAN could
+    # reach the login endpoint. The frontend still talks to it over the compose
+    # network by service name.
     ports:
       - "127.0.0.1:8000:8000"
 

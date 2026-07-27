@@ -12,14 +12,16 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 from uuid import uuid4
 
 from fastapi.encoders import jsonable_encoder
 
+from app.auth import Principal
 from app.exceptions import ScreenerError, ScreeningNotApprovableError, ScreeningNotFoundError
 from app.graph.builder import build_graph
-from app.graph.state import initial_state
+from app.graph.state import event, initial_state
 from app.logging_config import bind_contextvars, get_logger
 from app.services import sse
 from app.services.pdf import extract_eligibility_text
@@ -57,6 +59,8 @@ class ScreeningGraph(Protocol):
     # when stream_mode is a list (approve uses ["updates", "custom"]) — hence Any.
 
     async def aget_state(self, config: Any) -> Any: ...
+
+    async def aupdate_state(self, config: Any, values: dict[str, Any]) -> Any: ...
 
     async def ainvoke(self, input: Any, config: Any = ...) -> dict[str, Any]: ...
 
@@ -200,8 +204,36 @@ async def stream_screening(
     return generate()
 
 
+async def _record_approver(
+    graph: ScreeningGraph, config: RunnableConfig, approver: Principal
+) -> None:
+    """Stamp the approver into the parked checkpoint before it resumes (#50).
+
+    `aupdate_state` merges values into the *current* checkpoint without moving
+    the cursor: the thread stays parked with `next == ("matcher",)`, so the
+    `astream(None, ...)` resume below still enters the matcher — which now sees
+    `approved_by` in its state. `events` carries an append reducer, so the audit
+    entry joins the same log the frontend renders rather than replacing it.
+    """
+    await graph.aupdate_state(
+        config,
+        {
+            "approved_by": approver.email,
+            "approved_by_role": approver.role,
+            "approved_at": datetime.now(UTC).isoformat(),
+            "events": [
+                event(
+                    "human",
+                    "approved",
+                    f"Approval gate cleared by {approver.email} ({approver.role})",
+                )
+            ],
+        },
+    )
+
+
 async def approve_screening(
-    store: ScreeningStore, graph: ScreeningGraph, thread_id: str
+    store: ScreeningStore, graph: ScreeningGraph, thread_id: str, approver: Principal
 ) -> AsyncIterator[str]:
     """Resume past the human-in-the-loop gate and STREAM the matcher over SSE.
 
@@ -215,12 +247,20 @@ async def approve_screening(
     thread or a screening not at the gate becomes an HTTP error, not a frame
     buried after the response headers are already sent. That second check also
     rejects an approve on an already-finished screening (its `next` is empty).
+
+    `approver` is who authorized touching patient data (#50). It is written into
+    the checkpoint *before* the resume, so the audit trail records the
+    authorization even if the matcher subsequently fails — and the matcher itself
+    can read it out of state.
     """
     config = await _require_thread(store, thread_id)
     bind_contextvars(thread_id=thread_id)
     if not (await graph.aget_state(config)).next:
         raise ScreeningNotApprovableError("screening is not awaiting approval")
-    log.info("screening.approved")
+    await _record_approver(graph, config, approver)
+    # Server-side counterpart to the in-state event: who cleared the gate, in the
+    # same correlated log stream as the rest of the run.
+    log.info("screening.approved", approved_by=approver.email, approver_role=approver.role)
 
     async def generate() -> AsyncIterator[str]:
         # Mirrors stream_screening's generator: an exception mid-stream can't be

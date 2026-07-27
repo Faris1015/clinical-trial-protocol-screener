@@ -87,6 +87,9 @@ class Settings(BaseSettings):
     # Strict on the LLM-triggering create endpoint, generous on cheap reads.
     rate_limit_create: str = "10/minute"
     rate_limit_read: str = "120/minute"
+    # Login is the one endpoint an attacker can guess against, so it gets its own
+    # (tight) IP-keyed limit rather than inheriting the read budget.
+    rate_limit_login: str = "10/minute"
     # Toggle the limiter off entirely (tests set RATE_LIMIT_ENABLED=false so the
     # suite isn't throttled by a process-wide in-memory counter).
     rate_limit_enabled: bool = True
@@ -105,6 +108,32 @@ class Settings(BaseSettings):
     # while, so the approve stream gets a longer idle window than the pre-approval
     # phase before the reaper trips.
     sse_matcher_idle_timeout_seconds: float = Field(300.0, gt=0)
+
+    # --- Auth (#50) ---
+    # Off only for single-user local runs and the load-test harness: with auth
+    # disabled every request is treated as a synthetic admin principal
+    # (app/auth.py ANONYMOUS), which is unmistakable in an audit trail.
+    auth_enabled: bool = True
+    # HMAC key for session cookies. Unset means a random per-process key: safe by
+    # default (no secret in the repo) but sessions die on restart and replicas
+    # reject each other's cookies, so production must set it.
+    auth_secret: str | None = None
+    # Accounts, as comma- or newline-separated "email:role:password_hash" entries.
+    # Mint a hash with `python -m app.auth hash`. When set, this replaces the demo
+    # accounts entirely — a configured deployment never carries them too.
+    auth_users: str = ""
+    # Seed the built-in demo accounts (published passwords, see README) when
+    # AUTH_USERS is empty. On by default so `docker compose up` and the zero-config
+    # demo image land on a working login screen; turn it off in production.
+    auth_demo_users: bool = True
+    # Session lifetime. 8 hours covers a reviewer's shift without leaving a
+    # forgotten browser authenticated overnight.
+    auth_session_ttl_seconds: int = Field(8 * 3600, ge=60)
+    auth_cookie_name: str = "trialgate_session"
+    # Add the Secure attribute so the cookie is only ever sent over HTTPS. Off by
+    # default because local dev and the compose stack are plain HTTP (a Secure
+    # cookie would simply never be stored there); set true behind TLS.
+    auth_cookie_secure: bool = False
 
     # --- Pipeline ---
     max_parse_attempts: int = Field(3, ge=1, le=10)
@@ -171,6 +200,19 @@ class Settings(BaseSettings):
             raise ValueError(
                 "SSE_IDLE_TIMEOUT_SECONDS must be >= SSE_HEARTBEAT_SECONDS "
                 f"({self.sse_idle_timeout_seconds} < {self.sse_heartbeat_seconds})."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _require_auth_accounts(self) -> "Settings":
+        # Auth on with no accounts is a locked-out app — nobody can reach the
+        # approval gate. Catch it at startup rather than at the login screen.
+        if self.auth_enabled and not self.auth_users.strip() and not self.auth_demo_users:
+            raise ValueError(
+                "AUTH_ENABLED=true requires accounts: set AUTH_USERS "
+                "('email:role:hash' entries — mint a hash with `python -m app.auth hash`), "
+                "or AUTH_DEMO_USERS=true for the demo accounts, "
+                "or AUTH_ENABLED=false to run without authentication."
             )
         return self
 

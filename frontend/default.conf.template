@@ -7,6 +7,19 @@ server {
     # Don't advertise the nginx version on responses/error pages.
     server_tokens off;
 
+    # Emit a RELATIVE Location header on nginx's own redirects. With the default
+    # (`on`), nginx builds an absolute URL from $host and its own :80 — dropping
+    # the published port, so the directory redirect for `/login` sends a browser
+    # on http://localhost:8080 to http://localhost/login/ and the page dies with
+    # ERR_CONNECTION_REFUSED. A relative Location keeps whatever host:port the
+    # client actually used, which is also what makes this work unchanged behind a
+    # different published port or an upstream proxy.
+    #
+    # `try_files $uri/` below is what issues those redirects: Next's static export
+    # writes one directory per route (`trailingSlash: true`), so any request for a
+    # route without its trailing slash gets one.
+    absolute_redirect off;
+
     # Bound request bodies at the edge to match the backend's 25 MiB upload cap
     # (default is 1m, which would silently 413 legitimate protocol PDFs).
     client_max_body_size 26m;
