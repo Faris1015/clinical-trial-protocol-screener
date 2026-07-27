@@ -99,6 +99,7 @@ data gets touched.
 | Validation | **Pydantic v2** — schemas double as LLM structured-output contracts |
 | LLM | **Ollama** (`qwen2.5:7b`) locally, or hosted Claude via the same interface |
 | Frontend | **Next.js (App Router) + TypeScript** — static export, live pipeline visualization |
+| UI | **Tailwind v4 + shadcn/ui** — dashboard shell, light/dark themes, kit documented at `/design` |
 | Synthetic data | Seeded Faker-based EHR generator (reproducible demos) |
 
 ## Quickstart

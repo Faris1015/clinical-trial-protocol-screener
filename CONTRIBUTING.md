@@ -70,6 +70,23 @@ npm install
 npm run dev                                   # http://localhost:3000
 ```
 
+The UI is Tailwind v4 + shadcn/ui. Before adding a component, check
+`/design` (`localhost:3000/design`) — it renders every component and variant the
+product is built from, in whichever theme is active, and is the one place the kit
+is documented. Prefer a variant there over new one-off classes; add new variants
+to `src/components/ui/*` (we own that source) rather than styling in place.
+
+Design tokens live in `src/app/globals.css`. Two traps: shadcn's `--accent` is the
+subtle hover surface, not the brand blue (that's `--primary`), and the
+`--status-*` trio carries clinical meaning — pass / fail / indeterminate — so use
+it for anything a reviewer acts on instead of reaching for `--destructive`.
+
+Add UI components with the CLI so `components.json` stays authoritative:
+
+```bash
+npx shadcn@latest add <component>
+```
+
 ### Git hooks (recommended)
 
 Install once — every commit then runs the same checks CI runs, on staged files:

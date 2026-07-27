@@ -1,0 +1,194 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * TrialGate design tokens.
+ *
+ * The dark theme is the product's existing identity, ported verbatim from the
+ * hand-rolled stylesheet this replaced: navy #0f1420 ground, #1a2032 surfaces,
+ * #4f8cff accent. The light theme is derived from the same hues.
+ *
+ * Two naming traps worth knowing before editing:
+ *
+ * 1. shadcn's `--accent` is the subtle hover surface, NOT the brand accent. The
+ *    brand blue is `--primary` (and `--ring`). Assigning the blue to `--accent`
+ *    would tint every hover state.
+ * 2. `--status-*` are the clinical semantics — a criterion passed, failed, or
+ *    could not be determined. They carry meaning a reviewer acts on, so they are
+ *    their own tokens rather than reuses of primary/destructive, and they are
+ *    darkened in the light theme to stay legible on a white ground.
+ */
+
+@theme inline {
+  /* Literal families, not var() indirection: Tailwind v4 resolves `@theme
+   * inline` at parse time, so `--font-sans: var(--font-sans)` (what `shadcn
+   * init` writes) is circular and leaves the page with no font at all.
+   * A system stack rather than a webfont keeps `next build` hermetic — no
+   * build-time font fetch — and keeps the CSP's `default-src 'self'` intact,
+   * since there is no external font origin to allow. */
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, Roboto, "Helvetica Neue", Arial,
+    sans-serif;
+  --font-mono:
+    ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --font-heading: var(--font-sans);
+
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+
+  /* Clinical status semantics — see the note above. `-soft` is the chip/row
+   * background, `-fg` the text that sits on the normal ground. */
+  --color-status-pass: var(--status-pass);
+  --color-status-pass-soft: var(--status-pass-soft);
+  --color-status-fail: var(--status-fail);
+  --color-status-fail-soft: var(--status-fail-soft);
+  --color-status-warn: var(--status-warn);
+  --color-status-warn-soft: var(--status-warn-soft);
+
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+/* Light theme. Same hues as dark, lightness inverted. `--primary` is a step
+ * darker than the brand #4f8cff so white button text clears WCAG AA on it;
+ * the brand blue itself still shows up as `--ring` and in active nav states. */
+:root {
+  --background: #f7f9fc;
+  --foreground: #131a2b;
+  --card: #ffffff;
+  --card-foreground: #131a2b;
+  --popover: #ffffff;
+  --popover-foreground: #131a2b;
+  --primary: #2f6fe4;
+  --primary-foreground: #ffffff;
+  --secondary: #eef2f8;
+  --secondary-foreground: #1d2740;
+  --muted: #eef2f8;
+  --muted-foreground: #5b6780;
+  --accent: #e8eef8;
+  --accent-foreground: #1d2740;
+  --destructive: #c33d39;
+  --border: #dde4ee;
+  --input: #dde4ee;
+  --ring: #2f6fe4;
+
+  --status-pass: #1e7f4f;
+  --status-pass-soft: #1e7f4f1f;
+  --status-fail: #c33d39;
+  --status-fail-soft: #c33d391f;
+  --status-warn: #a86a12;
+  --status-warn-soft: #a86a121f;
+
+  --chart-1: #2f6fe4;
+  --chart-2: #1e7f4f;
+  --chart-3: #a86a12;
+  --chart-4: #c33d39;
+  --chart-5: #5b6780;
+
+  --radius: 0.625rem;
+
+  --sidebar: #ffffff;
+  --sidebar-foreground: #131a2b;
+  --sidebar-primary: #2f6fe4;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #eef2f8;
+  --sidebar-accent-foreground: #1d2740;
+  --sidebar-border: #e4eaf3;
+  --sidebar-ring: #2f6fe4;
+}
+
+/* Dark theme — the palette the product already shipped. */
+.dark {
+  --background: #0f1420;
+  --foreground: #e6ebf5;
+  --card: #1a2032;
+  --card-foreground: #e6ebf5;
+  --popover: #1a2032;
+  --popover-foreground: #e6ebf5;
+  /* The brand accent, unchanged. Its foreground is deep navy rather than the
+   * white the old stylesheet used: white on #4f8cff is only ~3:1, which fails
+   * AA at button text sizes. */
+  --primary: #4f8cff;
+  --primary-foreground: #0b1224;
+  --secondary: #232b42;
+  --secondary-foreground: #e6ebf5;
+  --muted: #202840;
+  --muted-foreground: #8a94ad;
+  --accent: #232b42;
+  --accent-foreground: #e6ebf5;
+  --destructive: #d9534f;
+  --border: #2a3350;
+  --input: #2a3350;
+  --ring: #4f8cff;
+
+  --status-pass: #2ea36b;
+  --status-pass-soft: #2ea36b33;
+  --status-fail: #d9534f;
+  --status-fail-soft: #d9534f33;
+  --status-warn: #e0a13c;
+  --status-warn-soft: #e0a13c33;
+
+  --chart-1: #4f8cff;
+  --chart-2: #2ea36b;
+  --chart-3: #e0a13c;
+  --chart-4: #d9534f;
+  --chart-5: #8a94ad;
+
+  --sidebar: #131828;
+  --sidebar-foreground: #e6ebf5;
+  --sidebar-primary: #4f8cff;
+  --sidebar-primary-foreground: #0b1224;
+  --sidebar-accent: #1f2740;
+  --sidebar-accent-foreground: #e6ebf5;
+  --sidebar-border: #242e4a;
+  --sidebar-ring: #4f8cff;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    @apply font-sans;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+  }
+}
