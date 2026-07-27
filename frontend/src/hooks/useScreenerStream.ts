@@ -77,7 +77,19 @@ export function useScreenerStream(threadId: string | null) {
       const msg: StreamMessage = JSON.parse(e.data);
       if (applyFrame(msg)) es.close();
     };
-    es.onerror = () => es.close();
+    es.onerror = () => {
+      es.close();
+      // A terminal frame already closed the stream on the happy path, so reaching
+      // here means the connection dropped mid-screening. EventSource exposes no
+      // detail about why, but staying on "running" would leave the pipeline
+      // spinning forever — say so instead. Guarded on the phase so a drop after
+      // the gate or after completion doesn't rewrite a state the user has.
+      setPhase((prev) => (prev === "running" ? "failed" : prev));
+      // Keep any more specific error (an `__error__` frame) that already landed.
+      setError(
+        (prev) => prev ?? "Connection to the screening stream failed. Reload to check its status."
+      );
+    };
     return () => es.close();
   }, [threadId, applyFrame]);
 
