@@ -50,6 +50,10 @@ export type StateUpdate = {
   parsed_criteria?: CriteriaSchema;
   events?: AgentEvent[];
   matched_patients?: PatientEvaluation[];
+  /** Audit trail (#50): who cleared the human-in-the-loop gate. */
+  approved_by?: string | null;
+  approved_by_role?: string | null;
+  approved_at?: string | null;
   [key: string]: unknown;
 };
 

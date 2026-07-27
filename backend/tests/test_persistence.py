@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 import app.main as main
 from app.config import Settings
 from app.persistence import SqliteScreeningStore, open_persistence
+from tests.auth_helpers import sign_in
 
 # A minimal protocol that clears the router's length + eligibility-marker gate.
 PROTOCOL = (
@@ -191,6 +192,7 @@ def _stream_events(client, thread_id):
 def test_screening_resumes_from_interrupt_after_restart(durable_app):
     # ---- server 1: upload and stream to the approval gate ----
     with TestClient(main.app, raise_server_exceptions=False) as client:
+        sign_in(client)
         thread_id = client.post(
             "/api/screenings", files={"file": ("p.md", PROTOCOL.encode())}
         ).json()["thread_id"]
@@ -199,6 +201,7 @@ def test_screening_resumes_from_interrupt_after_restart(durable_app):
 
     # ---- server 2: brand-new process on the same sqlite file ----
     with TestClient(main.app, raise_server_exceptions=False) as client:
+        sign_in(client)
         # State came from disk, not memory: the gate and parsed criteria survive.
         state = client.get(f"/api/screenings/{thread_id}/state").json()
         assert state["pending"] == ["matcher"]
@@ -228,6 +231,7 @@ def test_screening_resumes_from_interrupt_after_restart(durable_app):
 @pytest.fixture
 def client():
     with TestClient(main.app, raise_server_exceptions=False) as c:
+        sign_in(c)
         yield c
 
 

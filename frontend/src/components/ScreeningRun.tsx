@@ -8,6 +8,8 @@ import { CriteriaTable } from "@/components/CriteriaTable";
 import { PatientMatchTable } from "@/components/PatientMatchTable";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { useAuth } from "@/components/AuthProvider";
+import { apiFetch, problemDetail } from "@/lib/api";
 import type { PatientEvaluation, StreamMessage } from "@/types";
 
 const AGENTS = ["router", "parser", "critic", "matcher"];
@@ -23,6 +25,8 @@ const AGENTS = ["router", "parser", "critic", "matcher"];
  */
 export function ScreeningRun({ threadId }: { threadId: string | null }) {
   const [matches, setMatches] = useState<PatientEvaluation[]>([]);
+  const [approvedBy, setApprovedBy] = useState<string | null>(null);
+  const { principal } = useAuth();
   const { nodeStates, phase, setPhase, error, setError, applyFrame } = useScreenerStream(threadId);
 
   async function approve() {
@@ -30,18 +34,28 @@ export function ScreeningRun({ threadId }: { threadId: string | null }) {
     // so a slow matcher can't be double-approved into a duplicate run.
     setError(null);
     setPhase("running");
-    const res = await fetch(`/api/screenings/${encodeURIComponent(threadId!)}/approve`, {
+    const res = await apiFetch(`/api/screenings/${encodeURIComponent(threadId!)}/approve`, {
       method: "POST",
     });
     if (!res.ok || !res.body) {
       // Eager-validation errors (404 unknown thread, 409 not at the gate, 429
-      // slots full) arrive as JSON before the stream commits — the screening
-      // stays parked at the gate, so show the error instead of hanging.
-      const body = (await res.json().catch(() => ({}))) as { detail?: string };
-      setError(body.detail ?? "Approval failed");
+      // slots full, 401 expired session) arrive as JSON before the stream commits
+      // — the screening stays parked at the gate, so show the error instead of
+      // hanging. A 401 also trips apiFetch's handler, which sends the user to the
+      // login page; the screening is still at the gate when they come back.
+      setError(await problemDetail(res, "Approval failed"));
       setPhase("failed");
       return;
     }
+    // Only now — the request was accepted, so the server has stamped the approver
+    // into the checkpoint. Setting it before the call would leave a rejected
+    // approval (409, expired session) claiming on screen that someone authorized
+    // patient matching, which is exactly the wrong thing for an audit line to do.
+    //
+    // The durable record is the server's (`approved_by` in graph state, #50);
+    // this is its local echo, since that write lands before the resume and so
+    // never appears in the SSE stream. #55's audit view reads it back via /state.
+    setApprovedBy(principal?.email ?? null);
     // The matcher streams over SSE like the initial phase; EventSource can't
     // POST, so read the body and split on the SSE frame delimiter ourselves,
     // funneling each frame through the shared reducer.
@@ -112,6 +126,16 @@ export function ScreeningRun({ threadId }: { threadId: string | null }) {
             </Button>
           </CardContent>
         </Card>
+      )}
+
+      {/* Audit trail: patient data was only touched because a named reviewer
+          authorized it (#50). Rendered with the cohort, so results are never shown
+          without their attribution. */}
+      {approvedBy && (
+        <p className="text-muted-foreground text-xs" data-region="approval-provenance">
+          Patient matching authorized by{" "}
+          <span className="text-foreground font-medium">{approvedBy}</span>.
+        </p>
       )}
 
       {matches.length > 0 && <PatientMatchTable patients={matches} />}

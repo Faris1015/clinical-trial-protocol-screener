@@ -99,14 +99,30 @@ jobs:
           fail() { echo "::error::$1"; docker logs fe; docker rm -f fe; exit 1; }
           curl -fsS http://localhost:8080/ | grep -q "TrialGate" \
             || fail "home route did not render the app shell"
-          # The sidebar is prerendered into every route, so its presence is what
-          # proves the shell survived the export — and a nav destination resolving
-          # through nginx's `try_files $uri/` is what proves trailingSlash still
-          # gives each route its own directory.
-          curl -fsS http://localhost:8080/ | grep -q "Review Queue" \
-            || fail "home route did not render the sidebar navigation"
+          # Auth (#50) made the sidebar session-gated, so it is no longer
+          # prerendered into any route — a public static file must not carry the
+          # app's nav, and a signed-out visitor must not flash it. `data-app-shell`
+          # is what proves the shell survived the export instead: it is the
+          # auth-aware AppShell's own marker, so its absence means the layout is
+          # gone, not merely that nobody is signed in.
+          curl -fsS http://localhost:8080/ | grep -q 'data-app-shell' \
+            || fail "home route did not render the app shell wrapper"
+          # A nav destination resolving through nginx's `try_files $uri/` is what
+          # proves trailingSlash still gives each route its own directory. "Past
+          # Runs" is that route's own page heading, not the (gated) nav label.
           curl -fsS http://localhost:8080/runs/ | grep -q "Past Runs" \
             || fail "/runs/ did not resolve to its exported directory index"
+          # The login route is the entry point for every unauthenticated visitor,
+          # so the export has to contain it.
+          [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/login/)" = 200 ] \
+            || fail "/login/ was not exported"
+          # nginx must redirect a slash-less route RELATIVELY. With the default
+          # `absolute_redirect on` it rebuilds the URL from its own :80, so a
+          # browser on any other published port gets sent to a dead origin
+          # (regression: this broke every client-side redirect to /login).
+          curl -sI http://localhost:8080/runs | grep -i '^location:' \
+            | grep -q ' /runs/' \
+            || fail "nginx issued an absolute redirect — the published port would be dropped"
           [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/nope)" = 404 ] \
             || fail "unexported path did not 404"
           curl -sI http://localhost:8080/ | grep -i content-security-policy \

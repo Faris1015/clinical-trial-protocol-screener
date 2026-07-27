@@ -31,6 +31,15 @@ class ScreenerState(TypedDict):
     parse_attempts: int
     compliance_findings: list[dict]
 
+    # Human-in-the-loop gate audit trail (#50). Written when a reviewer clears the
+    # gate, *before* the matcher resumes — so the identity that authorized
+    # touching patient data is durable in the checkpoint even if matching then
+    # fails. PHI-safe by construction: staff identity and a timestamp, never
+    # anything about a patient.
+    approved_by: str | None
+    approved_by_role: str | None
+    approved_at: str | None
+
     # Matcher output
     matched_patients: list[dict]
 
@@ -74,6 +83,9 @@ def initial_state(raw_protocol_text: str, source_filename: str) -> ScreenerState
         critic_feedback=None,
         parse_attempts=0,
         compliance_findings=[],
+        approved_by=None,
+        approved_by_role=None,
+        approved_at=None,
         matched_patients=[],
         events=[],
         current_step="routing",

@@ -41,6 +41,14 @@ ENV PATH="/venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
     # Demo defaults — zero-inference stub LLM, frontend served from this app,
     # and all writable state on the (ephemeral) /data dir the entrypoint seeds.
+    #
+    # Auth (#50) is left at its defaults on purpose: no AUTH_USERS, so the
+    # built-in demo accounts apply and the login screen works with no
+    # configuration (credentials are published in the README). AUTH_SECRET is
+    # also unset, so each container signs sessions with a random per-process key
+    # — a restart signs everyone out, which is the right trade for a throwaway
+    # single-container demo. A real deployment sets both, plus
+    # AUTH_COOKIE_SECURE=true behind TLS.
     LLM_PROVIDER=stub \
     FRONTEND_DIST=/app/frontend_dist \
     PATIENTS_PATH=/data/patients.json \

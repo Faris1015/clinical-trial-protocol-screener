@@ -7,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main
+from tests.auth_helpers import sign_in
 
 
 @pytest.fixture
@@ -18,6 +19,7 @@ def limited_client(monkeypatch):
     main.limiter.enabled = True
     try:
         with TestClient(main.app, raise_server_exceptions=False) as c:
+            sign_in(c)
             yield c
     finally:
         main.limiter.enabled = False

@@ -66,3 +66,25 @@ class TooManyActiveScreeningsError(ScreenerError):
     """Every concurrency slot is in use; the caller should retry shortly."""
 
     http_status = 429
+
+
+class AuthenticationRequiredError(ScreenerError):
+    """The request carried no valid session (#50)."""
+
+    http_status = 401
+
+
+class InvalidCredentialsError(ScreenerError):
+    """Login was attempted with an unknown email or a wrong password (#50).
+
+    Deliberately indistinguishable between the two cases — the message must not
+    tell an attacker which half they got right.
+    """
+
+    http_status = 401
+
+
+class AuthorizationDeniedError(ScreenerError):
+    """The caller is authenticated but their role doesn't cover this action (#50)."""
+
+    http_status = 403

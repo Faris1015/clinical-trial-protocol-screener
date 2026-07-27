@@ -22,14 +22,21 @@ LLM and a durable Postgres checkpointer).
   [`app/main.py`](../backend/app/main.py)).
 - **Ephemeral SQLite** — no managed database. Screenings reset when the instance
   restarts; the synthetic EHR is reseeded on boot. Fine for a demo.
+- **Seeded demo accounts** — the login screen (#50) works with no configuration:
+  the image sets no `AUTH_USERS`, so the built-in demo accounts apply. Sessions
+  are signed with a random per-process key, so a restart signs everyone out —
+  also fine for a demo. See [Hardening a public demo](#hardening-a-public-demo).
 
 ## Try it locally first
 
 ```bash
 docker build -f deploy/demo/Dockerfile -t trialgate-demo .
 docker run --rm -p 8000:8000 trialgate-demo
-# open http://localhost:8000  — upload a protocol, approve, see matches
+# open http://localhost:8000, sign in, then upload a protocol, approve, see matches
 ```
+
+Sign in as `reviewer@trialgate.local` / `trialgate-reviewer`, or
+`admin@trialgate.local` / `trialgate-admin` to also see the Admin page.
 
 ## Option A — Render (simplest, auto-deploys from GitHub)
 
@@ -68,6 +75,25 @@ Notes:
 
 - Sharing a portfolio link people click occasionally → **Hugging Face** (warmer).
 - Want it wired to auto-deploy on every push with the least clicks → **Render**.
+
+## Hardening a public demo
+
+The defaults are deliberately zero-config, which means the credentials are
+public. That is the right trade for a link on a portfolio — the data is fully
+synthetic and the LLM is a stub — but if the URL is going anywhere that matters:
+
+```bash
+# Your own accounts (mint hashes with `cd backend && python -m app.auth hash`).
+AUTH_USERS=you@example.com:admin:scrypt$16384$8$1$...
+AUTH_DEMO_USERS=false
+# A stable signing key, so a restart doesn't sign everyone out.
+AUTH_SECRET=<python -c "import secrets; print(secrets.token_urlsafe(32))">
+# Both hosts terminate TLS, so the session cookie can be HTTPS-only.
+AUTH_COOKIE_SECURE=true
+```
+
+Set them as Render env vars or HF Space **secrets** (not plain variables —
+secrets aren't exposed in the Space's build logs or settings page).
 
 ## Turning it into a real (non-stub) demo later
 

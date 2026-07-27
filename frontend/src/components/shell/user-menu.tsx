@@ -1,25 +1,35 @@
 "use client";
 
-import { LogOut, Settings, UserRound } from "lucide-react";
+import { LogOut, UserRound } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Badge } from "@/components/ui/badge";
+import { useAuth } from "@/components/AuthProvider";
 
 /**
- * Account menu placeholder.
+ * Account menu: who you're signed in as, your role, and sign out (#50).
  *
- * There is no auth yet — that's B1 (#50). Rather than mock a signed-in user,
- * the items are rendered `disabled` and the menu says where identity comes from,
- * so nothing here reads as a working session. #50 replaces the label with the
- * real reviewer/admin identity and enables the items.
+ * Fills the slot #48 left as a disabled placeholder. Renders nothing without a
+ * session, so the login page — which sits inside this same shell — doesn't offer
+ * an account control for an account that doesn't exist yet.
+ *
+ * The role shown here is presentation only. Every `/api` route enforces the role
+ * itself (401/403, see backend/app/main.py), so what this menu displays can never
+ * be the reason an action is or isn't permitted.
  */
 export function UserMenu() {
+  const { principal, signOut } = useAuth();
+
+  if (!principal) return null;
+
   return (
     <DropdownMenu>
       <DropdownMenuTrigger
@@ -27,21 +37,23 @@ export function UserMenu() {
       >
         <UserRound className="size-4" aria-hidden="true" />
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-56">
-        <DropdownMenuLabel className="text-muted-foreground text-xs font-normal">
-          Sign-in arrives with auth (#50)
-        </DropdownMenuLabel>
+      <DropdownMenuContent align="end" className="w-64">
+        {/* The Group wrapper is required, not stylistic: DropdownMenuLabel is
+            Base UI's Menu.GroupLabel, which throws "MenuGroupContext is missing"
+            outside a Menu.Group — and that error takes the whole menu down, so it
+            never opens. (#48's placeholder menu had the same shape and threw too.) */}
+        <DropdownMenuGroup>
+          <DropdownMenuLabel className="flex flex-col items-start gap-1.5">
+            {/* `break-all`: an email is one unbroken token, so without it a long
+                address overflows the menu rather than wrapping inside it. */}
+            <span className="text-sm leading-tight font-medium break-all">{principal.email}</span>
+            <Badge variant="secondary" className="text-[0.65rem] uppercase">
+              {principal.role}
+            </Badge>
+          </DropdownMenuLabel>
+        </DropdownMenuGroup>
         <DropdownMenuSeparator />
-        <DropdownMenuItem disabled>
-          <UserRound className="size-4" aria-hidden="true" />
-          Profile
-        </DropdownMenuItem>
-        <DropdownMenuItem disabled>
-          <Settings className="size-4" aria-hidden="true" />
-          Settings
-        </DropdownMenuItem>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem disabled>
+        <DropdownMenuItem onClick={() => void signOut()}>
           <LogOut className="size-4" aria-hidden="true" />
           Sign out
         </DropdownMenuItem>

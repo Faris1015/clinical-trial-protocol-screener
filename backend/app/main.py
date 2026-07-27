@@ -8,6 +8,11 @@ graph, or formats SSE frames directly.
 Error contract: domain exceptions (app/exceptions.py) map to status codes in
 one handler — clients get a JSON body, never a stack trace. The SSE stream
 terminates with `__error__` instead of dying silently when a node blows up.
+
+Auth (#50): every `/api` route except `/api/auth/*` carries an explicit
+`Depends(require_reviewer|require_admin)` guard, so the requirement is visible in
+the signature and the handler holds the Principal it needs for the audit trail. A
+test asserts that coverage, so a new route can't ship unguarded by omission.
 """
 
 import re
@@ -15,21 +20,33 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Annotated
 from uuid import uuid4
 
-from fastapi import FastAPI, Request, UploadFile
+from fastapi import Depends, FastAPI, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from langgraph.graph.state import CompiledStateGraph
 from prometheus_fastapi_instrumentator import Instrumentator
+from pydantic import BaseModel, Field, StringConstraints
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.auth import (
+    Principal,
+    Role,
+    authenticate,
+    configured_users,
+    issue_session,
+    require_admin,
+    require_reviewer,
+    session_secret,
+)
 from app.config import get_settings
-from app.exceptions import PayloadTooLargeError, ScreenerError
+from app.exceptions import InvalidCredentialsError, PayloadTooLargeError, ScreenerError
 from app.health import app_version, readiness
 from app.logging_config import bind_contextvars, clear_contextvars, configure_logging, get_logger
 from app.persistence import Persistence, ScreeningStore, open_persistence
@@ -107,6 +124,12 @@ app.add_middleware(
     allow_origins=settings.cors_origin_list,
     allow_methods=["*"],
     allow_headers=["*"],
+    # The session lives in a cookie (#50), so a cross-origin browser call has to
+    # be allowed to send it. Safe here only because allow_origins is an explicit
+    # allowlist — credentialed CORS with a wildcard origin is rejected by browsers
+    # and would be a hole if it weren't. Every deployed topology is same-origin
+    # anyway; this covers hitting the API directly from a dev page.
+    allow_credentials=True,
 )
 
 # Standard HTTP metrics (request count, latency histogram, in-flight) at
@@ -242,9 +265,127 @@ async def ready() -> JSONResponse:
     return JSONResponse(status_code=200 if all_ok else 503, content=body)
 
 
+# --- Auth (#50) -------------------------------------------------------------
+#
+# The frontend is a static export with no request-time server (see
+# frontend/next.config.ts), so FastAPI — not NextAuth — is the identity
+# authority. Design notes, including why the session is a cookie and how CSRF is
+# handled, are in app/auth.py.
+
+
+class LoginRequest(BaseModel):
+    # Surrounding whitespace is tolerated (pasted credentials routinely carry it)
+    # but the value must then look like an address with no interior whitespace or
+    # control characters. That rejects junk with a 422 before it costs a scrypt
+    # pass, and — since the failed-login log line echoes this value — it closes
+    # the same log-forging hole `_REQUEST_ID_RE` closes for X-Request-ID.
+    email: Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, pattern=r"^[^\s@]+@[^\s@]+$", max_length=320),
+    ]
+    # Bounded so a login attempt can't hand scrypt a huge input to chew on.
+    password: str = Field(max_length=1024)
+
+
+class PrincipalResponse(BaseModel):
+    """The caller's identity — what the frontend gates its UI on."""
+
+    email: str
+    role: Role
+
+
+def _set_session_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        settings.auth_cookie_name,
+        token,
+        max_age=settings.auth_session_ttl_seconds,
+        # httponly: the token is never readable by JS, so an XSS foothold can't
+        # exfiltrate a reusable session.
+        httponly=True,
+        # samesite=strict is the CSRF defense for the state-changing routes below;
+        # every deployed topology is same-origin, so nothing legitimate needs a
+        # cross-site cookie. See app/auth.py.
+        samesite="strict",
+        secure=settings.auth_cookie_secure,
+        path="/",
+    )
+
+
+@app.post("/api/auth/login")
+@limiter.limit(lambda: settings.rate_limit_login)
+async def login(
+    request: Request, credentials: LoginRequest, response: Response
+) -> PrincipalResponse:
+    """Exchange credentials for a session cookie.
+
+    Rate-limited per IP (`RATE_LIMIT_LOGIN`) because this is the one endpoint an
+    attacker can guess against. The cookie is set on the injected `response`
+    (which FastAPI merges into the real one) so the return type stays the declared
+    model rather than an opaque Response.
+    """
+    principal = authenticate(credentials.email, credentials.password, configured_users(settings))
+    if principal is None:
+        # One message for both "no such user" and "wrong password" — the response
+        # must not confirm that an email is registered.
+        log.warning("auth.login_failed", email=credentials.email)
+        raise InvalidCredentialsError("Incorrect email or password.")
+    token = issue_session(principal, session_secret(settings), settings.auth_session_ttl_seconds)
+    log.info("auth.login", email=principal.email, role=principal.role)
+    _set_session_cookie(response, token)
+    return PrincipalResponse(email=principal.email, role=principal.role)
+
+
+@app.post("/api/auth/logout")
+async def logout(response: Response) -> dict[str, str]:
+    """Clear the session cookie.
+
+    Unauthenticated on purpose: signing out of an already-expired session must
+    still clear the stale cookie rather than 401.
+    """
+    # Attributes must match the ones the cookie was set with, or the browser
+    # treats it as a different cookie and leaves the original in place.
+    response.delete_cookie(
+        settings.auth_cookie_name,
+        path="/",
+        httponly=True,
+        samesite="strict",
+        secure=settings.auth_cookie_secure,
+    )
+    return {"status": "signed_out"}
+
+
+@app.get("/api/auth/me")
+async def me(principal: Annotated[Principal, Depends(require_reviewer)]) -> PrincipalResponse:
+    """Who the caller is — the frontend's session bootstrap and role source."""
+    return PrincipalResponse(email=principal.email, role=principal.role)
+
+
+@app.get("/api/admin/users")
+@limiter.limit(lambda: settings.rate_limit_read)
+async def list_users(
+    request: Request, principal: Annotated[Principal, Depends(require_admin)]
+) -> list[PrincipalResponse]:
+    """Configured accounts — admin only, and never their password hashes.
+
+    The user-management half of the admin role (rules management lands with #57).
+    It is also what gives the role ladder a real 403 to enforce: a reviewer
+    hitting this gets Forbidden, and the frontend hides the nav entry for them.
+    """
+    users = configured_users(settings)
+    return [
+        PrincipalResponse(email=user.email, role=user.role)
+        for user in sorted(users.values(), key=lambda u: u.email)
+    ]
+
+
+# --- Screenings -------------------------------------------------------------
+
+
 @app.post("/api/screenings")
 @limiter.limit(lambda: settings.rate_limit_create)
-async def create_screening(request: Request, file: UploadFile) -> dict:
+async def create_screening(
+    request: Request, file: UploadFile, principal: Annotated[Principal, Depends(require_reviewer)]
+) -> dict:
     # Reject an oversized upload from its declared size before touching the body,
     # so a 100 MB spam POST is turned away in well under a second (the streamed
     # read below is the exact guard for a spoofed/absent Content-Length).
@@ -269,13 +410,19 @@ async def create_screening(request: Request, file: UploadFile) -> dict:
 
 @app.get("/api/screenings")
 @limiter.limit(lambda: settings.rate_limit_read)
-async def list_screenings(request: Request) -> list[dict]:
+async def list_screenings(
+    request: Request, principal: Annotated[Principal, Depends(require_reviewer)]
+) -> list[dict]:
     return await screening.list_screenings(_store())
 
 
 @app.get("/api/screenings/{thread_id}/stream")
 @limiter.limit(lambda: settings.rate_limit_read)
-async def stream_screening(request: Request, thread_id: str) -> StreamingResponse:
+async def stream_screening(
+    request: Request,
+    thread_id: str,
+    principal: Annotated[Principal, Depends(require_reviewer)],
+) -> StreamingResponse:
     # Fail fast (429 + Retry-After) *before* the response commits when every
     # concurrency slot is taken; the slot is held for the stream's lifetime and
     # freed in release_after's finally, even if the client disconnects.
@@ -296,7 +443,11 @@ async def stream_screening(request: Request, thread_id: str) -> StreamingRespons
 
 @app.post("/api/screenings/{thread_id}/approve")
 @limiter.limit(lambda: settings.rate_limit_create)
-async def approve_screening(request: Request, thread_id: str) -> StreamingResponse:
+async def approve_screening(
+    request: Request,
+    thread_id: str,
+    principal: Annotated[Principal, Depends(require_reviewer)],
+) -> StreamingResponse:
     # Mirror the stream route: the matcher can run for minutes on a local model,
     # so hold a concurrency slot for its lifetime and stream its progress rather
     # than blocking the POST until the whole cohort is scored (which times out
@@ -305,7 +456,7 @@ async def approve_screening(request: Request, thread_id: str) -> StreamingRespon
     # here is released on that path too.
     active_screenings.acquire()
     try:
-        frames = await screening.approve_screening(_store(), _graph(), thread_id)
+        frames = await screening.approve_screening(_store(), _graph(), thread_id, principal)
     except BaseException:
         active_screenings.release()
         raise
@@ -323,7 +474,11 @@ async def approve_screening(request: Request, thread_id: str) -> StreamingRespon
 
 @app.get("/api/screenings/{thread_id}/state")
 @limiter.limit(lambda: settings.rate_limit_read)
-async def get_state(request: Request, thread_id: str) -> dict:
+async def get_state(
+    request: Request,
+    thread_id: str,
+    principal: Annotated[Principal, Depends(require_reviewer)],
+) -> dict:
     return await screening.get_screening_state(_store(), _graph(), thread_id)
 
 

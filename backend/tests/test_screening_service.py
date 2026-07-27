@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 
+from app.auth import Principal
 from app.exceptions import (
     DataStoreError,
     ScreeningNotApprovableError,
@@ -18,6 +19,7 @@ from app.exceptions import (
 )
 from app.persistence import InMemoryScreeningStore
 from app.services import screening, sse
+from tests.auth_helpers import REVIEWER
 
 
 def _frames(raw: list[str]) -> list[dict]:
@@ -26,6 +28,17 @@ def _frames(raw: list[str]) -> list[dict]:
 
 async def _drain(iterator: AsyncIterator[str]) -> list[str]:
     return [frame async for frame in iterator]
+
+
+async def _approve_frames(
+    store: InMemoryScreeningStore,
+    graph: screening.ScreeningGraph,
+    thread_id: str,
+    approver: Principal = REVIEWER,
+) -> list[dict]:
+    """Run an approval to completion and return its parsed SSE frames."""
+    frames = await _drain(await screening.approve_screening(store, graph, thread_id, approver))
+    return _frames(frames)
 
 
 class FakeSnapshot:
@@ -51,6 +64,11 @@ class StreamingGraph:
     async def ainvoke(self, *_a: object) -> dict:  # pragma: no cover - not driven here
         raise NotImplementedError
 
+    async def aupdate_state(  # pragma: no cover - only the approve path records
+        self, _config: object, _values: dict
+    ) -> None:
+        return None
+
 
 class RaisingGraph:
     """astream yields one update then raises; ainvoke raises the same exc."""
@@ -69,6 +87,10 @@ class RaisingGraph:
     async def ainvoke(self, *_a: object) -> dict:
         raise self.exc
 
+    async def aupdate_state(self, _config: object, _values: dict) -> None:
+        """Records the approver (#50). A no-op here: these fakes assert on frames."""
+        return None
+
 
 class ApprovingGraph:
     """aget_state reports it's parked at the gate; ainvoke returns a result."""
@@ -86,6 +108,10 @@ class ApprovingGraph:
     async def ainvoke(self, *_a: object) -> dict:
         return self.result
 
+    async def aupdate_state(self, _config: object, _values: dict) -> None:
+        """Records the approver (#50). A no-op here: these fakes assert on frames."""
+        return None
+
 
 class ResumeGraph:
     """Models the /approve resume: the first aget_state reports the matcher gate
@@ -99,8 +125,14 @@ class ResumeGraph:
         self.after = after
         self.gate = gate
         self._state_calls = 0
+        # What approve_screening wrote into the checkpoint before resuming, and
+        # whether it had resumed yet when it did (#50).
+        self.recorded: dict | None = None
+        self.recorded_before_resume: bool | None = None
+        self._streamed = False
 
     async def astream(self, *_a: object, **_k: object) -> AsyncIterator[dict | tuple]:
+        self._streamed = True
         for update in self.updates:
             yield update
 
@@ -110,6 +142,10 @@ class ResumeGraph:
 
     async def ainvoke(self, *_a: object) -> dict:  # pragma: no cover - approve streams now
         raise NotImplementedError
+
+    async def aupdate_state(self, _config: object, values: dict) -> None:
+        self.recorded = values
+        self.recorded_before_resume = not self._streamed
 
 
 # --- create --------------------------------------------------------------
@@ -251,7 +287,7 @@ async def test_approve_streams_matcher_update_and_marks_done():
         updates=[{"matcher": {"matched_patients": [{"patient_id": "P1"}], "current_step": "done"}}],
         after=FakeSnapshot(values={"current_step": "done"}),
     )
-    frames = _frames(await _drain(await screening.approve_screening(store, graph, thread_id)))
+    frames = await _approve_frames(store, graph, thread_id)
     assert {
         "node": "matcher",
         "update": {"matched_patients": [{"patient_id": "P1"}], "current_step": "done"},
@@ -273,10 +309,46 @@ async def test_approve_relays_custom_progress_frames():
         ],
         after=FakeSnapshot(values={"current_step": "done"}),
     )
-    frames = _frames(await _drain(await screening.approve_screening(store, graph, thread_id)))
+    frames = await _approve_frames(store, graph, thread_id)
     assert {"node": sse.PROGRESS, "update": {"phase": "matching", "done": 0, "total": 2}} in frames
     assert any(f["node"] == "matcher" for f in frames)
     assert frames[-1] == {"node": sse.END}
+
+
+async def test_approve_records_the_approver_before_resuming():
+    """Audit trail (#50): the approver is stamped into the checkpoint, and it
+    happens *before* the resume — so the authorization is durable even if the
+    matcher then dies, and the matcher itself can read it out of state."""
+    store = InMemoryScreeningStore()
+    thread_id = await screening.create_screening(store, "p.md", b"x")
+    graph = ResumeGraph(
+        updates=[{"matcher": {"matched_patients": []}}],
+        after=FakeSnapshot(values={"current_step": "done"}),
+    )
+    await _approve_frames(store, graph, thread_id)
+
+    assert graph.recorded is not None
+    assert graph.recorded["approved_by"] == REVIEWER.email
+    assert graph.recorded["approved_by_role"] == REVIEWER.role
+    assert graph.recorded["approved_at"]
+    assert graph.recorded_before_resume is True
+    # `events` has an append reducer, so this joins the run's log rather than
+    # replacing it — it must be a list of one, not a bare event.
+    (audit_event,) = graph.recorded["events"]
+    assert audit_event["agent"] == "human"
+    assert audit_event["status"] == "approved"
+    assert REVIEWER.email in audit_event["detail"]
+
+
+async def test_approve_does_not_record_an_approver_when_not_at_the_gate():
+    """The 409 pre-check runs first, so a rejected approve leaves no audit entry
+    claiming someone authorized a run that never resumed."""
+    store = InMemoryScreeningStore()
+    thread_id = await screening.create_screening(store, "p.md", b"x")
+    graph = ResumeGraph(updates=[], after=FakeSnapshot(values={"current_step": "done"}), gate=())
+    with pytest.raises(ScreeningNotApprovableError):
+        await screening.approve_screening(store, graph, thread_id, REVIEWER)
+    assert graph.recorded is None
 
 
 async def test_approve_when_not_awaiting_raises_409_error():
@@ -285,7 +357,7 @@ async def test_approve_when_not_awaiting_raises_409_error():
     # Eager pre-check raises before any frame is yielded → becomes a 409, not a
     # mid-stream error.
     with pytest.raises(ScreeningNotApprovableError):
-        await screening.approve_screening(store, ApprovingGraph(pending=()), thread_id)
+        await screening.approve_screening(store, ApprovingGraph(pending=()), thread_id, REVIEWER)
 
 
 async def test_approve_domain_error_streams_error_frame_and_marks_failed():
@@ -296,7 +368,7 @@ async def test_approve_domain_error_streams_error_frame_and_marks_failed():
     # initial stream). The graph checkpoint stays parked at the gate, so a retry
     # once the store is fixed still resumes.
     graph = RaisingGraph(DataStoreError("patients.json is corrupt"))
-    frames = _frames(await _drain(await screening.approve_screening(store, graph, thread_id)))
+    frames = await _approve_frames(store, graph, thread_id)
     assert frames[-1]["node"] == sse.ERROR
     assert "patients.json is corrupt" in frames[-1]["message"]
     assert (await store.list())[0].status == "failed"

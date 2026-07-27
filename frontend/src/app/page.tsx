@@ -5,6 +5,7 @@ import { AlertTriangle, Upload } from "lucide-react";
 import { ScreeningRun } from "@/components/ScreeningRun";
 import { PageHeader } from "@/components/shell/page-header";
 import { Card, CardContent } from "@/components/ui/card";
+import { apiFetch, problemDetail } from "@/lib/api";
 
 /**
  * New-screening route: upload a protocol, then watch that screening run. A client
@@ -29,19 +30,18 @@ export default function NewScreeningPage() {
     body.append("file", file);
     let res: Response;
     try {
-      res = await fetch("/api/screenings", { method: "POST", body });
+      res = await apiFetch("/api/screenings", { method: "POST", body });
     } catch {
       setUploadError("Could not reach the server. Check your connection and try again.");
       return;
     }
     if (!res.ok) {
-      // Every rejection the API knows how to describe (413 too large, 415 wrong
-      // type, 422 unreadable document, 429 rate limited, 503 backend down)
-      // arrives as {error, detail}. Surface it and leave any screening already on
-      // screen untouched — a failed upload started nothing, so it should not look
-      // like it wiped the previous run.
-      const problem = (await res.json().catch(() => ({}))) as { detail?: string };
-      setUploadError(problem.detail ?? `Upload failed (${res.status})`);
+      // Every rejection the API knows how to describe (401 expired session, 413
+      // too large, 415 wrong type, 422 unreadable document, 429 rate limited, 503
+      // backend down) arrives as {error, detail}. Surface it and leave any
+      // screening already on screen untouched — a failed upload started nothing,
+      // so it should not look like it wiped the previous run.
+      setUploadError(await problemDetail(res, "Upload failed"));
       return;
     }
     const { thread_id } = (await res.json()) as { thread_id: string };

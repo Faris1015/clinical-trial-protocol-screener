@@ -8,12 +8,14 @@ from fastapi.testclient import TestClient
 
 import app.main as main
 from app.exceptions import DataStoreError
+from tests.auth_helpers import sign_in
 
 
 @pytest.fixture
 def client():
     # `with` runs the lifespan so the persistence store is wired up.
     with TestClient(main.app, raise_server_exceptions=False) as c:
+        sign_in(c)
         yield c
 
 
@@ -90,6 +92,10 @@ class FakeGraph:
 
     async def ainvoke(self, *_args: object) -> dict:
         raise self.exc
+
+    async def aupdate_state(self, _config: object, _values: dict) -> None:
+        """Records the approver (#50). A no-op here: these fakes assert on frames."""
+        return None
 
 
 @pytest.fixture

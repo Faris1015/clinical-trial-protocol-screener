@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 import { ThemeProvider } from "@/components/theme-provider";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { Sidebar } from "@/components/shell/sidebar";
-import { TopBar } from "@/components/shell/top-bar";
+import { AuthProvider } from "@/components/AuthProvider";
+import { AppShell } from "@/components/shell/app-shell";
 
 export const metadata: Metadata = {
   title: "TrialGate",
@@ -22,14 +22,15 @@ export const metadata: Metadata = {
  * would make image builds depend on network egress to Google. The stack also
  * needs no CSP allowance, since there is no external font origin.
  *
- * `min-w-0` on the main column is load-bearing, not decoration: a flex child
- * defaults to `min-width: auto`, so a wide cohort table would stretch the column
- * past the viewport and scroll the whole body sideways instead of scrolling inside
- * the table's own overflow container.
- *
  * suppressHydrationWarning is required by next-themes, which sets the theme class
  * on <html> before React hydrates. It applies to this element only, not to the
  * tree below it.
+ *
+ * The shell itself moved into `AppShell` with auth (#50): which chrome to render
+ * depends on whether there's a session — a signed-out visitor gets the bare login
+ * screen, not a sidebar of nav they can't use — and that is a client-side
+ * decision. `AuthProvider` sits above it so the shell, the nav's role gating, and
+ * the account menu all read one session check.
  */
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
@@ -37,15 +38,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body>
         <ThemeProvider>
           <TooltipProvider>
-            <div className="flex min-h-svh">
-              <Sidebar />
-              <div className="flex min-w-0 flex-1 flex-col">
-                <TopBar />
-                <main className="min-w-0 flex-1 p-4 md:p-6">
-                  <div className="mx-auto w-full max-w-5xl">{children}</div>
-                </main>
-              </div>
-            </div>
+            <AuthProvider>
+              <AppShell>{children}</AppShell>
+            </AuthProvider>
           </TooltipProvider>
         </ThemeProvider>
       </body>
