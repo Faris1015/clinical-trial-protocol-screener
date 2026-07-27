@@ -61,7 +61,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   // real indicator rather than a blank page.
   if (status === "checking") {
     return (
-      <div className="flex min-h-svh items-center justify-center" role="status">
+      <div
+        className="flex min-h-svh items-center justify-center"
+        role="status"
+        data-app-shell="checking"
+      >
         <Loader2 className="text-muted-foreground size-5 animate-spin" aria-hidden="true" />
         <span className="sr-only">Checking your session…</span>
       </div>
@@ -73,7 +77,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   // landing, so a protected page never flashes its chrome.
   if (status === "anonymous") {
     return (
-      <div className="flex min-h-svh items-center justify-center p-4">
+      <div className="flex min-h-svh items-center justify-center p-4" data-app-shell="anonymous">
         {onLoginPage ? children : null}
       </div>
     );
@@ -84,7 +88,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   if (onLoginPage) return null;
 
   return (
-    <div className="flex min-h-svh">
+    // `data-app-shell` marks which branch rendered. The CI smoke test greps the
+    // exported HTML for it: since the sidebar is now session-gated, no nav appears
+    // in a static file, so this is what proves the auth-aware shell is the boot
+    // path rather than the export having silently lost its layout.
+    <div className="flex min-h-svh" data-app-shell="authenticated">
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col">
         <TopBar />
