@@ -77,11 +77,11 @@ async def test_sqlite_store_survives_reopen(tmp_path):
         assert inp is not None
         assert inp.raw_protocol_text == "the raw protocol body"
         assert inp.source_filename == "proto.pdf"
-        records = await p2.store.list()
-        assert [r.thread_id for r in records] == ["t1"]
-        assert records[0].status == "awaiting_approval"
+        page = await p2.store.list(limit=10, offset=0)
+        assert [r.thread_id for r in page.items] == ["t1"]
+        assert page.items[0].status == "awaiting_approval"
         # Metadata rows never carry the protocol text.
-        assert not hasattr(records[0], "raw_protocol_text")
+        assert not hasattr(page.items[0], "raw_protocol_text")
     finally:
         await p2.aclose()
 
@@ -91,9 +91,120 @@ async def test_sqlite_store_lists_newest_first(tmp_path):
     try:
         await p.store.create("older", "a.pdf", "x")
         await p.store.create("newer", "b.pdf", "y")
-        records = await p.store.list()
+        page = await p.store.list(limit=10, offset=0)
         # created_at is ISO-8601, so lexical DESC is chronological DESC.
-        assert [r.thread_id for r in records] == ["newer", "older"]
+        assert [r.thread_id for r in page.items] == ["newer", "older"]
+        assert page.total == 2
+    finally:
+        await p.aclose()
+
+
+async def test_sqlite_store_pages_filters_and_searches(tmp_path):
+    """The runs index's three list controls (#51), against real SQL rather than
+    the in-memory double — LIMIT/OFFSET, the status filter and the LIKE search
+    are the parts that only exist in the SQL stores."""
+    p = await open_persistence(_sqlite_settings(tmp_path))
+    try:
+        await p.store.create("t1", "nsclc-protocol.pdf", "x")
+        await p.store.create("t2", "ckd-protocol.pdf", "y")
+        await p.store.create("t3", "hfref-protocol.pdf", "z")
+        await p.store.set_status("t2", "done", criteria_count=7, match_count=3)
+
+        first = await p.store.list(limit=2, offset=0)
+        assert [r.thread_id for r in first.items] == ["t3", "t2"]
+        assert first.total == 3
+        second = await p.store.list(limit=2, offset=2)
+        assert [r.thread_id for r in second.items] == ["t1"]
+        assert second.total == 3
+
+        done = await p.store.list(limit=10, offset=0, status="done")
+        assert [r.thread_id for r in done.items] == ["t2"]
+        assert (done.items[0].criteria_count, done.items[0].match_count) == (7, 3)
+
+        # sqlite's LIKE is ASCII-case-insensitive, which is the behaviour the
+        # search box relies on.
+        assert [
+            r.thread_id for r in (await p.store.list(limit=10, offset=0, search="CKD")).items
+        ] == ["t2"]
+        # thread_id is searchable too.
+        assert [
+            r.thread_id for r in (await p.store.list(limit=10, offset=0, search="t3")).items
+        ] == ["t3"]
+    finally:
+        await p.aclose()
+
+
+async def test_sqlite_search_treats_wildcards_as_literals(tmp_path):
+    """A user typing `%` means the character, not "match everything" — otherwise
+    the search box is a way to bypass its own filter."""
+    p = await open_persistence(_sqlite_settings(tmp_path))
+    try:
+        await p.store.create("t1", "100%-cohort.pdf", "x")
+        await p.store.create("t2", "plain.pdf", "y")
+        assert [
+            r.thread_id for r in (await p.store.list(limit=10, offset=0, search="%")).items
+        ] == ["t1"]
+        # `_` is LIKE's single-character wildcard; it must be literal too.
+        assert (await p.store.list(limit=10, offset=0, search="plain_pdf")).total == 0
+    finally:
+        await p.aclose()
+
+
+async def test_sqlite_set_status_preserves_counts(tmp_path):
+    """`set_status` with no counts must not zero the ones already stored."""
+    p = await open_persistence(_sqlite_settings(tmp_path))
+    try:
+        await p.store.create("t1", "a.pdf", "x")
+        await p.store.set_status("t1", "awaiting_approval", criteria_count=5, match_count=0)
+        await p.store.set_status("t1", "failed")
+        row = (await p.store.list(limit=10, offset=0)).items[0]
+        assert (row.status, row.criteria_count) == ("failed", 5)
+    finally:
+        await p.aclose()
+
+
+async def test_sqlite_setup_adds_columns_to_a_pre_existing_table(tmp_path):
+    """Upgrading a deployment whose sqlite file predates #51: CREATE TABLE IF NOT
+    EXISTS is a no-op there, so setup() has to ALTER in the new columns or every
+    subsequent query fails on the missing ones."""
+    import aiosqlite
+
+    path = tmp_path / "screenings.sqlite"
+    legacy = await aiosqlite.connect(path)
+    await legacy.execute(
+        "CREATE TABLE screenings ("
+        "thread_id TEXT PRIMARY KEY, source_filename TEXT NOT NULL, "
+        "raw_protocol_text TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL)"
+    )
+    await legacy.execute(
+        "INSERT INTO screenings VALUES ('old', 'legacy.pdf', 'body', 'done', '2026-01-01T00:00:00')"
+    )
+    await legacy.commit()
+    await legacy.close()
+
+    p = await open_persistence(_sqlite_settings(tmp_path))
+    try:
+        row = (await p.store.list(limit=10, offset=0)).items[0]
+        assert row.thread_id == "old"
+        # Backfilled to the column default rather than exploding.
+        assert (row.criteria_count, row.match_count) == (0, 0)
+        # And setup() is still idempotent on the now-migrated file.
+        await p.store.setup()
+    finally:
+        await p.aclose()
+
+
+async def test_sqlite_get_record_returns_the_summary_row(tmp_path):
+    p = await open_persistence(_sqlite_settings(tmp_path))
+    try:
+        await p.store.create("t1", "a.pdf", "x")
+        await p.store.set_status("t1", "done", criteria_count=6, match_count=2)
+        row = await p.store.get_record("t1")
+        assert row is not None
+        assert (row.source_filename, row.status) == ("a.pdf", "done")
+        assert (row.criteria_count, row.match_count) == (6, 2)
+        # And it never carries the protocol text.
+        assert not hasattr(row, "raw_protocol_text")
     finally:
         await p.aclose()
 
@@ -103,6 +214,7 @@ async def test_missing_thread_is_absent(tmp_path):
     try:
         assert not await p.store.exists("nope")
         assert await p.store.get_input("nope") is None
+        assert await p.store.get_record("nope") is None
         # Updating a nonexistent row is a no-op, not an error.
         await p.store.set_status("nope", "done")
     finally:
@@ -220,7 +332,7 @@ def test_screening_resumes_from_interrupt_after_restart(durable_app):
         assert matched[0]["patient_id"] == "p1"
 
         # The list view reflects the terminal status.
-        listing = client.get("/api/screenings").json()
+        listing = client.get("/api/screenings").json()["items"]
         assert listing[0]["thread_id"] == thread_id
         assert listing[0]["status"] == "done"
 
@@ -242,11 +354,59 @@ def test_list_screenings_returns_metadata_without_protocol_text(client):
     response = client.get("/api/screenings")
     assert response.status_code == 200
     body = response.json()
-    assert len(body) >= 1
-    row = body[0]
-    assert set(row) == {"thread_id", "source_filename", "status", "created_at"}
+    assert set(body) == {"items", "total", "limit", "offset"}
+    assert len(body["items"]) >= 1
+    row = body["items"][0]
+    assert set(row) == {
+        "thread_id",
+        "source_filename",
+        "status",
+        "created_at",
+        "criteria_count",
+        "match_count",
+    }
     assert row["source_filename"] == "trial.md"
     assert secret not in response.text
+
+
+def _upload(client, name: str) -> str:
+    body = f"Inclusion criteria: age >= 18. {name}".encode()
+    return str(client.post("/api/screenings", files={"file": (name, body)}).json()["thread_id"])
+
+
+def test_list_endpoint_pages_and_reports_the_total(client):
+    for name in ("one.md", "two.md", "three.md"):
+        _upload(client, name)
+
+    body = client.get("/api/screenings", params={"limit": 2, "offset": 0}).json()
+    assert len(body["items"]) == 2
+    assert (body["total"], body["limit"], body["offset"]) == (3, 2, 0)
+
+    tail = client.get("/api/screenings", params={"limit": 2, "offset": 2}).json()
+    assert len(tail["items"]) == 1
+    assert tail["total"] == 3
+
+
+def test_list_endpoint_filters_by_status_and_search(client):
+    thread_id = _upload(client, "nsclc-trial.md")
+    _upload(client, "ckd-trial.md")
+
+    hits = client.get("/api/screenings", params={"q": "NSCLC"}).json()
+    assert [r["thread_id"] for r in hits["items"]] == [thread_id]
+
+    # Nothing has run, so everything is still at the create-time status.
+    routing = client.get("/api/screenings", params={"status": "routing"}).json()
+    assert routing["total"] == 2
+    assert client.get("/api/screenings", params={"status": "done"}).json()["total"] == 0
+
+
+def test_list_endpoint_rejects_out_of_range_and_unknown_filters(client):
+    # A typo'd status must be a 422, not a silently empty page that reads as
+    # "no runs in that state".
+    assert client.get("/api/screenings", params={"status": "finished"}).status_code == 422
+    assert client.get("/api/screenings", params={"limit": 0}).status_code == 422
+    assert client.get("/api/screenings", params={"limit": 100_000}).status_code == 422
+    assert client.get("/api/screenings", params={"offset": -1}).status_code == 422
 
 
 def test_no_module_level_thread_dict():

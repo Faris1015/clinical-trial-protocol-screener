@@ -20,12 +20,13 @@ export type NavItem = {
  * The product's primary navigation, in sidebar order. One list, rendered by both
  * the desktop sidebar and the mobile sheet, so the two can't drift.
  *
- * Everything but "/" is a placeholder page today; `pendingIssue` is what those
- * pages cite so a visitor knows the route is scaffolding rather than broken.
+ * The routes still carrying a `pendingIssue` are placeholders; that issue is
+ * what those pages cite so a visitor knows the route is scaffolding rather than
+ * broken.
  */
 export const NAV_ITEMS: NavItem[] = [
   { href: "/", label: "New Screening", icon: FilePlus2 },
-  { href: "/runs", label: "Past Runs", icon: History, pendingIssue: 51 },
+  { href: "/runs", label: "Past Runs", icon: History },
   { href: "/review", label: "Review Queue", icon: ClipboardCheck, pendingIssue: 53 },
   { href: "/rules", label: "Rules", icon: Scale, pendingIssue: 57 },
   { href: "/metrics", label: "Metrics", icon: BarChart3, pendingIssue: 58 },

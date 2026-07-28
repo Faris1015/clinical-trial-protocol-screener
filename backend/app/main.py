@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Annotated
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, Request, UploadFile
+from fastapi import Depends, FastAPI, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -64,6 +64,11 @@ _QUIET_PATHS = frozenset({"/health", "/ready", "/metrics"})
 # it can't be used to forge/inject log lines (console format) or bloat logs; an
 # out-of-spec value is dropped in favor of a freshly minted UUID.
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+
+# Runs-index paging (#51). The ceiling is the point: without one, `?limit=100000`
+# turns a cheap read into a full table scan serialized into a single response.
+DEFAULT_PAGE_SIZE = 25
+MAX_PAGE_SIZE = 100
 
 # Resolve settings at import time so a misconfigured deployment fails at
 # startup (e.g. LLM_PROVIDER=anthropic without ANTHROPIC_API_KEY), not
@@ -411,9 +416,24 @@ async def create_screening(
 @app.get("/api/screenings")
 @limiter.limit(lambda: settings.rate_limit_read)
 async def list_screenings(
-    request: Request, principal: Annotated[Principal, Depends(require_reviewer)]
-) -> list[dict]:
-    return await screening.list_screenings(_store())
+    request: Request,
+    principal: Annotated[Principal, Depends(require_reviewer)],
+    limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    status: Annotated[screening.ScreeningStatus | None, Query()] = None,
+    q: Annotated[str | None, Query(max_length=200)] = None,
+) -> dict:
+    """The runs index (#51): one page of past screenings, newest first.
+
+    Returns `{items, total, limit, offset}` — a bare list can't say whether more
+    rows matched than were returned. `status` is validated against the phases a
+    screening can actually be in, so a typo is a 422 rather than a silently
+    empty page, and `q` is a case-insensitive substring match on filename or
+    thread_id.
+    """
+    return await screening.list_screenings(
+        _store(), limit=limit, offset=offset, status=status, search=q
+    )
 
 
 @app.get("/api/screenings/{thread_id}/stream")

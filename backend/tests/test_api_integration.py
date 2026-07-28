@@ -57,10 +57,15 @@ async def test_upload_stream_interrupt_approve_happy_path(monkeypatch):
             assert "parser" in nodes and "critic" in nodes
             assert frames[-1]["node"] == "__interrupt__"
 
-            # 3. The dashboard list reflects the paused status.
+            # 3. The runs index reflects the paused status, and the criteria the
+            #    parser found are already denormalized onto the row (#51) — the
+            #    gate is a terminal frame, so the summary is written there too.
             listing = (await client.get("/api/screenings")).json()
-            assert listing[0]["thread_id"] == thread_id
-            assert listing[0]["status"] == "awaiting_approval"
+            assert listing["total"] == 1
+            assert listing["items"][0]["thread_id"] == thread_id
+            assert listing["items"][0]["status"] == "awaiting_approval"
+            assert listing["items"][0]["criteria_count"] > 0
+            assert listing["items"][0]["match_count"] == 0
 
             # 4. State endpoint reports the pending matcher node.
             state = (await client.get(f"/api/screenings/{thread_id}/state")).json()
@@ -82,9 +87,11 @@ async def test_upload_stream_interrupt_approve_happy_path(monkeypatch):
             assert all("patient_id" in p for p in matched)
             assert approve_frames[-1]["node"] == "__end__"
 
-            # 6. Final status is terminal.
+            # 6. Final status is terminal, with the cohort summarized on the row.
             listing = (await client.get("/api/screenings")).json()
-            assert listing[0]["status"] == "done"
+            assert listing["items"][0]["status"] == "done"
+            eligible = [p for p in matched if p["eligible"] and not p["needs_review"]]
+            assert listing["items"][0]["match_count"] == len(eligible)
 
             # 7. The run's audit trail names who authorized touching patient data
             #    (#50) — read back through the real checkpointer, not the request

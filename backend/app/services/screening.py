@@ -21,7 +21,7 @@ from fastapi.encoders import jsonable_encoder
 from app.auth import Principal
 from app.exceptions import ScreenerError, ScreeningNotApprovableError, ScreeningNotFoundError
 from app.graph.builder import build_graph
-from app.graph.state import event, initial_state
+from app.graph.state import ScreeningStatus, event, initial_state
 from app.logging_config import bind_contextvars, get_logger
 from app.services import sse
 from app.services.pdf import extract_eligibility_text
@@ -35,6 +35,29 @@ if TYPE_CHECKING:
     from app.persistence import ScreeningStore
 
 log = get_logger("screening")
+
+# Re-exported so `app.main` can type the list endpoint's status filter without
+# importing the graph package (routes stay one layer away from it, as they do
+# for the builder).
+__all__ = [
+    "ScreeningStatus",
+    "approve_screening",
+    "build_screening_graph",
+    "create_screening",
+    "get_screening_state",
+    "list_screenings",
+    "stream_screening",
+]
+
+# The four criteria buckets a parse produces. `unparseable` is deliberately not
+# among them: it holds sentences the parser gave up on, so counting it would
+# inflate "criteria found" with the exact lines it could not turn into criteria.
+_CRITERIA_BUCKETS = (
+    "inclusion_quantitative",
+    "inclusion_categorical",
+    "exclusion_quantitative",
+    "exclusion_categorical",
+)
 
 
 class Snapshot(Protocol):
@@ -86,6 +109,39 @@ def _status_from_snapshot(snapshot: Snapshot) -> str:
         return "awaiting_approval"
     step = snapshot.values.get("current_step")
     return str(step) if step else "done"
+
+
+def _criteria_count(values: dict[str, Any]) -> int:
+    """How many criteria the parser extracted, across all four buckets."""
+    parsed = values.get("parsed_criteria") or {}
+    return sum(len(parsed.get(bucket) or []) for bucket in _CRITERIA_BUCKETS)
+
+
+def _match_count(values: dict[str, Any]) -> int:
+    """How many patients the run actually matched.
+
+    `matched_patients` is the whole evaluated cohort, so this counts the
+    eligible bucket only — with `needs_review` outranking `eligible`, exactly as
+    the cohort table buckets them (frontend PatientMatchTable.bucketOf). A run
+    that scored 300 patients and cleared none is a 0-match run, and the index
+    should say so.
+    """
+    cohort = values.get("matched_patients") or []
+    return sum(1 for p in cohort if p.get("eligible") and not p.get("needs_review"))
+
+
+async def _record_outcome(store: ScreeningStore, thread_id: str, snapshot: Snapshot) -> None:
+    """Denormalize the finished (or parked) run into the store's summary columns.
+
+    Called once per terminal frame, so the runs index (#51) can render status and
+    counts for every row without loading a checkpoint per screening.
+    """
+    await store.set_status(
+        thread_id,
+        _status_from_snapshot(snapshot),
+        criteria_count=_criteria_count(snapshot.values),
+        match_count=_match_count(snapshot.values),
+    )
 
 
 def _terminal_frame(snapshot: Snapshot) -> str:
@@ -148,18 +204,37 @@ async def create_screening(
     return thread_id
 
 
-async def list_screenings(store: ScreeningStore) -> list[dict]:
-    """All screenings, newest first — backs the dashboard list view."""
-    records = await store.list()
-    return [
-        {
-            "thread_id": r.thread_id,
-            "source_filename": r.source_filename,
-            "status": r.status,
-            "created_at": r.created_at,
-        }
-        for r in records
-    ]
+async def list_screenings(
+    store: ScreeningStore,
+    *,
+    limit: int,
+    offset: int,
+    status: ScreeningStatus | None = None,
+    search: str | None = None,
+) -> dict:
+    """One page of screenings, newest first — backs the runs index (#51).
+
+    Returns an envelope rather than a bare list because the page alone can't
+    answer "is there a next one": `total` is the count matching the filter, not
+    the count on this page.
+    """
+    page = await store.list(limit=limit, offset=offset, status=status, search=search)
+    return {
+        "items": [
+            {
+                "thread_id": r.thread_id,
+                "source_filename": r.source_filename,
+                "status": r.status,
+                "created_at": r.created_at,
+                "criteria_count": r.criteria_count,
+                "match_count": r.match_count,
+            }
+            for r in page.items
+        ],
+        "total": page.total,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 async def stream_screening(
@@ -189,7 +264,7 @@ async def stream_screening(
                 for node, update in chunk.items():
                     yield sse.update_frame(node, jsonable_encoder(update))
             snapshot = await graph.aget_state(config)
-            await store.set_status(thread_id, _status_from_snapshot(snapshot))
+            await _record_outcome(store, thread_id, snapshot)
             yield _terminal_frame(snapshot)
             log.info("screening.stream_finished")
         except ScreenerError as exc:
@@ -282,7 +357,7 @@ async def approve_screening(
                 for node, update in chunk.items():
                     yield sse.update_frame(node, jsonable_encoder(update))
             snapshot = await graph.aget_state(config)
-            await store.set_status(thread_id, _status_from_snapshot(snapshot))
+            await _record_outcome(store, thread_id, snapshot)
             yield _terminal_frame(snapshot)
             log.info("screening.approve_finished")
         except ScreenerError as exc:
@@ -298,8 +373,33 @@ async def approve_screening(
 
 
 async def get_screening_state(store: ScreeningStore, graph: ScreeningGraph, thread_id: str) -> dict:
-    """The screening's current graph state plus any pending (interrupted) nodes."""
+    """The screening's current graph state, its pending (interrupted) nodes, and
+    its store row.
+
+    The `screening` block is not redundant with `values`: a screening that was
+    uploaded but never streamed has no checkpoint at all, so `values` is `{}` and
+    the graph cannot say what phase it is in or even what file it came from. The
+    store row always exists, and it is the same row the runs index renders — so
+    including it is what keeps a run's detail view from contradicting the list it
+    was opened from (#51).
+    """
     config = await _require_thread(store, thread_id)
     bind_contextvars(thread_id=thread_id)
     snapshot = await graph.aget_state(config)
-    return {"values": jsonable_encoder(snapshot.values), "pending": list(snapshot.next)}
+    record = await store.get_record(thread_id)
+    return {
+        "values": jsonable_encoder(snapshot.values),
+        "pending": list(snapshot.next),
+        # `_require_thread` just passed, so the row is there; guard anyway rather
+        # than assert, since the two reads aren't in one transaction.
+        "screening": {
+            "thread_id": record.thread_id,
+            "source_filename": record.source_filename,
+            "status": record.status,
+            "created_at": record.created_at,
+            "criteria_count": record.criteria_count,
+            "match_count": record.match_count,
+        }
+        if record
+        else None,
+    }

@@ -9,6 +9,21 @@ import operator
 from datetime import UTC
 from typing import Annotated, Literal, TypedDict
 
+# The phases a screening moves through. Doubles as the list endpoint's status
+# filter (#51): the store's `status` column is denormalized from `current_step`
+# (see services.screening._status_from_snapshot), so one definition keeps the
+# API's accepted filter values from drifting from the values it can ever store.
+ScreeningStatus = Literal[
+    "routing",
+    "parsing",
+    "critiquing",
+    "awaiting_approval",
+    "matching",
+    "done",
+    "failed",
+    "escalated",
+]
+
 
 class AgentEvent(TypedDict):
     agent: str  # "router" | "parser" | "critic" | "matcher"
@@ -45,16 +60,7 @@ class ScreenerState(TypedDict):
 
     # Observability
     events: Annotated[list[AgentEvent], operator.add]
-    current_step: Literal[
-        "routing",
-        "parsing",
-        "critiquing",
-        "awaiting_approval",
-        "matching",
-        "done",
-        "failed",
-        "escalated",
-    ]
+    current_step: ScreeningStatus
 
 
 def event(agent: str, status: str, detail: str) -> AgentEvent:

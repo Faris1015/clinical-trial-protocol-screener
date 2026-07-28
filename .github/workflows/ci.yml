@@ -90,7 +90,7 @@ jobs:
         run: |
           npm run build
           test -f out/index.html
-          for route in runs review rules metrics design; do
+          for route in runs runs/view review rules metrics design; do
             test -f "out/$route/index.html" || {
               echo "::error::out/$route/index.html missing — trailingSlash or the route is gone"
               exit 1

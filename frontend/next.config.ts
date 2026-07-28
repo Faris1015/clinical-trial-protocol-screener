@@ -16,11 +16,14 @@ const nextConfig: NextConfig = {
   // so the demo still ships frontend + API from one origin with one process.
   //
   // Trade-off to know before adding routes: an exported app has no request-time
-  // server, so dynamic segments need `generateStaticParams` at build time.
-  // `/runs` and `/review` (#51, #53) work as-is; `/runs/[id]` for arbitrary
-  // thread ids needs either a query param (`/runs/view?id=…`) or dropping this
-  // line and running `next start` behind nginx — at which point the demo image
-  // needs a second process. The App Router shell here is unchanged either way.
+  // server, so dynamic segments need `generateStaticParams` at build time — a
+  // thread id minted after the build could never be enumerated, and an
+  // unexported path is a hard 404 on both static hosts. That is why the run
+  // detail deep link (#51) is `/runs/view/?id=…`, one exported page that reads
+  // its id at runtime, rather than `/runs/[threadId]`. The alternative is
+  // dropping this line and running `next start` behind nginx — at which point
+  // the demo image needs a second process. The App Router shell is unchanged
+  // either way.
   output: "export",
 
   // Emit every route as `<route>/index.html` rather than `<route>.html`. Both

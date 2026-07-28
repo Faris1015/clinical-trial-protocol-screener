@@ -234,8 +234,23 @@ curl -X POST http://localhost:8000/api/auth/login -c cookies.txt \
 curl -b cookies.txt -X POST http://localhost:8000/api/screenings -F "file=@protocol.pdf"
 curl -b cookies.txt -N http://localhost:8000/api/screenings/<thread_id>/stream
 curl -b cookies.txt -X POST http://localhost:8000/api/screenings/<thread_id>/approve
-curl -b cookies.txt http://localhost:8000/api/screenings   # list all (newest first)
+
+# 3. Past runs: one page at a time, newest first. Returns
+#    {items, total, limit, offset} — `total` is what matched the filter, so it
+#    is how you know whether there is a next page.
+curl -b cookies.txt http://localhost:8000/api/screenings
+curl -b cookies.txt 'http://localhost:8000/api/screenings?limit=50&offset=50'
+curl -b cookies.txt 'http://localhost:8000/api/screenings?status=awaiting_approval'
+curl -b cookies.txt 'http://localhost:8000/api/screenings?q=nsclc'   # filename or thread_id
 ```
+
+`limit` defaults to 25 and caps at 100; `status` accepts the phases a screening
+can be in (`routing`, `parsing`, `critiquing`, `awaiting_approval`, `matching`,
+`done`, `failed`, `escalated`) and anything else is a 422. Each row carries the
+uploaded filename plus the run's `criteria_count` and `match_count`, so the
+**Past Runs** page renders the index without loading a checkpoint per screening.
+A run's detail view deep-links to `/runs/view/?id=<thread_id>` and rehydrates
+read-only from `/state`.
 
 State is durable: a screening parked at the human-approval gate survives a
 server restart or deploy and stays resumable (see [Configuration](#configuration)).

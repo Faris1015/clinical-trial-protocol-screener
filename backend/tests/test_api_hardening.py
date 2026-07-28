@@ -64,7 +64,7 @@ def test_traversal_filename_is_sanitized_before_storage(client):
         files={"file": ("../../etc/passwd", b"Inclusion criteria: age >= 18", "text/plain")},
     )
     assert resp.status_code == 200
-    listed = client.get("/api/screenings").json()
+    listed = client.get("/api/screenings").json()["items"]
     names = {r["source_filename"] for r in listed}
     assert "passwd" in names
     assert not any("/" in n or ".." in n for n in names)
