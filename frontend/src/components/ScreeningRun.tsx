@@ -28,6 +28,7 @@ const AGENTS = ["router", "parser", "critic", "matcher"];
  */
 export function ScreeningRun({ threadId }: { threadId: string | null }) {
   const [matches, setMatches] = useState<PatientEvaluation[]>([]);
+  const [matchSummary, setMatchSummary] = useState<string | null>(null);
   const [approvedBy, setApprovedBy] = useState<string | null>(null);
   const { principal } = useAuth();
   const { nodeStates, phase, setPhase, error, setError, applyFrame } = useScreenerStream(threadId);
@@ -65,6 +66,9 @@ export function ScreeningRun({ threadId }: { threadId: string | null }) {
     await readEventStream(res, (msg) => {
       if (msg.node === "matcher" && msg.update?.matched_patients) {
         setMatches(msg.update.matched_patients);
+        // The cohort's plain-language line (#52) rides the same frame as the
+        // evaluations it summarizes, so they can never describe different runs.
+        setMatchSummary(msg.update.match_summary ?? null);
       }
       return applyFrame(msg);
     });
@@ -72,6 +76,7 @@ export function ScreeningRun({ threadId }: { threadId: string | null }) {
 
   // Latest parsed criteria streamed from the parser node
   const parsed = nodeStates.parser?.update.parsed_criteria ?? null;
+  const complianceSummary = nodeStates.critic?.update.compliance_summary ?? null;
   const activeAgent =
     phase === "running" ? ([...AGENTS].reverse().find((a) => nodeStates[a]) ?? null) : null;
 
@@ -110,6 +115,13 @@ export function ScreeningRun({ threadId }: { threadId: string | null }) {
             <AlertTriangle className="text-status-warn mt-0.5 size-4 shrink-0" aria-hidden="true" />
             <span className="flex-1">
               {error ?? "Could not converge — escalated to human review after 3 attempts."}
+              {/* What the Critic actually objected to, in plain language (#52):
+                  a reviewer heading for the editor needs to know what to fix,
+                  and "could not converge" alone does not say. Only for a
+                  compliance escalation — a stream `error` is a different story. */}
+              {!error && complianceSummary && (
+                <span className="block pt-1">{complianceSummary}</span>
+              )}
             </span>
             {/* The escalation exit (#53). Offered only when there is an extraction
                 to correct: a run that died in the router or the parser has nothing
@@ -147,7 +159,7 @@ export function ScreeningRun({ threadId }: { threadId: string | null }) {
         </p>
       )}
 
-      {matches.length > 0 && <PatientMatchTable patients={matches} />}
+      {matches.length > 0 && <PatientMatchTable patients={matches} summary={matchSummary} />}
     </div>
   );
 }

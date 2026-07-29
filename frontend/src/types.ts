@@ -63,6 +63,13 @@ export type CriterionResult = {
   criterion: QuantitativeCriterion | CategoricalCriterion;
   kind: "inclusion" | "exclusion";
   status: "pass" | "fail" | "unknown";
+  /**
+   * Why this criterion landed on that status, in plain language (#52) — e.g.
+   * "The patient's eGFR is 42 mL/min, but the trial asks for at least 60".
+   * Optional because a run screened before #52 has none in its checkpoint; the
+   * views fall back to the technical layer rather than rendering a blank.
+   */
+  explanation?: string;
 };
 
 export type PatientEvaluation = {
@@ -71,12 +78,21 @@ export type PatientEvaluation = {
   eligible: boolean;
   needs_review: boolean;
   criterion_results: CriterionResult[];
+  /** The verdict for this patient in one plain-language sentence (#52). */
+  summary?: string;
 };
 
 export type StateUpdate = {
   parsed_criteria?: CriteriaSchema;
   events?: AgentEvent[];
   matched_patients?: PatientEvaluation[];
+  /**
+   * Plain-language result summaries (#52) — the Critic's verdict and the cohort
+   * split, each in one sentence. Written by their own node, so the critic frame
+   * carries `compliance_summary` and the matcher frame `match_summary`.
+   */
+  compliance_summary?: string;
+  match_summary?: string;
   /** Audit trail (#50): who cleared the human-in-the-loop gate. */
   approved_by?: string | null;
   approved_by_role?: string | null;
@@ -141,7 +157,13 @@ export type ScreeningPage = {
 export type ComplianceFinding = {
   rule_id: string;
   severity: "reject" | "warn";
+  /** The technical layer: rule wording, attributes, thresholds. */
   message: string;
+  /**
+   * The same issue for a non-technical reviewer (#52). Optional for runs
+   * screened before it existed — the views fall back to `message`.
+   */
+  explanation?: string;
 };
 
 /** `GET /api/screenings/{thread_id}/state` — a run rehydrated from its checkpoint. */

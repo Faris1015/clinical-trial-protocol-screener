@@ -13,6 +13,11 @@ Those mappings are computed once per screening and cached by
 so the cost is one batch of calls per distinct criterion, never per patient. An
 "uncertain" verdict (and an unavailable LLM) yields "unknown" → needs human
 review, never a silent pass or fail. Missing lab values do the same.
+
+Every verdict also carries a plain-language layer (#52): a per-criterion
+`explanation`, a per-patient `summary`, and a cohort `match_summary` — rendered
+from the same deterministic comparison, so the plain view can never disagree
+with the statuses beneath it.
 """
 
 import json
@@ -99,59 +104,280 @@ def _check_quantitative(patient: dict, criterion: dict) -> str:
     return "pass" if ok else "fail"
 
 
-def _categorical_presence(patient: dict, criterion: dict, verdicts: dict) -> str:
-    """Resolve a criterion against a patient's terms: 'present' | 'absent' | 'uncertain'.
+def _categorical_presence(patient: dict, criterion: dict, verdicts: dict) -> tuple[str, str | None]:
+    """Resolve a criterion against a patient's terms.
+
+    Returns `(presence, evidence)` where presence is 'present' | 'absent' |
+    'uncertain' and evidence is the patient term that decided it, in its original
+    spelling (None when nothing in the record was relevant). The evidence is what
+    makes the plain-language explanation specific — "the records show
+    'carboplatin, 2023-04', which counts as 'prior platinum chemotherapy'" rather
+    than restating the criterion back at the reviewer (#52).
 
     `verdicts` is the screening-wide cache keyed by `(criterion_value, term)` (both
     normalized) holding LLM verdicts for the ambiguous tail. When it is empty (unit
     tests, or the LLM step was skipped) only the deterministic fast path applies.
     """
     cval = _norm(criterion["value"])
-    result = "absent"
+    result: tuple[str, str | None] = ("absent", None)
     for term in _patient_terms(patient):
         tnorm = _norm(term)
         if _fast_present(cval, tnorm):
-            return "present"
+            return "present", term
         verdict = verdicts.get((cval, tnorm))
         if verdict == "match":
-            return "present"
-        if verdict == "uncertain":
-            result = "uncertain"
+            return "present", term
+        if verdict == "uncertain" and result[0] != "uncertain":
+            # First unmappable term wins as the evidence: it is the one a human
+            # is being asked to judge.
+            result = ("uncertain", term)
     return result
 
 
-def _check_categorical(patient: dict, criterion: dict, verdicts: dict) -> str:
-    """Inclusion-side check: does the patient satisfy this categorical criterion?
+def _inclusion_status(presence: str, negated: bool) -> str:
+    """Inclusion-side status for a categorical criterion.
 
     `negated` ("patient must NOT have this") is an inclusion-side concept — see
     the exclusion loop in evaluate_patient for why it is not honored there.
     """
-    presence = _categorical_presence(patient, criterion, verdicts)
     if presence == "uncertain":
         return "unknown"
-    if criterion["negated"]:
+    if negated:
         return "fail" if presence == "present" else "pass"
     return "pass" if presence == "present" else "fail"
+
+
+# --- Plain-language layer (#52) --------------------------------------------
+#
+# Every verdict the matcher reaches is deterministic, so its explanation is too:
+# these render the same pass/fail/unknown the technical view shows, in the words
+# a coordinator would use. No LLM call — an explanation that could disagree with
+# the status it explains would be worse than none at all.
+
+# Written for mid-sentence use ("the patient's eGFR is 42"), so no sentence ever
+# starts with one: capitalizing "eGFR" or "HbA1c" would mangle it.
+ATTRIBUTE_LABELS = {
+    "age": "age",
+    "egfr": "eGFR",
+    "creatinine": "creatinine",
+    "systolic_bp": "systolic blood pressure",
+    "diastolic_bp": "diastolic blood pressure",
+    "hba1c": "HbA1c",
+    "bmi": "BMI",
+    "anc": "neutrophil count",
+    "platelets": "platelet count",
+    "ecog": "ECOG performance status",
+    "ejection_fraction": "ejection fraction",
+}
+
+COMPARISON_WORDS = {">=": "at least", "<=": "at most", ">": "above", "<": "below", "==": "exactly"}
+
+
+def _attribute_label(attribute: str) -> str:
+    return ATTRIBUTE_LABELS.get(attribute, attribute.replace("_", " "))
+
+
+def _num(value: float) -> str:
+    """Drop the trailing ".0" a float threshold prints with: "at least 60", not
+    "at least 60.0". Non-integral values keep their decimals."""
+    return str(int(value)) if float(value).is_integer() else str(value)
+
+
+def _with_unit(value: float, unit: str) -> str:
+    return f"{_num(value)} {unit}".strip()
+
+
+def _threshold_phrase(criterion: dict) -> str:
+    if criterion["operator"] == "between":
+        return (
+            f"between {_num(criterion['value'])} and "
+            f"{_with_unit(criterion['value_high'], criterion['unit'])}"
+        )
+    word = COMPARISON_WORDS[criterion["operator"]]
+    return f"{word} {_with_unit(criterion['value'], criterion['unit'])}"
+
+
+def _explain_quantitative(patient: dict, criterion: dict, kind: str, status: str) -> str:
+    label = _attribute_label(criterion["attribute"])
+    threshold = _threshold_phrase(criterion)
+    value = patient["labs"].get(criterion["attribute"])
+    if value is None:
+        return f"No {label} value is on file, so this could not be checked."
+    reading = f"The patient's {label} is {_with_unit(value, criterion['unit'])}"
+    if kind == "inclusion":
+        if status == "pass":
+            return f"{reading}, and the trial asks for {threshold}."
+        return f"{reading}, but the trial asks for {threshold}."
+    # Exclusion: `status` is already flipped, so "fail" means the patient hits
+    # the exclusion and is ruled out by it.
+    if status == "fail":
+        return f"{reading}, which the trial excludes ({threshold})."
+    return f"{reading}, and the trial only excludes {threshold} — so this does not rule them out."
+
+
+def _explain_categorical(criterion: dict, kind: str, presence: str, evidence: str | None) -> str:
+    term = criterion["value"]
+    if presence == "uncertain":
+        # An uncertain presence always names the term that caused it (see
+        # _categorical_presence); `or term` is belt-and-braces, not a real case.
+        return (
+            f"The records mention “{evidence or term}”, and whether that counts as “{term}” "
+            "could not be decided automatically — someone has to judge it."
+        )
+
+    if presence == "present":
+        shown = (
+            f"The records show “{evidence}”, which counts as “{term}”"
+            if evidence and _norm(evidence) != _norm(term)
+            else f"The records show “{term}”"
+        )
+        if kind == "exclusion":
+            return f"{shown}, which the trial excludes."
+        if criterion["negated"]:
+            return f"{shown}, and the trial requires patients not to have it."
+        return f"{shown}, which the trial requires."
+
+    nothing = f"Nothing in the records points to “{term}”"
+    if kind == "exclusion":
+        return f"{nothing}, so this exclusion does not apply."
+    if criterion["negated"]:
+        return f"{nothing}, which is what the trial requires."
+    return f"{nothing}, and the trial requires it."
+
+
+def _criterion_label(criterion: dict) -> str:
+    """A short name for a criterion — an attribute for a lab bound, the term
+    itself for a categorical one. Used to name criteria inside a summary."""
+    if "attribute" in criterion:
+        return _attribute_label(criterion["attribute"])
+    return str(criterion["value"])
+
+
+def _criterion_names(results: list[dict], limit: int = 2) -> str:
+    """Name the criteria behind a verdict, capped so a summary stays one line.
+
+    The cap is why the technical view exists: a patient failing six criteria gets
+    two named here and the full list one click away, never a silently truncated
+    "the reason is X" that hides five others.
+    """
+    labels = [_criterion_label(r["criterion"]) for r in results]
+    shown = labels[:limit]
+    if len(labels) > limit:
+        shown.append(f"and {len(labels) - limit} more")
+    return ", ".join(shown)
+
+
+def summarize_patient(who: str, results: list[dict], eligible: bool, needs_review: bool) -> str:
+    """One plain-language line per patient: the verdict and why (#52)."""
+    if not results:
+        return f"{who} could not be screened — this protocol has no criteria to check against."
+
+    inclusions = [r for r in results if r["kind"] == "inclusion"]
+    exclusions = [r for r in results if r["kind"] == "exclusion"]
+    unknown = [r for r in results if r["status"] == "unknown"]
+    failed = [r for r in results if r["status"] == "fail"]
+
+    # Needs-review outranks the verdict, exactly as the UI's buckets do: a
+    # patient with an unresolved criterion has no final answer yet.
+    if needs_review:
+        counted = (
+            "the one criterion"
+            if len(results) == 1
+            else f"{len(unknown)} of {len(results)} criteria"
+        )
+        return (
+            f"{who} needs a human check — {counted} could not be judged from the records "
+            f"({_criterion_names(unknown)})."
+        )
+
+    if eligible:
+        parts = []
+        if len(inclusions) == 1:
+            parts.append("meets the one inclusion criterion")
+        elif inclusions:
+            parts.append(f"meets all {len(inclusions)} inclusion criteria")
+        if len(exclusions) == 1:
+            parts.append(f"the one exclusion ({_criterion_names(exclusions)}) does not apply")
+        elif exclusions:
+            parts.append(f"none of the {len(exclusions)} exclusions apply")
+        return f"{who} matches — " + "; ".join(parts) + "."
+
+    reasons = []
+    failed_inclusions = [r for r in failed if r["kind"] == "inclusion"]
+    failed_exclusions = [r for r in failed if r["kind"] == "exclusion"]
+    if failed_inclusions:
+        # "1 of 1 inclusion criteria" is technically true and reads like a bug, so
+        # a single-criterion protocol gets its own wording.
+        counted = (
+            "the one inclusion criterion"
+            if len(inclusions) == 1
+            else f"{len(failed_inclusions)} of {len(inclusions)} inclusion criteria"
+        )
+        reasons.append(f"does not meet {counted} ({_criterion_names(failed_inclusions)})")
+    if failed_exclusions:
+        noun = "exclusion" if len(failed_exclusions) == 1 else "exclusions"
+        reasons.append(
+            f"is ruled out by {len(failed_exclusions)} {noun} "
+            f"({_criterion_names(failed_exclusions)})"
+        )
+    # Ineligible without a failing criterion is impossible: an undecided criterion
+    # is "unknown", which the needs-review branch above already returned on.
+    assert reasons, "an ineligible patient always fails at least one criterion"
+    return f"{who} does not match — " + "; ".join(reasons) + "."
+
+
+def summarize_cohort(evaluations: list[dict]) -> str:
+    """The cohort split in one plain-language line (#52)."""
+    total = len(evaluations)
+    if not total:
+        return "No patient records were available to screen."
+    review = sum(1 for e in evaluations if e["needs_review"])
+    matched = sum(1 for e in evaluations if e["eligible"] and not e["needs_review"])
+    # Same three buckets the cohort table shows, in the same precedence.
+    no_match = total - matched - review
+    noun = "patient" if total == 1 else "patients"
+    # Participle phrases, not verbs: "1 match this protocol" reads as a typo, and
+    # the counts are whatever the cohort happens to be.
+    return (
+        f"Screened {total} {noun}: {matched} matching this protocol, {review} needing a human "
+        f"check, and {no_match} not matching."
+    )
 
 
 def evaluate_patient(patient: dict, criteria: dict, verdicts: dict | None = None) -> dict:
     verdicts = verdicts or {}
     results = []
     for c in criteria["inclusion_quantitative"]:
-        results.append(
-            {"criterion": c, "kind": "inclusion", "status": _check_quantitative(patient, c)}
-        )
-    for c in criteria["inclusion_categorical"]:
-        status = _check_categorical(patient, c, verdicts)
-        results.append({"criterion": c, "kind": "inclusion", "status": status})
-    # A patient MATCHING an exclusion criterion fails screening
-    for c in criteria["exclusion_quantitative"]:
         status = _check_quantitative(patient, c)
         results.append(
             {
                 "criterion": c,
+                "kind": "inclusion",
+                "status": status,
+                "explanation": _explain_quantitative(patient, c, "inclusion", status),
+            }
+        )
+    for c in criteria["inclusion_categorical"]:
+        presence, evidence = _categorical_presence(patient, c, verdicts)
+        status = _inclusion_status(presence, c["negated"])
+        results.append(
+            {
+                "criterion": c,
+                "kind": "inclusion",
+                "status": status,
+                "explanation": _explain_categorical(c, "inclusion", presence, evidence),
+            }
+        )
+    # A patient MATCHING an exclusion criterion fails screening
+    for c in criteria["exclusion_quantitative"]:
+        status = _check_quantitative(patient, c)
+        flipped = {"pass": "fail", "fail": "pass"}.get(status, status)
+        results.append(
+            {
+                "criterion": c,
                 "kind": "exclusion",
-                "status": {"pass": "fail", "fail": "pass"}.get(status, status),
+                "status": flipped,
+                "explanation": _explain_quantitative(patient, c, "exclusion", flipped),
             }
         )
     # Presence of an excluded term fails the patient. We match on presence and
@@ -160,20 +386,32 @@ def evaluate_patient(patient: dict, criteria: dict, verdicts: dict | None = None
     # here would double-negate — wrongly failing every patient who LACKS the
     # excluded condition whenever the parser sets negated=True on an exclusion.
     for c in criteria["exclusion_categorical"]:
-        presence = _categorical_presence(patient, c, verdicts)
+        presence, evidence = _categorical_presence(patient, c, verdicts)
         if presence == "uncertain":
             status = "unknown"
         else:
             status = "fail" if presence == "present" else "pass"
-        results.append({"criterion": c, "kind": "exclusion", "status": status})
+        results.append(
+            {
+                "criterion": c,
+                "kind": "exclusion",
+                "status": status,
+                "explanation": _explain_categorical(c, "exclusion", presence, evidence),
+            }
+        )
 
     known = [r for r in results if r["status"] != "unknown"]
+    eligible = bool(known) and all(r["status"] == "pass" for r in known)
+    needs_review = any(r["status"] == "unknown" for r in results)
     return {
         "patient_id": patient["id"],
         "name": patient.get("name"),
-        "eligible": bool(known) and all(r["status"] == "pass" for r in known),
-        "needs_review": any(r["status"] == "unknown" for r in results),
+        "eligible": eligible,
+        "needs_review": needs_review,
         "criterion_results": results,
+        "summary": summarize_patient(
+            patient.get("name") or patient["id"], results, eligible, needs_review
+        ),
     }
 
 
@@ -313,6 +551,7 @@ def matcher_node(state: ScreenerState) -> dict:
     )
     return {
         "matched_patients": evaluations,
+        "match_summary": summarize_cohort(evaluations),
         "current_step": "done",
         "events": [
             event(

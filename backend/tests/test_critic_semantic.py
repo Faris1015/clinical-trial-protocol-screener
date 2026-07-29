@@ -64,6 +64,7 @@ def test_semantic_review_flags_age_inconsistency(monkeypatch):
             Finding(
                 severity="reject",
                 message="Inclusion age >= 18 conflicts with exclusion age > 65.",
+                explanation="The protocol wants adults but also excludes anyone over 65.",
             )
         ]
     )
@@ -71,11 +72,14 @@ def test_semantic_review_flags_age_inconsistency(monkeypatch):
 
     findings = critic_mod.run_llm_semantic_review(_state())
 
+    # Both layers ride on the finding (#52): the technical message and the
+    # reviewer-facing explanation.
     assert findings == [
         {
             "rule_id": "LLM-SEM",
             "severity": "reject",
             "message": "Inclusion age >= 18 conflicts with exclusion age > 65.",
+            "explanation": "The protocol wants adults but also excludes anyone over 65.",
         }
     ]
 

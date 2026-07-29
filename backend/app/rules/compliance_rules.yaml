@@ -1,21 +1,30 @@
 # Deterministic compliance rules — layer 1 of the Regulatory Critic.
 # Simplified FDA-style boundaries for demonstration; not regulatory guidance.
+#
+# `description` is the technical line: it names the regulatory anchor and the
+# attribute, and it is what rides back to the Parser as feedback. `plain` (#52)
+# is the same problem written for a coordinator who does not read rule ids —
+# one sentence, no operators, no citations. It is optional: a rule without it
+# falls back to `description`, so a new rule is never blocked on prose.
 
 - id: RENAL-001
   attribute: egfr
   description: "Renal function thresholds must be a specific eGFR value (cf. FDA Guidance: Pharmacokinetics in Patients with Impaired Renal Function)"
+  plain: "The protocol only describes kidney function in words — screening needs an actual eGFR number to compare patients against."
   check: must_be_quantitative
   keywords: ["renal", "kidney", "egfr", "creatinine"]
 
 - id: HEPATIC-001
   attribute: creatinine
   description: "Organ-function criteria must carry numeric lab thresholds, not qualitative language"
+  plain: "The protocol describes organ function in words rather than lab numbers, so no patient record can be checked against it."
   check: must_be_quantitative
   keywords: ["hepatic", "liver", "bilirubin", "organ function"]
 
 - id: BP-001
   attribute: systolic_bp
   description: "Systolic BP threshold outside plausible clinical range"
+  plain: "The systolic blood-pressure limit read from the protocol is outside the range a real patient could have, so it was probably mis-read."
   check: range
   min_plausible: 90
   max_plausible: 200
@@ -23,6 +32,7 @@
 - id: BP-002
   attribute: diastolic_bp
   description: "Diastolic BP threshold outside plausible clinical range"
+  plain: "The diastolic blood-pressure limit read from the protocol is outside the range a real patient could have, so it was probably mis-read."
   check: range
   min_plausible: 50
   max_plausible: 130
@@ -34,6 +44,7 @@
 - id: PLT-001
   attribute: platelets
   description: "Platelet count threshold outside plausible clinical range (x10^9/L)"
+  plain: "The platelet limit is outside the range a real blood count could have — usually a units slip, and it would rule out every patient."
   check: range
   min_plausible: 10
   max_plausible: 1000
@@ -41,6 +52,7 @@
 - id: ANC-001
   attribute: anc
   description: "Absolute neutrophil count threshold outside plausible clinical range (x10^9/L)"
+  plain: "The neutrophil-count limit is outside the range a real blood count could have — usually a units slip, and it would rule out every patient."
   check: range
   min_plausible: 0.1
   max_plausible: 50
@@ -48,10 +60,12 @@
 - id: AGE-001
   attribute: age
   description: "Protocol must state an explicit lower age bound (cf. 21 CFR Part 50 pediatric protections)"
+  plain: "The protocol never states a minimum age, so it is unclear whether children could be enrolled."
   check: required_attribute
 
 - id: PREG-001
   description: "Protocol mentions women of childbearing potential but no pregnancy-related condition criterion was extracted"
+  plain: "The protocol talks about women who could become pregnant, but no pregnancy-related criterion was captured from it."
   check: keyword_implies_criterion
   keywords: ["childbearing", "pregnan"]
   required_category: condition

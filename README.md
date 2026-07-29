@@ -82,6 +82,15 @@ data gets touched.
   written into the checkpoint *as the Parser* — so the Critic re-runs over it and
   the run re-parks for approval. Edits can't bypass compliance, and matching still
   needs a named approver. Every revision keeps its before/after diff in state.
+- **Every result is dual-layer.** The Critic's findings and the Matcher's
+  per-patient verdicts each carry a plain-language `explanation` next to the
+  technical wording, plus a one-line `summary` per result ("Alice matches — meets
+  all 6 inclusion criteria; the one exclusion (prior chemo) does not apply"). The
+  UI defaults to plain language with a **Plain language / Technical** toggle one
+  click away, and the rule id stays on screen in both — a readable finding that
+  dropped its provenance would not be auditable. The plain layer is rendered from
+  the same deterministic comparison as the statuses, never a second LLM opinion,
+  so it cannot contradict them.
 - **The gate has a name attached.** Clearing it requires an authenticated
   reviewer, and the approver's identity is written into the checkpoint
   (`approved_by`, `approved_by_role`, `approved_at`, plus an event-log entry)
