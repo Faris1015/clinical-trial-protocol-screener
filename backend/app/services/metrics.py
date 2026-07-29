@@ -76,6 +76,12 @@ llm_call_failures_total = Counter(
     ["provider"],
 )
 
+notifications_total = Counter(
+    "notifications_total",
+    "Gate/escalation notifications attempted, by channel and outcome (#60).",
+    ["channel", "outcome"],
+)
+
 
 def record_node_metrics(node: str, state: ScreenerState, result: dict, duration_s: float) -> None:
     """Record every node-level metric for one node execution.
