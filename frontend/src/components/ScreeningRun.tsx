@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { AlertTriangle, CheckCircle2 } from "lucide-react";
+import Link from "next/link";
+import { AlertTriangle, CheckCircle2, PencilLine } from "lucide-react";
 import { useScreenerStream } from "@/hooks/useScreenerStream";
 import { AgentCard } from "@/components/AgentCard";
 import { CriteriaTable } from "@/components/CriteriaTable";
@@ -10,7 +11,9 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { useAuth } from "@/components/AuthProvider";
 import { apiFetch, problemDetail } from "@/lib/api";
-import type { PatientEvaluation, StreamMessage } from "@/types";
+import { reviewHref } from "@/lib/criteria";
+import { readEventStream } from "@/lib/sse";
+import type { PatientEvaluation } from "@/types";
 
 const AGENTS = ["router", "parser", "critic", "matcher"];
 
@@ -56,36 +59,36 @@ export function ScreeningRun({ threadId }: { threadId: string | null }) {
     // this is its local echo, since that write lands before the resume and so
     // never appears in the SSE stream. #55's audit view reads it back via /state.
     setApprovedBy(principal?.email ?? null);
-    // The matcher streams over SSE like the initial phase; EventSource can't
-    // POST, so read the body and split on the SSE frame delimiter ourselves,
-    // funneling each frame through the shared reducer.
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      let sep: number;
-      while ((sep = buffer.indexOf("\n\n")) !== -1) {
-        const block = buffer.slice(0, sep);
-        buffer = buffer.slice(sep + 2);
-        // Skip heartbeat comment lines (": heartbeat"); keep only data frames.
-        const dataLine = block.split("\n").find((l) => l.startsWith("data:"));
-        if (!dataLine) continue;
-        const msg = JSON.parse(dataLine.slice("data:".length).trim()) as StreamMessage;
-        if (msg.node === "matcher" && msg.update?.matched_patients) {
-          setMatches(msg.update.matched_patients);
-        }
-        applyFrame(msg);
+    // The matcher streams over SSE like the initial phase, but EventSource can't
+    // POST — so the body is framed by hand (lib/sse, shared with the edit-and-rerun
+    // page) and each frame goes through the same reducer the GET stream uses.
+    await readEventStream(res, (msg) => {
+      if (msg.node === "matcher" && msg.update?.matched_patients) {
+        setMatches(msg.update.matched_patients);
       }
-    }
+      return applyFrame(msg);
+    });
   }
 
   // Latest parsed criteria streamed from the parser node
   const parsed = nodeStates.parser?.update.parsed_criteria ?? null;
   const activeAgent =
     phase === "running" ? ([...AGENTS].reverse().find((a) => nodeStates[a]) ?? null) : null;
+
+  // Route to the editor (#53) from both human-facing stops — the gate and the
+  // blocked/escalated path — rather than only from a failure. Requires a parsed
+  // extraction and a thread to edit; without either there is nothing to fix.
+  const editorLink =
+    threadId && parsed ? (
+      <Link
+        href={reviewHref(threadId)}
+        className="text-primary inline-flex shrink-0 items-center gap-1.5 text-sm whitespace-nowrap underline-offset-4 hover:underline"
+        data-region="edit-criteria-link"
+      >
+        <PencilLine className="size-3.5" aria-hidden="true" />
+        Edit criteria & re-run
+      </Link>
+    ) : null;
 
   return (
     <div className="space-y-4" data-phase={phase}>
@@ -103,11 +106,15 @@ export function ScreeningRun({ threadId }: { threadId: string | null }) {
           role="alert"
           className="border-status-warn/40 bg-status-warn-soft"
         >
-          <CardContent className="flex items-start gap-2.5 text-sm">
+          <CardContent className="flex flex-col gap-3 text-sm sm:flex-row sm:items-start">
             <AlertTriangle className="text-status-warn mt-0.5 size-4 shrink-0" aria-hidden="true" />
-            <span>
+            <span className="flex-1">
               {error ?? "Could not converge — escalated to human review after 3 attempts."}
             </span>
+            {/* The escalation exit (#53). Offered only when there is an extraction
+                to correct: a run that died in the router or the parser has nothing
+                for a reviewer to edit, and linking there would be a dead end. */}
+            {editorLink}
           </CardContent>
         </Card>
       )}
@@ -119,8 +126,10 @@ export function ScreeningRun({ threadId }: { threadId: string | null }) {
           <CardContent className="flex flex-col gap-3 text-sm sm:flex-row sm:items-center">
             <CheckCircle2 className="text-primary size-4 shrink-0" aria-hidden="true" />
             <span className="flex-1">
-              Compliance checks passed. Review the criteria above, then approve patient matching.
+              Compliance checks passed. Review the criteria above, then approve patient matching —
+              or correct them first if the extraction is wrong.
             </span>
+            {editorLink}
             <Button onClick={approve} size="lg" className="shrink-0">
               Approve → run matching
             </Button>

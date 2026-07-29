@@ -11,7 +11,7 @@ import pytest
 import app.graph.nodes.matcher as matcher_mod
 from app.exceptions import ExtractionError
 from app.graph.nodes.matcher import evaluate_patient, matcher_node
-from app.graph.state import ScreenerState
+from app.graph.state import ScreenerState, initial_state
 from app.services.pdf import extract_eligibility_text
 
 # --- PDF extraction on real (in-memory) PDFs -------------------------------
@@ -81,19 +81,13 @@ _CRITERIA = {
     "unparseable": [],
 }
 
+# Spread over the real initial_state so a new ScreenerState key doesn't invalidate
+# a hand-rolled literal in every node suite.
 _STATE: ScreenerState = {
-    "raw_protocol_text": "x",
-    "source_filename": "p.md",
+    **initial_state("x", "p.md"),
     "parsed_criteria": _CRITERIA,
     "compliance_passed": True,
-    "critic_feedback": None,
     "parse_attempts": 1,
-    "compliance_findings": [],
-    "approved_by": None,
-    "approved_by_role": None,
-    "approved_at": None,
-    "matched_patients": [],
-    "events": [],
     "current_step": "matching",
 }
 

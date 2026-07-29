@@ -27,9 +27,36 @@ export type CriteriaSchema = {
 
 export type AgentEvent = {
   agent: string;
-  status: "started" | "completed" | "rejected" | "escalated" | "failed";
+  /** Node outcomes, plus the human-gate ones: `approved` (#50), `edited` (#53). */
+  status: "started" | "completed" | "rejected" | "escalated" | "failed" | "approved" | "edited";
   detail: string;
   timestamp: string;
+};
+
+/**
+ * One field-level difference between two revisions of the criteria (#53).
+ *
+ * `before`/`after` are labels rendered by the backend rather than raw criteria:
+ * the diff is an audit record, and the server is the one place that can render it
+ * identically for the editor, the run detail view, and anything reading the
+ * checkpoint later. Exactly one side is null for an addition or a removal.
+ */
+export type CriteriaChange = {
+  bucket: string;
+  /** Where a reclassified criterion came from; null for every other kind. */
+  from_bucket: string | null;
+  kind: "modified" | "added" | "removed" | "reclassified";
+  before: string | null;
+  after: string | null;
+};
+
+/** One reviewer revision of the extraction — who changed what, and when (#53). */
+export type CriteriaEdit = {
+  revision: number;
+  edited_by: string;
+  edited_by_role: string;
+  edited_at: string;
+  changes: CriteriaChange[];
 };
 
 export type CriterionResult = {
@@ -54,6 +81,13 @@ export type StateUpdate = {
   approved_by?: string | null;
   approved_by_role?: string | null;
   approved_at?: string | null;
+  /**
+   * Edit-and-rerun (#53). `criteria_revision` is 0 for the parser's own
+   * extraction and increments per reviewer revision — it is the token a PATCH has
+   * to echo back, so a stale editor can't overwrite someone else's corrections.
+   */
+  criteria_revision?: number;
+  criteria_edits?: CriteriaEdit[];
   [key: string]: unknown;
 };
 

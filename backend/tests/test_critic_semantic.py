@@ -9,7 +9,7 @@ dropped). The model itself is faked, so these run offline and deterministically.
 
 import app.graph.nodes.critic as critic_mod
 from app.exceptions import LLMUnavailableError
-from app.graph.state import ScreenerState
+from app.graph.state import ScreenerState, initial_state
 from app.schemas.review import Finding, SemanticReview
 from tests.fakes import FakeChatModel
 
@@ -43,19 +43,13 @@ INCONSISTENT_CRITERIA = {
 
 
 def _state(criteria: dict | None = INCONSISTENT_CRITERIA, text: str = "protocol") -> ScreenerState:
+    # Spread over the real initial_state rather than spelling out every field: a
+    # new key in ScreenerState then has to be added in exactly one place, instead
+    # of invalidating a hand-rolled literal in each node suite.
     return {
-        "raw_protocol_text": text,
-        "source_filename": "p.md",
+        **initial_state(text, "p.md"),
         "parsed_criteria": criteria,
-        "compliance_passed": False,
-        "critic_feedback": None,
         "parse_attempts": 1,
-        "compliance_findings": [],
-        "approved_by": None,
-        "approved_by_role": None,
-        "approved_at": None,
-        "matched_patients": [],
-        "events": [],
         "current_step": "critiquing",
     }
 

@@ -50,6 +50,29 @@ class ScreeningNotApprovableError(ScreenerError):
     http_status = 409
 
 
+class ScreeningNotEditableError(ScreenerError):
+    """Criteria edits were submitted for a run that isn't at a reviewable stop (#53).
+
+    Editable means parked at the approval gate, escalated, or failed *with an
+    extraction to correct*. A finished run is not: its cohort was already scored
+    against the criteria it had, so re-running it under different criteria would
+    quietly rewrite history rather than produce a new, attributable run.
+    """
+
+    http_status = 409
+
+
+class CriteriaRevisionConflictError(ScreenerError):
+    """Edits were based on a revision of the criteria that has since been replaced (#53).
+
+    Two reviewers can open the same parked run. Without this check the second
+    save would silently discard the first's corrections; with it, the loser is
+    told to reload and re-apply.
+    """
+
+    http_status = 409
+
+
 class PayloadTooLargeError(ScreenerError):
     """An upload exceeded the configured size cap."""
 

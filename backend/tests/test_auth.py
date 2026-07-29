@@ -470,6 +470,7 @@ PROTECTED_REQUESTS = [
     ("GET", "/api/screenings"),
     ("GET", "/api/screenings/any-id/stream"),
     ("POST", "/api/screenings/any-id/approve"),
+    ("PATCH", "/api/screenings/any-id/criteria"),
     ("GET", "/api/screenings/any-id/state"),
     ("GET", "/api/admin/users"),
 ]

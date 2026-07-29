@@ -5,16 +5,9 @@ import { AlertTriangle, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useAuth } from "@/components/AuthProvider";
+import { FIELD } from "@/lib/field";
 
-// Field styling shared by both inputs, using the same tokens the shadcn controls
-// do (border-input, ring-ring, bg-background) so the form matches the shell in
-// either theme. Written inline rather than pulling in shadcn's input/label: adding
-// those needs a registry fetch, and both container images build the frontend.
-const FIELD =
-  "h-9 w-full rounded-lg border border-input bg-background px-3 text-sm outline-none " +
-  "transition-all placeholder:text-muted-foreground " +
-  "focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 " +
-  "disabled:pointer-events-none disabled:opacity-50 dark:bg-input/30";
+const INPUT = `${FIELD} w-full`;
 
 /**
  * The login page — the only route reachable without a session (#50).
@@ -70,7 +63,7 @@ export default function LoginPage() {
             <input
               id="email"
               type="email"
-              className={FIELD}
+              className={INPUT}
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               autoComplete="username"
@@ -87,7 +80,7 @@ export default function LoginPage() {
             <input
               id="password"
               type="password"
-              className={FIELD}
+              className={INPUT}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               autoComplete="current-password"
