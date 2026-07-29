@@ -17,9 +17,14 @@ from app.exceptions import (
     ScreeningNotApprovableError,
     ScreeningNotFoundError,
 )
-from app.persistence import InMemoryScreeningStore
+from app.persistence import InMemoryScreeningStore, ScreeningRecord
 from app.services import screening, sse
 from tests.auth_helpers import REVIEWER
+
+
+async def _first_row(store: InMemoryScreeningStore) -> ScreeningRecord:
+    """The single screening these tests create — the store's list is paged now."""
+    return (await store.list(limit=10, offset=0)).items[0]
 
 
 def _frames(raw: list[str]) -> list[dict]:
@@ -194,9 +199,105 @@ async def test_list_returns_newest_first_metadata():
     store = InMemoryScreeningStore()
     await screening.create_screening(store, "a.md", b"x")
     await screening.create_screening(store, "b.md", b"y")
-    rows = await screening.list_screenings(store)
-    assert {r["source_filename"] for r in rows} == {"a.md", "b.md"}
-    assert all({"thread_id", "status", "created_at"} <= r.keys() for r in rows)
+    page = await screening.list_screenings(store, limit=10, offset=0)
+    assert {r["source_filename"] for r in page["items"]} == {"a.md", "b.md"}
+    assert all(
+        {"thread_id", "status", "created_at", "criteria_count", "match_count"} <= r.keys()
+        for r in page["items"]
+    )
+    assert (page["total"], page["limit"], page["offset"]) == (2, 10, 0)
+
+
+async def test_list_pages_without_losing_the_total():
+    """`total` counts every match, not the page — it is how the UI knows there's
+    a next page at all."""
+    store = InMemoryScreeningStore()
+    for name in ("a.md", "b.md", "c.md"):
+        await screening.create_screening(store, name, b"x")
+    first = await screening.list_screenings(store, limit=2, offset=0)
+    second = await screening.list_screenings(store, limit=2, offset=2)
+    assert len(first["items"]) == 2
+    assert len(second["items"]) == 1
+    assert first["total"] == second["total"] == 3
+    # No row appears on both pages.
+    assert not {r["thread_id"] for r in first["items"]} & {r["thread_id"] for r in second["items"]}
+
+
+async def test_list_filters_by_status_and_search():
+    store = InMemoryScreeningStore()
+    parked = await screening.create_screening(store, "nsclc-protocol.md", b"x")
+    await screening.create_screening(store, "ckd-protocol.md", b"y")
+    await store.set_status(parked, "awaiting_approval")
+
+    by_status = await screening.list_screenings(
+        store, limit=10, offset=0, status="awaiting_approval"
+    )
+    assert [r["thread_id"] for r in by_status["items"]] == [parked]
+    assert by_status["total"] == 1
+
+    # Case-insensitive substring of the filename.
+    by_name = await screening.list_screenings(store, limit=10, offset=0, search="NSCLC")
+    assert [r["thread_id"] for r in by_name["items"]] == [parked]
+
+    # Filters combine with AND, so a mismatched pair returns nothing.
+    neither = await screening.list_screenings(
+        store, limit=10, offset=0, status="done", search="ckd"
+    )
+    assert neither["items"] == [] and neither["total"] == 0
+
+
+async def test_terminal_frame_denormalizes_criteria_and_match_counts():
+    """The runs index reads counts off the row, so a finished run has to write
+    them — and `match_count` is the eligible cohort, not everyone scored."""
+    store = InMemoryScreeningStore()
+    thread_id = await screening.create_screening(store, "p.md", b"x")
+    values = {
+        "current_step": "done",
+        "parsed_criteria": {
+            "inclusion_quantitative": [{"attribute": "age"}],
+            "inclusion_categorical": [{"value": "NSCLC"}],
+            "exclusion_quantitative": [],
+            "exclusion_categorical": [{"value": "pregnancy"}],
+            # Not a criterion the parser produced — must not inflate the count.
+            "unparseable": ["some sentence", "another"],
+        },
+        "matched_patients": [
+            {"patient_id": "P1", "eligible": True, "needs_review": False},
+            {"patient_id": "P2", "eligible": False, "needs_review": False},
+            # Eligible but indeterminate: a human still has to decide, so it is
+            # not a match (mirrors the cohort table's bucketing).
+            {"patient_id": "P3", "eligible": True, "needs_review": True},
+        ],
+    }
+    graph = StreamingGraph(updates=[], snapshot=FakeSnapshot(values=values))
+    await _drain(await screening.stream_screening(store, graph, thread_id))
+
+    row = await _first_row(store)
+    assert (row.criteria_count, row.match_count) == (3, 1)
+
+
+async def test_failure_after_a_successful_phase_keeps_the_counts():
+    """A failed re-run records the failure without erasing what an earlier phase
+    already established — the index would otherwise show 0 criteria for a run
+    whose criteria are right there on its detail page."""
+    store = InMemoryScreeningStore()
+    thread_id = await screening.create_screening(store, "p.md", b"x")
+    parsed = {"inclusion_quantitative": [{"attribute": "age"}]}
+    ok = StreamingGraph(
+        updates=[],
+        snapshot=FakeSnapshot(
+            values={"current_step": "awaiting_approval", "parsed_criteria": parsed}
+        ),
+    )
+    await _drain(await screening.stream_screening(store, ok, thread_id))
+    assert (await _first_row(store)).criteria_count == 1
+
+    await _drain(
+        await screening.stream_screening(store, RaisingGraph(RuntimeError("boom")), thread_id)
+    )
+    row = await _first_row(store)
+    assert row.status == "failed"
+    assert row.criteria_count == 1
 
 
 # --- require-thread guard ------------------------------------------------
@@ -227,7 +328,7 @@ async def test_stream_success_ends_with_end_frame_and_sets_status():
     frames = _frames(await _drain(await screening.stream_screening(store, graph, thread_id)))
     assert frames[0] == {"node": "matcher", "update": {"current_step": "done"}}
     assert frames[-1] == {"node": sse.END}
-    assert (await store.list())[0].status == "done"
+    assert (await _first_row(store)).status == "done"
 
 
 async def test_stream_interrupt_ends_with_interrupt_and_awaiting_status():
@@ -239,7 +340,7 @@ async def test_stream_interrupt_ends_with_interrupt_and_awaiting_status():
     )
     frames = _frames(await _drain(await screening.stream_screening(store, graph, thread_id)))
     assert frames[-1] == {"node": sse.INTERRUPT}
-    assert (await store.list())[0].status == "awaiting_approval"
+    assert (await _first_row(store)).status == "awaiting_approval"
 
 
 async def test_stream_absorbed_failure_becomes_error_frame():
@@ -265,7 +366,7 @@ async def test_stream_domain_error_surfaces_detail_and_marks_failed():
     frames = _frames(await _drain(await screening.stream_screening(store, graph, thread_id)))
     assert frames[-1]["node"] == sse.ERROR
     assert "rules file is corrupt" in frames[-1]["message"]
-    assert (await store.list())[0].status == "failed"
+    assert (await _first_row(store)).status == "failed"
 
 
 async def test_stream_unexpected_error_hides_detail():
@@ -293,7 +394,7 @@ async def test_approve_streams_matcher_update_and_marks_done():
         "update": {"matched_patients": [{"patient_id": "P1"}], "current_step": "done"},
     } in frames
     assert frames[-1] == {"node": sse.END}
-    assert (await store.list())[0].status == "done"
+    assert (await _first_row(store)).status == "done"
 
 
 async def test_approve_relays_custom_progress_frames():
@@ -371,7 +472,7 @@ async def test_approve_domain_error_streams_error_frame_and_marks_failed():
     frames = await _approve_frames(store, graph, thread_id)
     assert frames[-1]["node"] == sse.ERROR
     assert "patients.json is corrupt" in frames[-1]["message"]
-    assert (await store.list())[0].status == "failed"
+    assert (await _first_row(store)).status == "failed"
 
 
 # --- state ---------------------------------------------------------------
@@ -387,3 +488,30 @@ async def test_get_state_returns_values_and_pending():
     state = await screening.get_screening_state(store, graph, thread_id)
     assert state["values"] == {"current_step": "awaiting_approval"}
     assert state["pending"] == ["matcher"]
+
+
+async def test_get_state_carries_the_store_row():
+    """The detail view needs the authoritative metadata, not just the checkpoint."""
+    store = InMemoryScreeningStore()
+    thread_id = await screening.create_screening(store, "p.md", b"x")
+    await store.set_status(thread_id, "done", criteria_count=4, match_count=2)
+    graph = StreamingGraph(updates=[], snapshot=FakeSnapshot(values={"current_step": "done"}))
+    row = (await screening.get_screening_state(store, graph, thread_id))["screening"]
+    assert row["thread_id"] == thread_id
+    assert row["source_filename"] == "p.md"
+    assert (row["status"], row["criteria_count"], row["match_count"]) == ("done", 4, 2)
+
+
+async def test_get_state_of_a_never_streamed_run_still_reports_its_status():
+    """Regression: a screening uploaded but never streamed has NO checkpoint, so
+    `values` is empty and the graph can say nothing about it. Without the store
+    row the detail view had to invent a phase, and rendered such a run as a green
+    "done" while the runs index correctly showed "routing"."""
+    store = InMemoryScreeningStore()
+    thread_id = await screening.create_screening(store, "p.md", b"x")
+    graph = StreamingGraph(updates=[], snapshot=FakeSnapshot(values={}))
+    state = await screening.get_screening_state(store, graph, thread_id)
+    assert state["values"] == {}
+    assert state["pending"] == []
+    assert state["screening"]["status"] == "routing"
+    assert state["screening"]["source_filename"] == "p.md"

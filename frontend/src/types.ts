@@ -64,10 +64,65 @@ export type StreamMessage = {
   message?: string;
 };
 
+/**
+ * The phases a screening can be in — mirrors the backend's `ScreeningStatus`
+ * (app/graph/state.py), which is both the graph's `current_step` and the list
+ * endpoint's accepted status filter.
+ */
+export type ScreeningStatus =
+  | "routing"
+  | "parsing"
+  | "critiquing"
+  | "awaiting_approval"
+  | "matching"
+  | "done"
+  | "failed"
+  | "escalated";
+
 /** One row from `GET /api/screenings` — metadata only, no protocol text. */
 export type Screening = {
   thread_id: string;
   source_filename: string;
-  status: string;
+  status: ScreeningStatus;
   created_at: string;
+  /** Criteria the parser extracted, across all four inclusion/exclusion buckets. */
+  criteria_count: number;
+  /** Patients the run matched — the eligible bucket, not the whole cohort. */
+  match_count: number;
+};
+
+/**
+ * `GET /api/screenings` — one page plus the total matching the filter. `total`
+ * counts every match, not the rows returned, so it is what says whether there
+ * is a next page.
+ */
+export type ScreeningPage = {
+  items: Screening[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
+/** One issue the Critic raised — `reject` blocks screening, `warn` is advisory. */
+export type ComplianceFinding = {
+  rule_id: string;
+  severity: "reject" | "warn";
+  message: string;
+};
+
+/** `GET /api/screenings/{thread_id}/state` — a run rehydrated from its checkpoint. */
+export type ScreeningState = {
+  values: StateUpdate & {
+    source_filename?: string;
+    current_step?: ScreeningStatus;
+    compliance_findings?: ComplianceFinding[];
+  };
+  /** Nodes the graph is parked before — non-empty means it's at the approval gate. */
+  pending: string[];
+  /**
+   * The same metadata row the runs index shows. Present even when the run has
+   * no checkpoint yet (uploaded but never streamed), which is exactly when
+   * `values` is empty and cannot be trusted for the filename or the phase.
+   */
+  screening: Screening | null;
 };
