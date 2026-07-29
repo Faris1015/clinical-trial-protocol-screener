@@ -41,7 +41,12 @@ text but absent from the structured extraction.
 Report ONLY genuine problems. Use severity "reject" for an issue that would corrupt \
 patient screening and must be fixed; use "warn" for a concern a human reviewer should \
 see but that need not block. If the extraction is sound, return an empty findings list. \
-Never invent criteria that are not in the protocol text."""
+Never invent criteria that are not in the protocol text.
+
+Every finding needs BOTH layers. `message` is for the engineer: name the attribute, the \
+operator and the values. `explanation` is for a trial coordinator who does not read \
+schemas: one sentence of plain English about the protocol itself, no attribute names, no \
+operators, no rule ids."""
 
 
 def load_rules() -> list[dict]:
@@ -69,6 +74,23 @@ def _all_quantitative(criteria: dict) -> list[dict]:
     return quantitative
 
 
+def _finding(rule: dict, severity: str, message: str, plain_detail: str = "") -> dict:
+    """One finding carrying both layers (#52).
+
+    `message` stays technical — it is what loops back to the Parser as feedback.
+    `explanation` is the reviewer-facing sentence: the rule's own `plain` prose
+    (falling back to `description` for a rule that has none) plus whatever
+    specific the check found, e.g. the implausible number it read.
+    """
+    plain = rule.get("plain") or rule["description"]
+    return {
+        "rule_id": rule["id"],
+        "severity": severity,
+        "message": message,
+        "explanation": f"{plain} {plain_detail}".strip(),
+    }
+
+
 def run_deterministic_checks(criteria: dict, raw_text: str, rules: list[dict]) -> list[dict]:
     findings: list[dict] = []
     quantitative = _all_quantitative(criteria)
@@ -89,12 +111,11 @@ def run_deterministic_checks(criteria: dict, raw_text: str, rules: list[dict]) -
             has_quant = any(c["attribute"] == rule["attribute"] for c in quantitative)
             if in_text and in_unparseable and not has_quant:
                 findings.append(
-                    {
-                        "rule_id": rule["id"],
-                        "severity": "reject",
-                        "message": f"{rule['description']} — found only vague language, "
-                        "no numeric threshold.",
-                    }
+                    _finding(
+                        rule,
+                        "reject",
+                        f"{rule['description']} — found only vague language, no numeric threshold.",
+                    )
                 )
 
         elif check == "range":
@@ -103,23 +124,18 @@ def run_deterministic_checks(criteria: dict, raw_text: str, rules: list[dict]) -
                     continue
                 if not (rule["min_plausible"] <= c["value"] <= rule["max_plausible"]):
                     findings.append(
-                        {
-                            "rule_id": rule["id"],
-                            "severity": "reject",
-                            "message": f"{rule['description']}: extracted {c['value']} {c['unit']} "
+                        _finding(
+                            rule,
+                            "reject",
+                            f"{rule['description']}: extracted {c['value']} {c['unit']} "
                             f"from '{c['source_text']}'",
-                        }
+                            f"It read {c['value']} {c['unit']} from “{c['source_text']}”.",
+                        )
                     )
 
         elif check == "required_attribute":
             if not any(c["attribute"] == rule["attribute"] for c in quantitative):
-                findings.append(
-                    {
-                        "rule_id": rule["id"],
-                        "severity": "warn",
-                        "message": rule["description"],
-                    }
-                )
+                findings.append(_finding(rule, "warn", rule["description"]))
 
         elif check == "keyword_implies_criterion":
             mentioned = any(k in raw_text.lower() for k in rule["keywords"])
@@ -136,13 +152,7 @@ def run_deterministic_checks(criteria: dict, raw_text: str, rules: list[dict]) -
                 for c in categorical
             )
             if mentioned and not covered:
-                findings.append(
-                    {
-                        "rule_id": rule["id"],
-                        "severity": "reject",
-                        "message": rule["description"],
-                    }
-                )
+                findings.append(_finding(rule, "reject", rule["description"]))
 
     return findings
 
@@ -184,6 +194,9 @@ def run_llm_semantic_review(state: ScreenerState) -> list[dict]:
                 "severity": "warn",
                 "message": "Semantic review skipped — LLM backend unavailable; "
                 "deterministic compliance checks only.",
+                "explanation": "The second-opinion review of this extraction could not run, so "
+                "only the automated rule checks were applied. A reviewer should read the criteria "
+                "with that in mind.",
             }
         ]
     except (ValidationError, OutputParserException) as exc:
@@ -191,11 +204,53 @@ def run_llm_semantic_review(state: ScreenerState) -> list[dict]:
         return []
 
     findings = [
-        {"rule_id": "LLM-SEM", "severity": f.severity, "message": f.message}
+        {
+            "rule_id": "LLM-SEM",
+            "severity": f.severity,
+            "message": f.message,
+            # A model that skipped the plain layer still gets a finding — the
+            # technical wording is a worse explanation than a purpose-written
+            # one, but far better than an empty line in the reviewer's view.
+            "explanation": f.explanation.strip() or f.message,
+        }
         for f in review.findings
     ]
     log.info("critic.semantic_review", findings=len(findings))
     return findings
+
+
+def summarize_compliance(findings: list[dict]) -> str:
+    """The Critic's result in one plain-language line (#52).
+
+    Non-technical reviewers read this instead of the findings list, so it has to
+    answer "can this run proceed, and if not why" without a rule id — while
+    still naming the rule that fired, because provenance is never dropped
+    (the technical view is one click away, not a different source of truth).
+
+    Derived from the findings alone rather than taking `passed` as well: a
+    blocking finding is exactly what makes a run fail (see critic_node), so the
+    two can't disagree, and there is no "blocked with nothing to show" state.
+    """
+    rejects = [f for f in findings if f["severity"] == "reject"]
+    warns = [f for f in findings if f["severity"] == "warn"]
+
+    if rejects:
+        first = rejects[0]
+        lead = f"{first['explanation']} ({first['rule_id']})"
+        if len(rejects) == 1:
+            return f"❌ Blocked — one problem has to be fixed before screening: {lead}"
+        return (
+            f"❌ Blocked — {len(rejects)} problems have to be fixed before screening. "
+            f"The first: {lead}"
+        )
+
+    if not warns:
+        return "✅ Cleared — the extraction passed every compliance check; nothing to fix."
+    noun = "note" if len(warns) == 1 else "notes"
+    return (
+        f"✅ Cleared — nothing blocks screening, but there {'is' if len(warns) == 1 else 'are'} "
+        f"{len(warns)} advisory {noun} worth reading below."
+    )
 
 
 def critic_node(state: ScreenerState) -> dict:
@@ -226,6 +281,7 @@ def critic_node(state: ScreenerState) -> dict:
     return {
         "compliance_passed": passed,
         "compliance_findings": findings,
+        "compliance_summary": summarize_compliance(findings),
         "critic_feedback": None
         if passed
         else "\n".join(f"- [{f['rule_id']}] {f['message']}" for f in rejects),

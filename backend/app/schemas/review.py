@@ -12,6 +12,11 @@ Two hooks extend the graph beyond its deterministic core:
 `Finding.rule_id` is deliberately absent from the schema: the Critic stamps
 every semantic finding with `rule_id="LLM-SEM"` itself, so a model can't invent
 its own identifiers.
+
+`Finding.explanation` (#52) is the plain-language layer non-technical reviewers
+read. It defaults to empty rather than being required so a weak model that
+returns only `message` still yields a usable finding — the Critic falls back to
+the technical wording instead of dropping the finding on validation.
 """
 
 from typing import Literal
@@ -26,6 +31,13 @@ class Finding(BaseModel):
         description="'reject' blocks screening and loops the Parser; 'warn' is advisory only"
     )
     message: str = Field(description="Human-readable description of the issue and where it is")
+    explanation: str = Field(
+        default="",
+        description="The same issue in plain language for a non-technical reviewer: one sentence, "
+        "no operators, no attribute names, no rule ids — say what is wrong with the protocol and "
+        "why it matters for screening patients. E.g. 'The protocol says patients must be 18 or "
+        "older but also excludes anyone over 65, which is a confusing way to state an age window.'",
+    )
 
 
 class SemanticReview(BaseModel):

@@ -78,6 +78,12 @@ class ScreenerState(TypedDict):
     parse_attempts: int
     compliance_findings: list[dict]
 
+    # Plain-language layer (#52). `compliance_summary` is the Critic's verdict in
+    # one sentence a non-technical reviewer can act on; each finding carries its
+    # own `explanation` alongside the technical `message`. Distinct from
+    # `critic_feedback`, which is written for the Parser LLM and stays technical.
+    compliance_summary: str
+
     # Human-in-the-loop gate audit trail (#50). Written when a reviewer clears the
     # gate, *before* the matcher resumes — so the identity that authorized
     # touching patient data is durable in the checkpoint even if matching then
@@ -96,8 +102,11 @@ class ScreenerState(TypedDict):
     criteria_revision: int
     criteria_edits: Annotated[list[CriteriaEdit], operator.add]
 
-    # Matcher output
+    # Matcher output. `match_summary` (#52) is the cohort split in one plain
+    # sentence; each evaluation carries a per-patient `summary` and a per-criterion
+    # `explanation` next to the raw pass/fail statuses.
     matched_patients: list[dict]
+    match_summary: str
 
     # Observability
     events: Annotated[list[AgentEvent], operator.add]
@@ -130,12 +139,14 @@ def initial_state(raw_protocol_text: str, source_filename: str) -> ScreenerState
         critic_feedback=None,
         parse_attempts=0,
         compliance_findings=[],
+        compliance_summary="",
         approved_by=None,
         approved_by_role=None,
         approved_at=None,
         criteria_revision=0,
         criteria_edits=[],
         matched_patients=[],
+        match_summary="",
         events=[],
         current_step="routing",
     )

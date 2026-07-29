@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { AlertTriangle, ArrowLeft, ShieldCheck } from "lucide-react";
 import { AgentCard } from "@/components/AgentCard";
+import { ComplianceFindings } from "@/components/ComplianceFindings";
 import { CriteriaTable } from "@/components/CriteriaTable";
 import { CriteriaDiff } from "@/components/review/criteria-diff";
 import { PatientMatchTable } from "@/components/PatientMatchTable";
@@ -206,23 +207,7 @@ export function RunDetail() {
           the session that made the edit. */}
       <CriteriaDiff edits={values.criteria_edits ?? []} />
 
-      {findings.length > 0 && (
-        <Card data-region="compliance-findings">
-          <CardHeader>
-            <CardTitle className="text-base">Compliance findings</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2">
-            {findings.map((finding, i) => (
-              <div key={i} className="flex flex-wrap items-start gap-2 text-sm">
-                <Badge variant={finding.severity === "reject" ? "fail" : "warn"}>
-                  {finding.rule_id}
-                </Badge>
-                <span className="min-w-0 flex-1">{finding.message}</span>
-              </div>
-            ))}
-          </CardContent>
-        </Card>
-      )}
+      <ComplianceFindings findings={findings} summary={values.compliance_summary} />
 
       {/* The durable audit line (#50): patient data was only scored because a
           named reviewer authorized it. Read back from the checkpoint, so it
@@ -241,7 +226,7 @@ export function RunDetail() {
         </Card>
       )}
 
-      <PatientMatchTable patients={matches} />
+      <PatientMatchTable patients={matches} summary={values.match_summary} />
 
       {events.length > 0 && (
         <Card data-region="run-events">

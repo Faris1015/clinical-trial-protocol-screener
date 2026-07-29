@@ -1,3 +1,5 @@
+"use client";
+
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -8,7 +10,10 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import type { PatientEvaluation } from "@/types";
+import { ViewModeToggle } from "@/components/view-mode-toggle";
+import { useViewMode } from "@/hooks/useViewMode";
+import { cn } from "@/lib/utils";
+import type { CriterionResult, PatientEvaluation } from "@/types";
 
 type Bucket = "eligible" | "ineligible" | "review";
 
@@ -27,7 +32,20 @@ const BUCKET_VARIANT = {
   review: "warn",
 } as const;
 
-export function PatientMatchTable({ patients }: { patients: PatientEvaluation[] }) {
+/** The unresolved criteria — the technical layer's answer to "why not". */
+function unresolved(e: PatientEvaluation): CriterionResult[] {
+  return e.criterion_results.filter((r) => r.status !== "pass");
+}
+
+export function PatientMatchTable({
+  patients,
+  summary,
+}: {
+  patients: PatientEvaluation[];
+  /** The cohort split in one plain-language line (#52); plain mode only. */
+  summary?: string | null;
+}) {
+  const { technical } = useViewMode();
   if (!patients.length) return null;
 
   const counts = patients.reduce<Record<Bucket, number>>(
@@ -41,7 +59,10 @@ export function PatientMatchTable({ patients }: { patients: PatientEvaluation[] 
   return (
     <Card data-region="matches">
       <CardHeader>
-        <CardTitle className="text-base">Cohort</CardTitle>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <CardTitle className="text-base">Cohort</CardTitle>
+          <ViewModeToggle />
+        </div>
         {/* Counts up front: the table can run to hundreds of rows, and the
             triage split is the thing a coordinator reads first. */}
         <div className="flex flex-wrap gap-1.5">
@@ -49,6 +70,7 @@ export function PatientMatchTable({ patients }: { patients: PatientEvaluation[] 
           <Badge variant="warn">{counts.review} need review</Badge>
           <Badge variant="fail">{counts.ineligible} ineligible</Badge>
         </div>
+        {!technical && summary && <p className="text-sm">{summary}</p>}
       </CardHeader>
       <CardContent>
         <Table>
@@ -56,12 +78,17 @@ export function PatientMatchTable({ patients }: { patients: PatientEvaluation[] 
             <TableRow>
               <TableHead>Patient</TableHead>
               <TableHead>Status</TableHead>
-              <TableHead>Failing / unknown criteria</TableHead>
+              <TableHead>{technical ? "Failing / unknown criteria" : "Why"}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {patients.map((e) => {
               const bucket = bucketOf(e);
+              // Plain mode reads the matcher's own sentence for this patient —
+              // which covers the "why not" for an excluded one. A run screened
+              // before #52 has no summary, so it falls back to the chips rather
+              // than showing a blank cell.
+              const plain = !technical && Boolean(e.summary);
               return (
                 <TableRow key={e.patient_id} data-bucket={bucket}>
                   <TableCell className="align-top">
@@ -72,11 +99,28 @@ export function PatientMatchTable({ patients }: { patients: PatientEvaluation[] 
                   <TableCell className="align-top">
                     <Badge variant={BUCKET_VARIANT[bucket]}>{bucket}</Badge>
                   </TableCell>
-                  <TableCell className="align-top">
-                    <div className="flex flex-wrap gap-1">
-                      {e.criterion_results
-                        .filter((r) => r.status !== "pass")
-                        .map((r, i) => (
+                  {/* Plain mode is prose, so it wraps: TableCell defaults to
+                      `whitespace-nowrap`, which turns a full sentence into a
+                      horizontal scroll. Technical mode keeps nowrap — the chips
+                      truncate on purpose. */}
+                  <TableCell className={cn("align-top", plain && "whitespace-normal")}>
+                    {plain ? (
+                      <div className="space-y-1">
+                        <p>{e.summary}</p>
+                        {/* One line per unresolved criterion, in the matcher's
+                            plain wording — the detail behind the verdict without
+                            making the reader switch layers. */}
+                        {unresolved(e)
+                          .filter((r) => r.explanation)
+                          .map((r, i) => (
+                            <p key={i} className="text-muted-foreground text-xs">
+                              {r.explanation}
+                            </p>
+                          ))}
+                      </div>
+                    ) : (
+                      <div className="flex flex-wrap gap-1">
+                        {unresolved(e).map((r, i) => (
                           <Badge
                             key={i}
                             variant={r.status === "fail" ? "fail" : "warn"}
@@ -87,7 +131,8 @@ export function PatientMatchTable({ patients }: { patients: PatientEvaluation[] 
                             </span>
                           </Badge>
                         ))}
-                    </div>
+                      </div>
+                    )}
                   </TableCell>
                 </TableRow>
               );

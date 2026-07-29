@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { AlertTriangle, ArrowLeft, CheckCircle2, Play, RotateCcw, Trash2 } from "lucide-react";
+import { ComplianceFindings } from "@/components/ComplianceFindings";
 import { CriteriaDiff } from "@/components/review/criteria-diff";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -404,22 +405,16 @@ export function CriteriaEditor() {
       )}
 
       {/* Why this run is here. The Critic's blocking findings are the reviewer's
-          work list, so they belong above the fields, not buried under them. */}
-      {blocking.length > 0 && (
-        <Card className="border-status-warn/40 bg-status-warn-soft" data-region="blocking-findings">
-          <CardHeader>
-            <CardTitle className="text-base">What the Critic rejected</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2">
-            {blocking.map((finding, i) => (
-              <div key={i} className="flex flex-wrap items-start gap-2 text-sm">
-                <Badge variant="fail">{finding.rule_id}</Badge>
-                <span className="min-w-0 flex-1">{finding.message}</span>
-              </div>
-            ))}
-          </CardContent>
-        </Card>
-      )}
+          work list, so they belong above the fields, not buried under them —
+          in plain language by default (#52), since fixing them is the job of
+          whoever knows the protocol, not whoever knows the rule engine. */}
+      <ComplianceFindings
+        findings={blocking}
+        summary={state.values.compliance_summary}
+        title="What the Critic rejected"
+        region="blocking-findings"
+        className="border-status-warn/40 bg-status-warn-soft"
+      />
 
       {!draft ? (
         alert(
