@@ -13,8 +13,10 @@ import pytest
 
 from app.auth import Principal
 from app.exceptions import (
+    CriteriaRevisionConflictError,
     DataStoreError,
     ScreeningNotApprovableError,
+    ScreeningNotEditableError,
     ScreeningNotFoundError,
 )
 from app.persistence import InMemoryScreeningStore, ScreeningRecord
@@ -69,8 +71,8 @@ class StreamingGraph:
     async def ainvoke(self, *_a: object) -> dict:  # pragma: no cover - not driven here
         raise NotImplementedError
 
-    async def aupdate_state(  # pragma: no cover - only the approve path records
-        self, _config: object, _values: dict
+    async def aupdate_state(  # pragma: no cover - only the approve/edit paths record
+        self, _config: object, _values: dict, as_node: str | None = None
     ) -> None:
         return None
 
@@ -92,7 +94,9 @@ class RaisingGraph:
     async def ainvoke(self, *_a: object) -> dict:
         raise self.exc
 
-    async def aupdate_state(self, _config: object, _values: dict) -> None:
+    async def aupdate_state(
+        self, _config: object, _values: dict, as_node: str | None = None
+    ) -> None:
         """Records the approver (#50). A no-op here: these fakes assert on frames."""
         return None
 
@@ -113,27 +117,40 @@ class ApprovingGraph:
     async def ainvoke(self, *_a: object) -> dict:
         return self.result
 
-    async def aupdate_state(self, _config: object, _values: dict) -> None:
+    async def aupdate_state(
+        self, _config: object, _values: dict, as_node: str | None = None
+    ) -> None:
         """Records the approver (#50). A no-op here: these fakes assert on frames."""
         return None
 
 
 class ResumeGraph:
-    """Models the /approve resume: the first aget_state reports the matcher gate
-    (so the approvable pre-check passes), astream yields `updates`, then a later
-    aget_state reports `after` (the terminal state for the final frame)."""
+    """Models a resume: the first aget_state reports where the run is parked (so
+    the approvable / editable pre-check passes), astream yields `updates`, then a
+    later aget_state reports `after` (the terminal state for the final frame).
+
+    Drives both /approve and the edit-and-rerun path (#53) — `values` seeds the
+    parked snapshot the latter reads its previous criteria and revision from."""
 
     def __init__(
-        self, updates: list[dict | tuple], after: FakeSnapshot, gate: tuple = ("matcher",)
+        self,
+        updates: list[dict | tuple],
+        after: FakeSnapshot,
+        gate: tuple = ("matcher",),
+        values: dict | None = None,
     ):
         self.updates = updates
         self.after = after
         self.gate = gate
+        self.values = values or {}
         self._state_calls = 0
         # What approve_screening wrote into the checkpoint before resuming, and
         # whether it had resumed yet when it did (#50).
         self.recorded: dict | None = None
         self.recorded_before_resume: bool | None = None
+        # Which node the write posed as (#53): the edit path rewinds the cursor to
+        # the parser so the Critic re-runs; approve leaves it where it is.
+        self.recorded_as_node: str | None = None
         self._streamed = False
 
     async def astream(self, *_a: object, **_k: object) -> AsyncIterator[dict | tuple]:
@@ -143,13 +160,18 @@ class ResumeGraph:
 
     async def aget_state(self, _config: object) -> FakeSnapshot:
         self._state_calls += 1
-        return FakeSnapshot(pending=self.gate) if self._state_calls == 1 else self.after
+        if self._state_calls == 1:
+            return FakeSnapshot(values=self.values, pending=self.gate)
+        return self.after
 
     async def ainvoke(self, *_a: object) -> dict:  # pragma: no cover - approve streams now
         raise NotImplementedError
 
-    async def aupdate_state(self, _config: object, values: dict) -> None:
+    async def aupdate_state(
+        self, _config: object, values: dict, as_node: str | None = None
+    ) -> None:
         self.recorded = values
+        self.recorded_as_node = as_node
         self.recorded_before_resume = not self._streamed
 
 
@@ -461,6 +483,20 @@ async def test_approve_when_not_awaiting_raises_409_error():
         await screening.approve_screening(store, ApprovingGraph(pending=()), thread_id, REVIEWER)
 
 
+async def test_approve_of_a_run_parked_before_the_critic_is_rejected():
+    """A thread parked at the Critic is pending, but it is not the patient-data
+    gate — an edit-and-rerun (#53) whose client vanished between the checkpoint
+    write and the resume leaves exactly that state. Approving it would resume the
+    Critic while stamping `approved_by`, which must only ever mean "authorized
+    patient matching"."""
+    store = InMemoryScreeningStore()
+    thread_id = await screening.create_screening(store, "p.md", b"x")
+    graph = ResumeGraph(updates=[], after=FakeSnapshot(), gate=("critic",))
+    with pytest.raises(ScreeningNotApprovableError):
+        await screening.approve_screening(store, graph, thread_id, REVIEWER)
+    assert graph.recorded is None
+
+
 async def test_approve_domain_error_streams_error_frame_and_marks_failed():
     store = InMemoryScreeningStore()
     thread_id = await screening.create_screening(store, "p.md", b"x")
@@ -473,6 +509,228 @@ async def test_approve_domain_error_streams_error_frame_and_marks_failed():
     assert frames[-1]["node"] == sse.ERROR
     assert "patients.json is corrupt" in frames[-1]["message"]
     assert (await _first_row(store)).status == "failed"
+
+
+# --- edit and re-run (#53) -----------------------------------------------
+
+
+def _criteria(value: float = 18, source: str = "Age 18 or older.") -> dict:
+    return {
+        "trial_title": "T",
+        "inclusion_quantitative": [
+            {
+                "attribute": "age",
+                "operator": ">=",
+                "value": value,
+                "value_high": None,
+                "unit": "years",
+                "source_text": source,
+            }
+        ],
+        "inclusion_categorical": [],
+        "exclusion_quantitative": [],
+        "exclusion_categorical": [],
+        "unparseable": [],
+    }
+
+
+def _parked(
+    criteria: dict | None = None, revision: int = 0, step: str = "awaiting_approval"
+) -> dict:
+    return {
+        "parsed_criteria": criteria if criteria is not None else _criteria(),
+        "criteria_revision": revision,
+        "current_step": step,
+    }
+
+
+async def _rerun(
+    store: InMemoryScreeningStore,
+    graph: screening.ScreeningGraph,
+    thread_id: str,
+    criteria: dict,
+    base_revision: int = 0,
+) -> list[dict]:
+    frames = await _drain(
+        await screening.resume_with_edited_criteria(
+            store,
+            graph,
+            thread_id,
+            criteria=criteria,
+            base_revision=base_revision,
+            editor=REVIEWER,
+        )
+    )
+    return _frames(frames)
+
+
+async def test_edit_writes_the_criteria_as_the_parser_and_streams_the_rerun():
+    """The write has to pose as the *parser* — that is what rewinds the cursor so
+    the Critic re-runs over the edited criteria instead of the run resuming
+    straight into the matcher with compliance unchecked."""
+    store = InMemoryScreeningStore()
+    thread_id = await screening.create_screening(store, "p.md", b"x")
+    graph = ResumeGraph(
+        updates=[{"critic": {"current_step": "awaiting_approval"}}],
+        after=FakeSnapshot(values={"current_step": "awaiting_approval"}, pending=("matcher",)),
+        values=_parked(),
+    )
+    frames = await _rerun(store, graph, thread_id, _criteria(value=65))
+
+    assert graph.recorded_as_node == "parser"
+    assert graph.recorded_before_resume is True
+    assert graph.recorded is not None
+    assert graph.recorded["parsed_criteria"] == _criteria(value=65)
+    assert graph.recorded["criteria_revision"] == 1
+    # The Critic's verdict on the extraction that was just replaced must not
+    # survive: a stale `passed` would route straight back to the gate.
+    assert graph.recorded["compliance_passed"] is False
+    assert graph.recorded["critic_feedback"] is None
+    assert graph.recorded["current_step"] == "critiquing"
+    # It re-parks at the gate, so the reviewer still has to approve matching.
+    assert frames[-1] == {"node": sse.INTERRUPT}
+    assert (await _first_row(store)).status == "awaiting_approval"
+
+
+async def test_edit_records_the_editor_and_the_diff():
+    store = InMemoryScreeningStore()
+    thread_id = await screening.create_screening(store, "p.md", b"x")
+    graph = ResumeGraph(
+        updates=[],
+        after=FakeSnapshot(values={"current_step": "awaiting_approval"}, pending=("matcher",)),
+        values=_parked(),
+    )
+    await _rerun(store, graph, thread_id, _criteria(value=65))
+
+    assert graph.recorded is not None
+    # Appended, not replaced — `criteria_edits` carries the same reducer `events`
+    # does, so revision 2's diff has to join revision 1's rather than erase it.
+    (record,) = graph.recorded["criteria_edits"]
+    assert record["revision"] == 1
+    assert record["edited_by"] == REVIEWER.email
+    assert record["edited_by_role"] == REVIEWER.role
+    (change,) = record["changes"]
+    assert (change["kind"], change["before"], change["after"]) == (
+        "modified",
+        "age >= 18 years",
+        "age >= 65 years",
+    )
+    (audit_event,) = graph.recorded["events"]
+    assert (audit_event["agent"], audit_event["status"]) == ("human", "edited")
+    assert REVIEWER.email in audit_event["detail"]
+    assert "1 modified" in audit_event["detail"]
+
+
+async def test_edit_of_an_escalated_run_is_allowed():
+    """The escalation path is exactly what this feature exists for: the graph gave
+    up, so there is no pending node to resume — only a human edit moves it."""
+    store = InMemoryScreeningStore()
+    thread_id = await screening.create_screening(store, "p.md", b"x")
+    graph = ResumeGraph(
+        updates=[{"critic": {"current_step": "awaiting_approval"}}],
+        after=FakeSnapshot(values={"current_step": "awaiting_approval"}, pending=("matcher",)),
+        gate=(),  # nothing pending — the run ended at human_escalation
+        values=_parked(step="escalated"),
+    )
+    frames = await _rerun(store, graph, thread_id, _criteria(value=65))
+    assert graph.recorded_as_node == "parser"
+    assert frames[-1] == {"node": sse.INTERRUPT}
+
+
+async def test_edit_of_a_finished_run_raises_and_writes_nothing():
+    store = InMemoryScreeningStore()
+    thread_id = await screening.create_screening(store, "p.md", b"x")
+    graph = ResumeGraph(
+        updates=[],
+        after=FakeSnapshot(),
+        gate=(),
+        values=_parked(step="done"),
+    )
+    with pytest.raises(ScreeningNotEditableError):
+        await screening.resume_with_edited_criteria(
+            store, graph, thread_id, criteria=_criteria(65), base_revision=0, editor=REVIEWER
+        )
+    assert graph.recorded is None
+
+
+async def test_edit_of_a_run_with_no_extraction_raises():
+    """A screening that never got past the router has nothing to correct."""
+    store = InMemoryScreeningStore()
+    thread_id = await screening.create_screening(store, "p.md", b"x")
+    graph = ResumeGraph(
+        updates=[],
+        after=FakeSnapshot(),
+        gate=(),
+        values={"current_step": "failed", "parsed_criteria": None},
+    )
+    with pytest.raises(ScreeningNotEditableError):
+        await screening.resume_with_edited_criteria(
+            store, graph, thread_id, criteria=_criteria(65), base_revision=0, editor=REVIEWER
+        )
+    assert graph.recorded is None
+
+
+async def test_edit_against_a_stale_revision_raises_and_writes_nothing():
+    """Two reviewers on the same parked run: the second save must not silently
+    discard the first's corrections."""
+    store = InMemoryScreeningStore()
+    thread_id = await screening.create_screening(store, "p.md", b"x")
+    graph = ResumeGraph(
+        updates=[],
+        after=FakeSnapshot(),
+        values=_parked(revision=2),
+    )
+    with pytest.raises(CriteriaRevisionConflictError, match="revision 2"):
+        await screening.resume_with_edited_criteria(
+            store, graph, thread_id, criteria=_criteria(65), base_revision=1, editor=REVIEWER
+        )
+    assert graph.recorded is None
+
+
+async def test_edit_of_a_checkpoint_without_a_revision_treats_it_as_zero():
+    """A run parked before #53 shipped has no `criteria_revision` in its
+    checkpoint; editing it must work, not 409 against a missing field."""
+    store = InMemoryScreeningStore()
+    thread_id = await screening.create_screening(store, "p.md", b"x")
+    graph = ResumeGraph(
+        updates=[],
+        after=FakeSnapshot(values={"current_step": "awaiting_approval"}, pending=("matcher",)),
+        values={"parsed_criteria": _criteria(), "current_step": "awaiting_approval"},
+    )
+    await _rerun(store, graph, thread_id, _criteria(value=65), base_revision=0)
+    assert graph.recorded is not None
+    assert graph.recorded["criteria_revision"] == 1
+
+
+async def test_edit_unknown_thread_raises_before_writing():
+    store = InMemoryScreeningStore()
+    graph = ResumeGraph(updates=[], after=FakeSnapshot(), values=_parked())
+    with pytest.raises(ScreeningNotFoundError):
+        await screening.resume_with_edited_criteria(
+            store, graph, "nope", criteria=_criteria(65), base_revision=0, editor=REVIEWER
+        )
+    assert graph.recorded is None
+
+
+async def test_edit_rerun_that_escalates_again_streams_the_escalation():
+    """A reviewer's edit is not privileged: if the Critic still rejects it and the
+    attempt cap is spent, the run escalates again.
+
+    The terminal frame is `__end__`, not `__error__` — `human_escalation` sets
+    `current_step="escalated"`, and only `"failed"` becomes an error frame. That
+    distinction is the contract the UI reads: the escalation *node* frame is what
+    tells it the re-run was blocked, and the run stays editable at
+    `status="escalated"` rather than being marked failed."""
+    store = InMemoryScreeningStore()
+    thread_id = await screening.create_screening(store, "p.md", b"x")
+    graph = ResumeGraph(
+        updates=[{"human_escalation": {"current_step": "escalated"}}],
+        after=FakeSnapshot(values={"current_step": "escalated"}),
+        values=_parked(step="escalated"),
+    )
+    frames = await _rerun(store, graph, thread_id, _criteria(value=65))
+    assert [f["node"] for f in frames] == ["human_escalation", sse.END]
+    assert (await _first_row(store)).status == "escalated"
 
 
 # --- state ---------------------------------------------------------------

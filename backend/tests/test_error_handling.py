@@ -12,7 +12,7 @@ from app.exceptions import DataStoreError, ExtractionError, LLMUnavailableError
 from app.graph.nodes.critic import load_rules
 from app.graph.nodes.matcher import load_patients
 from app.graph.nodes.parser import parser_node, parser_router
-from app.graph.state import ScreenerState
+from app.graph.state import ScreenerState, initial_state
 from app.services.llm import invoke_with_retry, is_transient
 from app.services.pdf import extract_eligibility_text
 
@@ -109,19 +109,10 @@ def test_non_transient_error_is_never_retried():
 # --- parser node ----------------------------------------------------------
 
 
+# Spread over the real initial_state so a new ScreenerState key doesn't invalidate
+# a hand-rolled literal in every node suite.
 BASE_STATE: ScreenerState = {
-    "raw_protocol_text": "Inclusion criteria: age >= 18",
-    "source_filename": "test.md",
-    "parsed_criteria": None,
-    "compliance_passed": False,
-    "critic_feedback": None,
-    "parse_attempts": 0,
-    "compliance_findings": [],
-    "approved_by": None,
-    "approved_by_role": None,
-    "approved_at": None,
-    "matched_patients": [],
-    "events": [],
+    **initial_state("Inclusion criteria: age >= 18", "test.md"),
     "current_step": "parsing",
 }
 

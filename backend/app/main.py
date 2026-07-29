@@ -29,7 +29,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from langgraph.graph.state import CompiledStateGraph
 from prometheus_fastapi_instrumentator import Instrumentator
-from pydantic import BaseModel, Field, StringConstraints
+from pydantic import BaseModel, Field, StringConstraints, model_validator
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -50,6 +50,7 @@ from app.exceptions import InvalidCredentialsError, PayloadTooLargeError, Screen
 from app.health import app_version, readiness
 from app.logging_config import bind_contextvars, clear_contextvars, configure_logging, get_logger
 from app.persistence import Persistence, ScreeningStore, open_persistence
+from app.schemas.criteria import CriteriaSchema
 from app.services import screening, sse
 from app.services.concurrency import ConcurrencyLimiter, release_after
 from app.services.uploads import read_upload_capped, validate_content_type
@@ -69,6 +70,14 @@ _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 # turns a cheap read into a full table scan serialized into a single response.
 DEFAULT_PAGE_SIZE = 25
 MAX_PAGE_SIZE = 100
+
+# Ceiling on an edited extraction (#53), measured on its JSON form. Unlike an
+# upload — which `read_upload_capped` bounds — a JSON body has no size gate of its
+# own, and this payload is written straight into a checkpoint that every
+# subsequent read of the run has to load. A real protocol's eligibility section
+# serializes to a few KB; 256 KiB is generous for a human-edited one and still
+# refuses to persist a megabyte of junk.
+MAX_CRITERIA_EDIT_BYTES = 256 * 1024
 
 # Resolve settings at import time so a misconfigured deployment fails at
 # startup (e.g. LLM_PROVIDER=anthropic without ANTHROPIC_API_KEY), not
@@ -488,6 +497,68 @@ async def approve_screening(
         # single slow cohort-mapping call needs a longer window than the pre-
         # approval phase.
         idle_timeout_seconds=settings.sse_matcher_idle_timeout_seconds,
+    )
+    return StreamingResponse(heartbeated, media_type="text/event-stream")
+
+
+class CriteriaEditRequest(BaseModel):
+    """A reviewer's corrected extraction, plus the revision it was made against (#53).
+
+    The whole `CriteriaSchema` is submitted rather than a patch of individual
+    fields: it is the same contract the Parser produces, so Pydantic validates a
+    hand-edited criterion exactly as strictly as a generated one — a threshold on
+    an attribute outside the closed EHR vocabulary, or an operator the Matcher
+    can't apply, is a 422 here instead of a broken run later.
+    """
+
+    base_revision: int = Field(
+        ge=0,
+        description="The criteria_revision these edits were made against; a mismatch is a 409.",
+    )
+    criteria: CriteriaSchema
+
+    @model_validator(mode="after")
+    def _within_size_cap(self) -> "CriteriaEditRequest":
+        if len(self.criteria.model_dump_json()) > MAX_CRITERIA_EDIT_BYTES:
+            raise ValueError(f"Edited criteria exceed the {MAX_CRITERIA_EDIT_BYTES} byte limit.")
+        return self
+
+
+@app.patch("/api/screenings/{thread_id}/criteria")
+@limiter.limit(lambda: settings.rate_limit_create)
+async def edit_criteria(
+    request: Request,
+    thread_id: str,
+    edits: CriteriaEditRequest,
+    principal: Annotated[Principal, Depends(require_reviewer)],
+) -> StreamingResponse:
+    """Correct the parsed criteria at the human gate and re-run from the Critic.
+
+    Mirrors the approve route's shape — a concurrency slot held for the run's
+    lifetime and an SSE stream rather than a blocking POST — because the resume
+    re-runs the Critic, whose semantic review is an LLM call that can take as long
+    as the pre-gate phase it belongs to (hence the same idle timeout, not the
+    matcher's longer one). Eager validation inside the service raises before the
+    response commits, so the slot is released on that path too.
+    """
+    active_screenings.acquire()
+    try:
+        frames = await screening.resume_with_edited_criteria(
+            _store(),
+            _graph(),
+            thread_id,
+            criteria=edits.criteria.model_dump(),
+            base_revision=edits.base_revision,
+            editor=principal,
+        )
+    except BaseException:
+        active_screenings.release()
+        raise
+    guarded = release_after(frames, active_screenings)
+    heartbeated = sse.with_heartbeats(
+        guarded,
+        heartbeat_seconds=settings.sse_heartbeat_seconds,
+        idle_timeout_seconds=settings.sse_idle_timeout_seconds,
     )
     return StreamingResponse(heartbeated, media_type="text/event-stream")
 

@@ -17,8 +17,15 @@ import app.graph.nodes.critic as critic_mod
 import app.graph.nodes.matcher as matcher_mod
 import app.graph.nodes.parser as parser_mod
 import app.main as main
+from app.schemas.criteria import CriteriaSchema
 from tests.auth_helpers import REVIEWER, sign_in
-from tests.fakes import FAKE_PATIENTS, PROTOCOL_TEXT, FakeChatModel, good_criteria
+from tests.fakes import (
+    FAKE_PATIENTS,
+    PROTOCOL_TEXT,
+    FakeChatModel,
+    bad_criteria,
+    good_criteria,
+)
 
 
 def _sse_frames(lines: list[str]) -> list[dict]:
@@ -105,6 +112,312 @@ async def test_upload_stream_interrupt_approve_happy_path(monkeypatch):
             ]
             assert len(approval_events) == 1
             assert REVIEWER.email in approval_events[0]["detail"]
+
+
+def _edited(criteria: CriteriaSchema, **changes: object) -> dict:
+    """`criteria` as a PATCH body, with the named buckets overridden."""
+    body: dict = criteria.model_dump()
+    body.update(changes)
+    return body
+
+
+async def test_edit_at_the_gate_reruns_the_critic_and_matches_the_edits(monkeypatch):
+    """The whole edit-and-rerun loop (#53), end to end over HTTP.
+
+    Load-bearing assertion: `as_node="parser"` really does rewind the *real*
+    compiled graph's cursor from the parked matcher back to the Critic. Everything
+    else here — the diff, the revision, the audit entry — is stored state, but that
+    rewind is a LangGraph behavior, and if it regressed the run would either resume
+    straight into the matcher (skipping compliance re-review) or refuse to move.
+    """
+    monkeypatch.setattr(parser_mod, "get_llm", lambda: FakeChatModel([good_criteria()]))
+    monkeypatch.setattr(critic_mod, "run_llm_semantic_review", lambda _state: [])
+    monkeypatch.setattr(matcher_mod, "load_patients", lambda: FAKE_PATIENTS)
+
+    async with main.lifespan(main.app):
+        transport = ASGITransport(app=main.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            sign_in(client)
+            upload = await client.post(
+                "/api/screenings",
+                files={"file": ("protocol.md", PROTOCOL_TEXT.encode(), "text/markdown")},
+            )
+            thread_id = upload.json()["thread_id"]
+            async with client.stream("GET", f"/api/screenings/{thread_id}/stream") as resp:
+                assert [line async for line in resp.aiter_lines()]
+
+            state = (await client.get(f"/api/screenings/{thread_id}/state")).json()
+            assert state["pending"] == ["matcher"]
+            assert state["values"]["criteria_revision"] == 0
+            # The parser's own age bound, which the reviewer is about to raise.
+            parsed = state["values"]["parsed_criteria"]
+            assert parsed["inclusion_quantitative"][0]["value"] == 18
+
+            # Raise the age floor to 65 — every fake patient passes at 18, only one
+            # does at 65, so the cohort itself proves which criteria the matcher ran
+            # against.
+            raised = dict(parsed["inclusion_quantitative"][0], value=65)
+            edit = {
+                "base_revision": 0,
+                "criteria": _edited(good_criteria(), inclusion_quantitative=[raised]),
+            }
+            rerun_lines: list[str] = []
+            async with client.stream(
+                "PATCH", f"/api/screenings/{thread_id}/criteria", json=edit
+            ) as rerun:
+                assert rerun.status_code == 200
+                assert rerun.headers["content-type"].startswith("text/event-stream")
+                async for line in rerun.aiter_lines():
+                    rerun_lines.append(line)
+            rerun_frames = _sse_frames(rerun_lines)
+
+            # The Critic ran again over the edited criteria, and the run parked at
+            # the gate rather than resuming into the matcher unapproved.
+            assert "critic" in [f["node"] for f in rerun_frames]
+            assert rerun_frames[-1]["node"] == "__interrupt__"
+
+            after = (await client.get(f"/api/screenings/{thread_id}/state")).json()
+            assert after["pending"] == ["matcher"]
+            assert after["values"]["criteria_revision"] == 1
+            assert after["values"]["parsed_criteria"]["inclusion_quantitative"][0]["value"] == 65
+
+            # The audit trail: one revision, its before/after diff, and who made it.
+            (revision,) = after["values"]["criteria_edits"]
+            assert revision["revision"] == 1
+            assert revision["edited_by"] == REVIEWER.email
+            assert revision["edited_by_role"] == REVIEWER.role
+            (change,) = revision["changes"]
+            assert change["kind"] == "modified"
+            assert change["before"] == "age >= 18 years"
+            assert change["after"] == "age >= 65 years"
+            edit_events = [
+                e
+                for e in after["values"]["events"]
+                if e["agent"] == "human" and e["status"] == "edited"
+            ]
+            assert len(edit_events) == 1
+            assert REVIEWER.email in edit_events[0]["detail"]
+
+            # A second edit against the now-stale revision 0 is refused rather than
+            # silently overwriting the first reviewer's correction.
+            stale = await client.patch(f"/api/screenings/{thread_id}/criteria", json=edit)
+            assert stale.status_code == 409
+            assert stale.json()["error"] == "CriteriaRevisionConflictError"
+
+            # Approve, and the matcher scores the cohort against the EDITED floor.
+            approve_lines: list[str] = []
+            async with client.stream("POST", f"/api/screenings/{thread_id}/approve") as approve:
+                async for line in approve.aiter_lines():
+                    approve_lines.append(line)
+            approve_frames = _sse_frames(approve_lines)
+            matched = [f for f in approve_frames if f["node"] == "matcher"][-1]["update"][
+                "matched_patients"
+            ]
+            eligible = {p["patient_id"] for p in matched if p["eligible"]}
+            # PT-3 (71) clears age >= 65; PT-1 (30) and PT-2 (52) no longer do.
+            assert eligible == {"PT-3"}
+
+
+async def test_escalated_run_can_be_fixed_by_hand_and_rerun(monkeypatch):
+    """The blocked path, which had no exit before (#53): the Critic→Parser loop
+    exhausts its attempts and escalates, and the reviewer's edit is what gets the
+    run moving again."""
+    # Always the same bad extraction, so the graph loops to its escalation cap.
+    monkeypatch.setattr(parser_mod, "get_llm", lambda: FakeChatModel([bad_criteria()]))
+    monkeypatch.setattr(critic_mod, "run_llm_semantic_review", lambda _state: [])
+
+    async with main.lifespan(main.app):
+        transport = ASGITransport(app=main.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            sign_in(client)
+            upload = await client.post(
+                "/api/screenings",
+                files={"file": ("protocol.md", PROTOCOL_TEXT.encode(), "text/markdown")},
+            )
+            thread_id = upload.json()["thread_id"]
+            async with client.stream("GET", f"/api/screenings/{thread_id}/stream") as resp:
+                lines = [line async for line in resp.aiter_lines()]
+            assert "human_escalation" in [f["node"] for f in _sse_frames(lines)]
+
+            escalated = (await client.get(f"/api/screenings/{thread_id}/state")).json()
+            assert escalated["pending"] == []  # nothing left to resume into
+            assert escalated["values"]["current_step"] == "escalated"
+
+            # The reviewer resolves the blocking finding by hand: the vague
+            # organ-function sentence becomes a real numeric threshold, which is
+            # exactly what HEPATIC-001 was asking for.
+            sentence = escalated["values"]["parsed_criteria"]["unparseable"][0]
+            fixed = {
+                "base_revision": 0,
+                "criteria": _edited(
+                    good_criteria(),
+                    inclusion_quantitative=[
+                        *good_criteria().model_dump()["inclusion_quantitative"],
+                        {
+                            "attribute": "anc",
+                            "operator": ">=",
+                            "value": 1.5,
+                            "value_high": None,
+                            "unit": "10^9/L",
+                            "source_text": sentence,
+                        },
+                    ],
+                ),
+            }
+            async with client.stream(
+                "PATCH", f"/api/screenings/{thread_id}/criteria", json=fixed
+            ) as rerun:
+                assert rerun.status_code == 200
+                frames = _sse_frames([line async for line in rerun.aiter_lines()])
+
+            # An escalated run resumes: the Critic passes this time, so it lands at
+            # the approval gate instead of escalating again.
+            assert frames[-1]["node"] == "__interrupt__"
+            after = (await client.get(f"/api/screenings/{thread_id}/state")).json()
+            assert after["pending"] == ["matcher"]
+            assert after["values"]["compliance_passed"] is True
+            listing = (await client.get("/api/screenings")).json()
+            assert listing["items"][0]["status"] == "awaiting_approval"
+            # The reclassification is on the record, not just the outcome.
+            kinds = {c["kind"] for c in after["values"]["criteria_edits"][0]["changes"]}
+            assert "reclassified" in kinds
+
+
+async def test_edit_that_still_fails_compliance_escalates_and_stays_editable(monkeypatch):
+    """A reviewer's edit is not privileged. If the Critic still rejects it, the run
+    escalates again — and remains editable, so the next attempt isn't blocked.
+
+    The terminal frame is `__end__`: escalation is the graph doing its job, not a
+    failure. The `human_escalation` node frame is what tells the UI the re-run was
+    blocked, which is the distinction the editor's outcome banner reads."""
+    monkeypatch.setattr(parser_mod, "get_llm", lambda: FakeChatModel([bad_criteria()]))
+    monkeypatch.setattr(critic_mod, "run_llm_semantic_review", lambda _state: [])
+
+    async with main.lifespan(main.app):
+        transport = ASGITransport(app=main.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            sign_in(client)
+            upload = await client.post(
+                "/api/screenings",
+                files={"file": ("protocol.md", PROTOCOL_TEXT.encode(), "text/markdown")},
+            )
+            thread_id = upload.json()["thread_id"]
+            async with client.stream("GET", f"/api/screenings/{thread_id}/stream") as resp:
+                assert [line async for line in resp.aiter_lines()]
+
+            # An edit that leaves the vague organ-function sentence unparsed, so
+            # HEPATIC-001 fires exactly as before.
+            unchanged = {"base_revision": 0, "criteria": _edited(bad_criteria())}
+            async with client.stream(
+                "PATCH", f"/api/screenings/{thread_id}/criteria", json=unchanged
+            ) as rerun:
+                frames = _sse_frames([line async for line in rerun.aiter_lines()])
+            assert "human_escalation" in [f["node"] for f in frames]
+            assert frames[-1]["node"] == "__end__"
+
+            after = (await client.get(f"/api/screenings/{thread_id}/state")).json()
+            assert after["values"]["current_step"] == "escalated"
+            assert after["values"]["criteria_revision"] == 1
+            # Still editable at the next revision — a rejected re-run must not trap
+            # the run, or the reviewer's second attempt would be a 409.
+            retry = await client.patch(
+                f"/api/screenings/{thread_id}/criteria",
+                json={"base_revision": 1, "criteria": _edited(bad_criteria())},
+            )
+            assert retry.status_code == 200
+
+
+async def test_edit_on_a_finished_run_is_conflict(monkeypatch):
+    """A completed run is not editable: its cohort was already scored against the
+    criteria it had, so re-running it under new ones would rewrite history."""
+    monkeypatch.setattr(parser_mod, "get_llm", lambda: FakeChatModel([good_criteria()]))
+    monkeypatch.setattr(critic_mod, "run_llm_semantic_review", lambda _state: [])
+    monkeypatch.setattr(matcher_mod, "load_patients", lambda: FAKE_PATIENTS)
+
+    async with main.lifespan(main.app):
+        transport = ASGITransport(app=main.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            sign_in(client)
+            upload = await client.post(
+                "/api/screenings",
+                files={"file": ("protocol.md", PROTOCOL_TEXT.encode(), "text/markdown")},
+            )
+            thread_id = upload.json()["thread_id"]
+            async with client.stream("GET", f"/api/screenings/{thread_id}/stream") as resp:
+                assert [line async for line in resp.aiter_lines()]
+            async with client.stream("POST", f"/api/screenings/{thread_id}/approve") as approve:
+                assert [line async for line in approve.aiter_lines()]
+
+            response = await client.patch(
+                f"/api/screenings/{thread_id}/criteria",
+                json={"base_revision": 0, "criteria": _edited(good_criteria())},
+            )
+            assert response.status_code == 409
+            assert response.json()["error"] == "ScreeningNotEditableError"
+
+
+async def test_edit_rejects_an_attribute_outside_the_ehr_vocabulary(monkeypatch):
+    """Hand-edited criteria are validated as strictly as generated ones — the
+    Matcher looks attributes up in the patient record, so an invented one has to be
+    a 422 here rather than a silently unmatchable criterion later."""
+    monkeypatch.setattr(parser_mod, "get_llm", lambda: FakeChatModel([good_criteria()]))
+    monkeypatch.setattr(critic_mod, "run_llm_semantic_review", lambda _state: [])
+
+    async with main.lifespan(main.app):
+        transport = ASGITransport(app=main.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            sign_in(client)
+            upload = await client.post(
+                "/api/screenings",
+                files={"file": ("protocol.md", PROTOCOL_TEXT.encode(), "text/markdown")},
+            )
+            thread_id = upload.json()["thread_id"]
+            async with client.stream("GET", f"/api/screenings/{thread_id}/stream") as resp:
+                assert [line async for line in resp.aiter_lines()]
+
+            response = await client.patch(
+                f"/api/screenings/{thread_id}/criteria",
+                json={
+                    "base_revision": 0,
+                    "criteria": _edited(
+                        good_criteria(),
+                        inclusion_quantitative=[
+                            {
+                                "attribute": "favourite_colour",
+                                "operator": ">=",
+                                "value": 1,
+                                "value_high": None,
+                                "unit": "n/a",
+                                "source_text": "Invented.",
+                            }
+                        ],
+                    ),
+                },
+            )
+            assert response.status_code == 422
+            # The run is untouched — still parked at the gate on revision 0.
+            state = (await client.get(f"/api/screenings/{thread_id}/state")).json()
+            assert state["pending"] == ["matcher"]
+            assert state["values"]["criteria_revision"] == 0
+
+
+async def test_edit_before_streaming_is_conflict(monkeypatch):
+    """No checkpoint means no extraction to correct — a clean 409, not a crash."""
+    async with main.lifespan(main.app):
+        transport = ASGITransport(app=main.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            sign_in(client)
+            upload = await client.post(
+                "/api/screenings",
+                files={"file": ("protocol.md", PROTOCOL_TEXT.encode(), "text/markdown")},
+            )
+            thread_id = upload.json()["thread_id"]
+            response = await client.patch(
+                f"/api/screenings/{thread_id}/criteria",
+                json={"base_revision": 0, "criteria": _edited(good_criteria())},
+            )
+            assert response.status_code == 409
+            assert response.json()["error"] == "ScreeningNotEditableError"
 
 
 async def test_approve_before_streaming_is_conflict(monkeypatch):

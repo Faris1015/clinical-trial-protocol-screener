@@ -16,19 +16,11 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { apiFetch, problemDetail } from "@/lib/api";
+import { FIELD } from "@/lib/field";
 import { RUN_STATUSES, formatTimestamp, runHref, statusLabel, statusVariant } from "@/lib/runs";
 import type { ScreeningPage, ScreeningStatus } from "@/types";
 
 const PAGE_SIZE = 25;
-
-// Same tokens the login form's inputs use, for the same reason: adding shadcn's
-// input/select needs a registry fetch, and both container images build this app
-// offline.
-const FIELD =
-  "h-9 rounded-lg border border-input bg-background px-3 text-sm outline-none " +
-  "transition-all placeholder:text-muted-foreground " +
-  "focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 " +
-  "disabled:pointer-events-none disabled:opacity-50 dark:bg-input/30";
 
 // Typing shouldn't fire a request per keystroke — the endpoint is rate limited
 // (RATE_LIMIT_READ) and a half-typed protocol name isn't a query anyone wants

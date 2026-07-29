@@ -26,10 +26,42 @@ ScreeningStatus = Literal[
 
 
 class AgentEvent(TypedDict):
-    agent: str  # "router" | "parser" | "critic" | "matcher"
-    status: str  # "started" | "completed" | "rejected" | "escalated" | "failed"
+    agent: str  # "router" | "parser" | "critic" | "matcher" | "human"
+    # "started" | "completed" | "rejected" | "escalated" | "failed", plus the
+    # human-gate outcomes: "approved" (#50) and "edited" (#53).
+    status: str
     detail: str
     timestamp: str
+
+
+class CriteriaChange(TypedDict):
+    """One field-level difference between two revisions of the criteria (#53).
+
+    `before`/`after` are rendered one-line labels rather than raw objects: this
+    is an audit record read by humans, and a label survives a schema change to
+    the criterion types without becoming unreadable. Exactly one side is None for
+    an addition or a removal.
+    """
+
+    bucket: str  # destination bucket, or the only bucket for a same-bucket change
+    from_bucket: str | None  # source bucket — set only when kind == "reclassified"
+    kind: str  # "modified" | "added" | "removed" | "reclassified"
+    before: str | None
+    after: str | None
+
+
+class CriteriaEdit(TypedDict):
+    """A reviewer's revision of the extraction, with who made it and what changed.
+
+    PHI-safe by construction, like the approval trail: protocol criteria, staff
+    identity and a timestamp — nothing about a patient.
+    """
+
+    revision: int
+    edited_by: str
+    edited_by_role: str
+    edited_at: str
+    changes: list[CriteriaChange]
 
 
 class ScreenerState(TypedDict):
@@ -54,6 +86,15 @@ class ScreenerState(TypedDict):
     approved_by: str | None
     approved_by_role: str | None
     approved_at: str | None
+
+    # Edit-and-rerun at the gate (#53). `criteria_revision` is 0 for the parser's
+    # own extraction and increments once per reviewer revision — it is the
+    # optimistic-concurrency token that stops a second reviewer's stale edit from
+    # silently overwriting the first's. `criteria_edits` uses the same append
+    # reducer as `events`, so each revision's before/after diff joins a log the
+    # run detail view can replay rather than replacing its predecessor.
+    criteria_revision: int
+    criteria_edits: Annotated[list[CriteriaEdit], operator.add]
 
     # Matcher output
     matched_patients: list[dict]
@@ -92,6 +133,8 @@ def initial_state(raw_protocol_text: str, source_filename: str) -> ScreenerState
         approved_by=None,
         approved_by_role=None,
         approved_at=None,
+        criteria_revision=0,
+        criteria_edits=[],
         matched_patients=[],
         events=[],
         current_step="routing",

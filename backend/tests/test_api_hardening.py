@@ -38,6 +38,39 @@ def test_body_within_cap_is_accepted(client, monkeypatch):
     assert resp.status_code == 200
 
 
+# --- edited-criteria size cap (#53) -----------------------------------------
+
+
+def test_oversized_criteria_edit_is_rejected(client):
+    """A JSON body has no `read_upload_capped` guarding it, and this payload is
+    written straight into a checkpoint every later read of the run has to load —
+    so the schema itself caps it. Rejected before the thread is even resolved, so
+    an unknown id is beside the point."""
+    upload = client.post(
+        "/api/screenings",
+        files={"file": ("p.md", b"Inclusion criteria: age >= 18", "text/markdown")},
+    )
+    thread_id = upload.json()["thread_id"]
+    resp = client.patch(
+        f"/api/screenings/{thread_id}/criteria",
+        json={
+            "base_revision": 0,
+            "criteria": {
+                "trial_title": "T",
+                "inclusion_quantitative": [],
+                "inclusion_categorical": [],
+                "exclusion_quantitative": [],
+                "exclusion_categorical": [],
+                # One absurd sentence is enough — the cap is on the serialized
+                # extraction, not on any single field.
+                "unparseable": ["x" * (main.MAX_CRITERIA_EDIT_BYTES + 1)],
+            },
+        },
+    )
+    assert resp.status_code == 422
+    assert "byte limit" in resp.text
+
+
 # --- content-type allowlist -------------------------------------------------
 
 

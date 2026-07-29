@@ -6,6 +6,7 @@ import { useSearchParams } from "next/navigation";
 import { AlertTriangle, ArrowLeft, ShieldCheck } from "lucide-react";
 import { AgentCard } from "@/components/AgentCard";
 import { CriteriaTable } from "@/components/CriteriaTable";
+import { CriteriaDiff } from "@/components/review/criteria-diff";
 import { PatientMatchTable } from "@/components/PatientMatchTable";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -198,6 +199,12 @@ export function RunDetail() {
       )}
 
       <CriteriaTable criteria={values.parsed_criteria ?? null} />
+
+      {/* If a reviewer corrected this run's criteria (#53), the replay has to say
+          so — the criteria above are theirs, not the parser's, and the cohort below
+          was scored against them. Read back from the checkpoint, so it survives
+          the session that made the edit. */}
+      <CriteriaDiff edits={values.criteria_edits ?? []} />
 
       {findings.length > 0 && (
         <Card data-region="compliance-findings">

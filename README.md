@@ -77,6 +77,11 @@ data gets touched.
 - **Human-in-the-loop at the right place.** The graph compiles with
   `interrupt_before=["matcher"]` — a human approves the parsed criteria before patient
   matching runs.
+- **The human can fix things, not just wave them through.** A reviewer edits the
+  criteria at the gate (or after an escalation) and the corrected extraction is
+  written into the checkpoint *as the Parser* — so the Critic re-runs over it and
+  the run re-parks for approval. Edits can't bypass compliance, and matching still
+  needs a named approver. Every revision keeps its before/after diff in state.
 - **The gate has a name attached.** Clearing it requires an authenticated
   reviewer, and the approver's identity is written into the checkpoint
   (`approved_by`, `approved_by_role`, `approved_at`, plus an event-log entry)
@@ -261,6 +266,36 @@ After approval, the run's state carries `approved_by`, `approved_by_role`, and
 curl -b cookies.txt http://localhost:8000/api/screenings/<thread_id>/state
 ```
 
+### Edit and re-run at the gate
+
+The gate is not approve-only. A reviewer looking at a bad threshold, a
+hallucinated criterion, or a sentence the Parser dumped into `unparseable` can
+correct the extraction and re-run it — which is also the only exit for a run the
+Critic escalated. **Review Queue** lists every screening waiting on a person
+(`awaiting_approval`, `escalated`, `failed`) and each row opens the editor at
+`/review/edit/?id=<thread_id>`, where every field sits beside the verbatim
+protocol sentence it came from.
+
+```bash
+# Submit the corrected extraction with the revision it was based on. Streams the
+# Critic's re-review over SSE, exactly like /approve.
+curl -b cookies.txt -N -X PATCH \
+  http://localhost:8000/api/screenings/<thread_id>/criteria \
+  -H 'Content-Type: application/json' \
+  -d '{"base_revision": 0, "criteria": { ...full CriteriaSchema... }}'
+```
+
+The edits are written into the checkpoint as if the Parser had produced them, so
+the **Critic re-runs over them** — a human edit can't smuggle a compliance
+violation past the guardrail — and the run then parks at the gate again for a
+named approval, because patient matching must never happen without one. Each
+revision bumps `criteria_revision` and appends a `criteria_edits` entry holding
+the before/after diff and who made it, which is what the editor and the run's
+detail view both render. `base_revision` is the optimistic-concurrency token: two
+reviewers on the same parked run means the second save gets a 409 rather than
+silently discarding the first's corrections. A finished run is not editable (409)
+— its cohort was already scored against the criteria it had.
+
 ### Health & readiness
 
 ```bash
@@ -349,14 +384,17 @@ a gate in [`pyproject.toml`](backend/pyproject.toml)
 the floor is one source of truth for both `make test` and CI.
 
 - **Unit** — Matcher boundaries, deterministic Critic rules, SSE framing, retry
-  policy, data-store guards (each pure component tested in isolation).
-- **Service** — the screening use-cases (create/stream/approve/state) driven
+  policy, data-store guards, the criteria before/after diff (each pure component
+  tested in isolation).
+- **Service** — the screening use-cases (create/stream/approve/edit/state) driven
   directly against an in-memory store with fake graphs.
 - **Integration** — the *real* compiled graph with an in-memory checkpointer and
   a scripted `FakeChatModel`: the Critic→Parser loop converges, the escalation
   cap trips after `MAX_PARSE_ATTEMPTS`, the Router reject edge is clean, and the
   full upload → stream → interrupt → approve path runs over HTTP via
-  `httpx.AsyncClient` + `ASGITransport`.
+  `httpx.AsyncClient` + `ASGITransport`. Edit-and-rerun is covered here rather
+  than only at the service layer on purpose: rewinding a parked checkpoint back to
+  the Critic is LangGraph behavior, and only the real graph can prove it works.
 
 #### Parser golden-set eval
 
@@ -473,7 +511,8 @@ backend/
     rules/compliance_rules.yaml# Deterministic FDA-style boundary rules
     data/generate_ehr.py       # Seeded synthetic patient generator
     services/
-      screening.py             # Screening use-cases (create/stream/approve/state)
+      screening.py             # Screening use-cases (create/stream/approve/edit/state)
+      criteria_edits.py        # Before/after diff of a reviewer's criteria revision
       sse.py                   # Server-Sent Events wire format (one place)
       llm.py, pdf.py           # LLM factory, PDF eligibility-section extraction
   tests/
@@ -482,7 +521,9 @@ frontend/
   src/
     app/                       # App Router: layout shell + `/` (new screening)
     hooks/useScreenerStream.ts # SSE consumption of graph events
+    lib/sse.ts                 # Framing for SSE bodies fetch returns (POST/PATCH)
     components/                # ScreeningRun, AgentCard, CriteriaTable, matches
+    components/review/         # Review queue, criteria editor, before/after diff
     types.ts                   # Shared API contract, mirrors the Pydantic schemas
 ```
 

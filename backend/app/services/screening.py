@@ -19,11 +19,17 @@ from uuid import uuid4
 from fastapi.encoders import jsonable_encoder
 
 from app.auth import Principal
-from app.exceptions import ScreenerError, ScreeningNotApprovableError, ScreeningNotFoundError
+from app.exceptions import (
+    CriteriaRevisionConflictError,
+    ScreenerError,
+    ScreeningNotApprovableError,
+    ScreeningNotEditableError,
+    ScreeningNotFoundError,
+)
 from app.graph.builder import build_graph
 from app.graph.state import ScreeningStatus, event, initial_state
 from app.logging_config import bind_contextvars, get_logger
-from app.services import sse
+from app.services import criteria_edits, sse
 from app.services.pdf import extract_eligibility_text
 from app.services.uploads import sanitize_filename
 
@@ -46,6 +52,7 @@ __all__ = [
     "create_screening",
     "get_screening_state",
     "list_screenings",
+    "resume_with_edited_criteria",
     "stream_screening",
 ]
 
@@ -83,7 +90,13 @@ class ScreeningGraph(Protocol):
 
     async def aget_state(self, config: Any) -> Any: ...
 
-    async def aupdate_state(self, config: Any, values: dict[str, Any]) -> Any: ...
+    # `as_node` rewrites the checkpoint as if that node had just produced these
+    # values, which is what moves the graph's cursor (edit-and-rerun uses it to
+    # rewind to the parser). Omitted — the approve path — the values merge into the
+    # current checkpoint and the thread stays parked where it was.
+    async def aupdate_state(
+        self, config: Any, values: dict[str, Any], as_node: str | None = ...
+    ) -> Any: ...
 
     async def ainvoke(self, input: Any, config: Any = ...) -> dict[str, Any]: ...
 
@@ -159,6 +172,55 @@ def _terminal_frame(snapshot: Snapshot) -> str:
         message = events[-1]["detail"] if events else "Screening failed."
         return sse.error_frame(message)
     return sse.end_frame()
+
+
+async def _graph_frames(
+    store: ScreeningStore,
+    graph: ScreeningGraph,
+    thread_id: str,
+    config: RunnableConfig,
+    graph_input: Any,
+    *,
+    stream_mode: Any,
+    operation: str,
+) -> AsyncIterator[str]:
+    """Drive the graph and render its progress as SSE frames.
+
+    The shared body of every streaming route (initial run, approve, edit-and-rerun
+    — `operation` names which, for the log line). They differ only in what they
+    feed the graph and which stream modes they ask for; the framing, the terminal
+    frame, the outcome denormalization and — critically — the error contract are
+    identical, and having one copy is what keeps them that way.
+
+    An exception here can't become an HTTP status: the response headers are
+    already sent by the time the first frame is yielded. The terminal `__error__`
+    frame is the only error channel left, so this must catch *everything* or the
+    frontend waits forever on a stream that will never end.
+
+    `stream_mode` as a list makes LangGraph yield `(mode, chunk)` tuples; a
+    single mode yields bare chunks, and the fakes in the test suite always do —
+    hence the isinstance check rather than a per-caller branch.
+    """
+    try:
+        async for item in graph.astream(graph_input, config, stream_mode=stream_mode):
+            mode, chunk = item if isinstance(item, tuple) else ("updates", item)
+            if mode == "custom":
+                yield sse.progress_frame(jsonable_encoder(chunk))
+                continue
+            for node, update in chunk.items():
+                yield sse.update_frame(node, jsonable_encoder(update))
+        snapshot = await graph.aget_state(config)
+        await _record_outcome(store, thread_id, snapshot)
+        yield _terminal_frame(snapshot)
+        log.info(f"screening.{operation}_finished")
+    except ScreenerError as exc:
+        log.warning(f"screening.{operation}_error", error=type(exc).__name__, detail=str(exc))
+        await store.set_status(thread_id, "failed")
+        yield sse.error_frame(str(exc))
+    except Exception:  # noqa: BLE001 — last-resort terminator, detail stays server-side
+        log.error(f"screening.{operation}_crashed", exc_info=True)
+        await store.set_status(thread_id, "failed")
+        yield sse.error_frame("Screening failed unexpectedly — check server logs.")
 
 
 async def create_screening(
@@ -251,32 +313,10 @@ async def stream_screening(
     screening_input = await store.get_input(thread_id)
     assert screening_input is not None  # exists() just passed
     log.info("screening.stream_started")
-
-    async def generate() -> AsyncIterator[str]:
-        # An exception mid-stream can't become an HTTP error (headers are
-        # already sent) — the terminal __error__ frame is the error channel,
-        # and it must catch everything or the frontend hangs forever.
-        try:
-            state = initial_state(
-                screening_input.raw_protocol_text, screening_input.source_filename
-            )
-            async for chunk in graph.astream(state, config, stream_mode="updates"):
-                for node, update in chunk.items():
-                    yield sse.update_frame(node, jsonable_encoder(update))
-            snapshot = await graph.aget_state(config)
-            await _record_outcome(store, thread_id, snapshot)
-            yield _terminal_frame(snapshot)
-            log.info("screening.stream_finished")
-        except ScreenerError as exc:
-            log.warning("screening.stream_error", error=type(exc).__name__, detail=str(exc))
-            await store.set_status(thread_id, "failed")
-            yield sse.error_frame(str(exc))
-        except Exception:  # noqa: BLE001 — last-resort stream terminator, detail stays server-side
-            log.error("screening.stream_crashed", exc_info=True)
-            await store.set_status(thread_id, "failed")
-            yield sse.error_frame("Screening failed unexpectedly — check server logs.")
-
-    return generate()
+    state = initial_state(screening_input.raw_protocol_text, screening_input.source_filename)
+    return _graph_frames(
+        store, graph, thread_id, config, state, stream_mode="updates", operation="stream"
+    )
 
 
 async def _record_approver(
@@ -320,8 +360,13 @@ async def approve_screening(
 
     Validation is eager (raising before any frame is yielded) so an unknown
     thread or a screening not at the gate becomes an HTTP error, not a frame
-    buried after the response headers are already sent. That second check also
-    rejects an approve on an already-finished screening (its `next` is empty).
+    buried after the response headers are already sent. It checks for the
+    *matcher* specifically, not merely for something pending: since #53 a thread
+    can also be parked before the Critic (an edit-and-rerun whose client vanished
+    between the checkpoint write and the resume), and `approved_by` has to keep
+    meaning "authorized patient matching" — not "happened to POST while the run was
+    parked somewhere". An already-finished screening has nothing pending and is
+    rejected by the same check.
 
     `approver` is who authorized touching patient data (#50). It is written into
     the checkpoint *before* the resume, so the audit trail records the
@@ -330,46 +375,136 @@ async def approve_screening(
     """
     config = await _require_thread(store, thread_id)
     bind_contextvars(thread_id=thread_id)
-    if not (await graph.aget_state(config)).next:
+    if "matcher" not in (await graph.aget_state(config)).next:
         raise ScreeningNotApprovableError("screening is not awaiting approval")
     await _record_approver(graph, config, approver)
     # Server-side counterpart to the in-state event: who cleared the gate, in the
     # same correlated log stream as the rest of the run.
     log.info("screening.approved", approved_by=approver.email, approver_role=approver.role)
+    # None input resumes from the interrupt_before=["matcher"] checkpoint. Two
+    # stream modes: "updates" carries the matcher's terminal node result; "custom"
+    # carries its mid-flight progress (see the matcher's _progress_emitter) so the
+    # stream emits real frames during the long LLM matching pass, keeping the
+    # idle-timeout reaper from killing a working run.
+    return _graph_frames(
+        store,
+        graph,
+        thread_id,
+        config,
+        None,
+        stream_mode=["updates", "custom"],
+        operation="approve",
+    )
 
-    async def generate() -> AsyncIterator[str]:
-        # Mirrors stream_screening's generator: an exception mid-stream can't be
-        # an HTTP status (headers already sent), so the terminal __error__ frame
-        # is the only error channel and must catch everything.
-        try:
-            # None input resumes from the interrupt_before=["matcher"] checkpoint.
-            # Two stream modes: "updates" carries the matcher's terminal node
-            # result; "custom" carries its mid-flight progress (see matcher's
-            # _progress_emitter) so the stream emits real frames during the long
-            # LLM matching pass, keeping the idle-timeout reaper from killing a
-            # working run. With a list mode LangGraph yields (mode, chunk) tuples;
-            # the fakes yield bare dicts, so treat a non-tuple as an update chunk.
-            async for item in graph.astream(None, config, stream_mode=["updates", "custom"]):
-                mode, chunk = item if isinstance(item, tuple) else ("updates", item)
-                if mode == "custom":
-                    yield sse.progress_frame(jsonable_encoder(chunk))
-                    continue
-                for node, update in chunk.items():
-                    yield sse.update_frame(node, jsonable_encoder(update))
-            snapshot = await graph.aget_state(config)
-            await _record_outcome(store, thread_id, snapshot)
-            yield _terminal_frame(snapshot)
-            log.info("screening.approve_finished")
-        except ScreenerError as exc:
-            log.warning("screening.approve_error", error=type(exc).__name__, detail=str(exc))
-            await store.set_status(thread_id, "failed")
-            yield sse.error_frame(str(exc))
-        except Exception:  # noqa: BLE001 — last-resort terminator, detail stays server-side
-            log.error("screening.approve_crashed", exc_info=True)
-            await store.set_status(thread_id, "failed")
-            yield sse.error_frame("Screening failed unexpectedly — check server logs.")
 
-    return generate()
+# Where a run can still be corrected by hand: parked at the gate, escalated after
+# the Critic loop gave up, or failed. Notably absent is "done" — see
+# ScreeningNotEditableError.
+_EDITABLE_STEPS = frozenset({"awaiting_approval", "escalated", "failed"})
+
+
+async def resume_with_edited_criteria(
+    store: ScreeningStore,
+    graph: ScreeningGraph,
+    thread_id: str,
+    *,
+    criteria: dict[str, Any],
+    base_revision: int,
+    editor: Principal,
+) -> AsyncIterator[str]:
+    """Write a reviewer's corrected criteria into the checkpoint and re-run (#53).
+
+    The gate used to be approve-only, which left a reviewer looking at a bad
+    threshold or a hallucinated criterion with nothing to do but escalate. This is
+    the other exit: the edited extraction replaces the parser's, and the run
+    continues from there.
+
+    It re-enters the graph **as the parser** (`as_node="parser"`) rather than
+    resuming into the matcher. Two consequences, both wanted:
+
+    - The Critic re-runs over the edited criteria, so a human edit cannot smuggle
+      a compliance violation (an implausible threshold, a dropped required
+      attribute) past the guardrail that exists to catch exactly that. If it
+      passes, the run parks at the gate again for an explicit approval; if not, it
+      loops or escalates just as a machine extraction would.
+    - Patient data is still only touched after someone approves — the audit trail
+      (#50) says a *named* reviewer authorized matching, and auto-resuming into
+      the matcher here would produce a cohort no one had approved.
+
+    Validation is eager (before any frame is yielded) so an unknown thread, a run
+    that can't be edited, and a stale revision are HTTP errors rather than
+    failures buried mid-stream. `parse_attempts` is deliberately *not* reset: the
+    escalation cap protects the LLM budget, and a reviewer who can hand-edit the
+    criteria doesn't need another automated retry to get them right.
+    """
+    config = await _require_thread(store, thread_id)
+    bind_contextvars(thread_id=thread_id)
+    snapshot = await graph.aget_state(config)
+    values = snapshot.values
+    previous = values.get("parsed_criteria")
+    at_a_stop = bool(snapshot.next) or values.get("current_step") in _EDITABLE_STEPS
+    if previous is None or not at_a_stop:
+        raise ScreeningNotEditableError(
+            "This screening has no extraction awaiting review — criteria can only be edited "
+            "while a run is at the approval gate, escalated, or failed."
+        )
+
+    current_revision = int(values.get("criteria_revision") or 0)
+    if base_revision != current_revision:
+        raise CriteriaRevisionConflictError(
+            f"These edits were made against revision {base_revision}, but the criteria are now "
+            f"at revision {current_revision} — someone else edited this run. Reload it and "
+            "re-apply your changes."
+        )
+
+    changes = criteria_edits.diff_criteria(previous, criteria)
+    revision = current_revision + 1
+    summary = criteria_edits.summarize(changes)
+    await graph.aupdate_state(
+        config,
+        {
+            "parsed_criteria": criteria,
+            "criteria_revision": revision,
+            # Appended, not replaced: `criteria_edits` and `events` both carry the
+            # operator.add reducer, so revision N's diff joins revision N-1's.
+            "criteria_edits": [criteria_edits.edit_record(revision, editor, changes)],
+            # The Critic's previous verdict described the extraction that just got
+            # replaced, so it must not survive into the re-run: a stale `passed`
+            # would route straight back to the gate, and stale feedback would be
+            # fed to the Parser as objections to criteria a human already fixed.
+            "compliance_passed": False,
+            "critic_feedback": None,
+            "current_step": "critiquing",
+            "events": [
+                event(
+                    "human",
+                    "edited",
+                    f"Criteria revised by {editor.email} ({editor.role}) — {summary} "
+                    f"(revision {revision}); re-running compliance review",
+                )
+            ],
+        },
+        as_node="parser",
+    )
+    log.info(
+        "screening.criteria_edited",
+        edited_by=editor.email,
+        editor_role=editor.role,
+        revision=revision,
+        changes=len(changes),
+    )
+    # `as_node="parser"` leaves the graph's next task at the Critic (the parser's
+    # own outgoing edge), so a None input resumes there — the same resume the
+    # approve path uses, one node earlier.
+    return _graph_frames(
+        store,
+        graph,
+        thread_id,
+        config,
+        None,
+        stream_mode=["updates", "custom"],
+        operation="rerun",
+    )
 
 
 async def get_screening_state(store: ScreeningStore, graph: ScreeningGraph, thread_id: str) -> dict:
