@@ -31,6 +31,13 @@ def clean_env(monkeypatch):
         "SSE_HEARTBEAT_SECONDS",
         "SSE_IDLE_TIMEOUT_SECONDS",
         "SSE_MATCHER_IDLE_TIMEOUT_SECONDS",
+        "NOTIFY_ENABLED",
+        "NOTIFY_WEBHOOK_URL",
+        "NOTIFY_EMAIL_TO",
+        "NOTIFY_EMAIL_FROM",
+        "NOTIFY_SMTP_HOST",
+        "NOTIFY_TIMEOUT_SECONDS",
+        "NOTIFY_BASE_URL",
     ):
         monkeypatch.delenv(var, raising=False)
     get_settings.cache_clear()
@@ -136,4 +143,47 @@ def test_idle_timeout_below_heartbeat_fails_fast(monkeypatch):
     monkeypatch.setenv("SSE_HEARTBEAT_SECONDS", "30")
     monkeypatch.setenv("SSE_IDLE_TIMEOUT_SECONDS", "10")
     with pytest.raises(ValueError, match="SSE_IDLE_TIMEOUT_SECONDS"):
+        Settings(_env_file=None)
+
+
+# --- notifications (#60) ---------------------------------------------------
+
+
+def test_notifications_are_off_by_default():
+    """Nothing leaves the process until a deployment asks for it."""
+    s = Settings(_env_file=None)
+    assert s.notify_enabled is False
+    assert s.notify_webhook_configured is False
+    assert s.notify_email_configured is False
+
+
+def test_notify_enabled_without_a_channel_fails_fast(monkeypatch):
+    monkeypatch.setenv("NOTIFY_ENABLED", "true")
+    with pytest.raises(ValueError, match="NOTIFY_ENABLED=true requires a channel"):
+        Settings(_env_file=None)
+
+
+def test_notify_webhook_alone_is_a_valid_channel(monkeypatch):
+    monkeypatch.setenv("NOTIFY_ENABLED", "true")
+    monkeypatch.setenv("NOTIFY_WEBHOOK_URL", "https://hooks.example.com/x")
+    s = Settings(_env_file=None)
+    assert (s.notify_webhook_configured, s.notify_email_configured) == (True, False)
+
+
+def test_notify_email_recipients_are_comma_separated(monkeypatch):
+    monkeypatch.setenv("NOTIFY_ENABLED", "true")
+    monkeypatch.setenv("NOTIFY_EMAIL_TO", "a@example.com, b@example.com ")
+    monkeypatch.setenv("NOTIFY_EMAIL_FROM", "trialgate@example.com")
+    monkeypatch.setenv("NOTIFY_SMTP_HOST", "smtp.example.com")
+    s = Settings(_env_file=None)
+    assert s.notify_email_recipient_list == ["a@example.com", "b@example.com"]
+    assert s.notify_email_configured is True
+
+
+def test_notify_smtp_host_without_recipients_is_not_a_channel(monkeypatch):
+    """The half-configured case: a relay but nobody to send to fails at startup
+    rather than looking wired up and notifying no one."""
+    monkeypatch.setenv("NOTIFY_ENABLED", "true")
+    monkeypatch.setenv("NOTIFY_SMTP_HOST", "smtp.example.com")
+    with pytest.raises(ValueError, match="requires a channel"):
         Settings(_env_file=None)

@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator
 import pytest
 
 from app.auth import Principal
+from app.config import Settings
 from app.exceptions import (
     CriteriaRevisionConflictError,
     DataStoreError,
@@ -20,7 +21,7 @@ from app.exceptions import (
     ScreeningNotFoundError,
 )
 from app.persistence import InMemoryScreeningStore, ScreeningRecord
-from app.services import screening, sse
+from app.services import notifications, screening, sse
 from tests.auth_helpers import REVIEWER
 
 
@@ -731,6 +732,141 @@ async def test_edit_rerun_that_escalates_again_streams_the_escalation():
     frames = await _rerun(store, graph, thread_id, _criteria(value=65))
     assert [f["node"] for f in frames] == ["human_escalation", sse.END]
     assert (await _first_row(store)).status == "escalated"
+
+
+# --- notify on gate / escalation (#60) -----------------------------------
+#
+# Delivery (webhook/SMTP, payload shape, PHI hygiene, failure isolation) is
+# covered in test_notifications.py. What matters here is the *wiring*: the hook
+# sits in the one place every operation funnels through, so all three streaming
+# paths notify, and it is handed the same status the store row got.
+
+
+@pytest.fixture
+def notified(monkeypatch):
+    """Capture `notify_gate` calls made by the service layer."""
+    calls: list[dict] = []
+
+    async def record(_settings: object, **kwargs: object) -> None:
+        calls.append(dict(kwargs))
+
+    monkeypatch.setattr(screening.notifications, "notify_gate", record)
+    return calls
+
+
+async def test_a_run_parking_at_the_gate_notifies(notified):
+    store = InMemoryScreeningStore()
+    thread_id = await screening.create_screening(store, "nsclc.md", b"x")
+    graph = StreamingGraph(
+        updates=[{"critic": {"current_step": "awaiting_approval"}}],
+        snapshot=FakeSnapshot(
+            values={
+                "current_step": "awaiting_approval",
+                "source_filename": "nsclc.md",
+                "parsed_criteria": {"inclusion_quantitative": [{"attribute": "age"}]},
+            },
+            pending=("matcher",),
+        ),
+    )
+    await _drain(await screening.stream_screening(store, graph, thread_id))
+
+    (call,) = notified
+    assert call["thread_id"] == thread_id
+    # The same status the runs index shows — both come from _record_outcome.
+    assert call["status"] == (await _first_row(store)).status == "awaiting_approval"
+    assert call["source_filename"] == "nsclc.md"
+    assert call["criteria_count"] == 1
+
+
+async def test_an_escalated_run_notifies(notified):
+    store = InMemoryScreeningStore()
+    thread_id = await screening.create_screening(store, "p.md", b"x")
+    graph = StreamingGraph(
+        updates=[{"human_escalation": {"current_step": "escalated"}}],
+        snapshot=FakeSnapshot(values={"current_step": "escalated", "source_filename": "p.md"}),
+    )
+    await _drain(await screening.stream_screening(store, graph, thread_id))
+
+    (call,) = notified
+    assert call["status"] == "escalated"
+
+
+async def test_an_edit_rerun_that_re_parks_notifies_again(notified):
+    """Each stop is a fresh ask: a reviewer's edit that lands back at the gate has
+    to page whoever approves, not rely on them still watching the stream."""
+    store = InMemoryScreeningStore()
+    thread_id = await screening.create_screening(store, "p.md", b"x")
+    graph = ResumeGraph(
+        updates=[{"critic": {"current_step": "awaiting_approval"}}],
+        after=FakeSnapshot(values={"current_step": "awaiting_approval"}, pending=("matcher",)),
+        values=_parked(),
+    )
+    await _rerun(store, graph, thread_id, _criteria(value=65))
+    assert [c["status"] for c in notified] == ["awaiting_approval"]
+
+
+async def test_a_finished_run_is_not_notified(notified):
+    """The gating lives in notify_gate, but the approve path reaching it at all
+    would mean a completed run pages a reviewer with nothing to do."""
+    store = InMemoryScreeningStore()
+    thread_id = await screening.create_screening(store, "p.md", b"x")
+    graph = ResumeGraph(
+        updates=[{"matcher": {"current_step": "done"}}],
+        after=FakeSnapshot(values={"current_step": "done"}),
+    )
+    await _approve_frames(store, graph, thread_id)
+    assert [c["status"] for c in notified] == ["done"]
+
+
+async def test_a_crashed_run_is_not_notified(notified):
+    """The error path bails before the outcome/notify block: a crashed stream is
+    surfaced as an __error__ frame, and there is no snapshot to describe."""
+    store = InMemoryScreeningStore()
+    thread_id = await screening.create_screening(store, "p.md", b"x")
+    await _drain(
+        await screening.stream_screening(store, RaisingGraph(RuntimeError("boom")), thread_id)
+    )
+    assert notified == []
+
+
+async def test_a_dead_notification_channel_cannot_fail_a_good_run(monkeypatch):
+    """End-to-end on the property that makes this safe to put in the hot path: with
+    the *real* notify_gate and a webhook that refuses the connection, the run still
+    ends at __interrupt__ and stays approvable.
+
+    The hook is inside `_graph_frames`' try block, so anything escaping it would
+    turn a successful screening into an __error__ frame + status="failed".
+    """
+    store = InMemoryScreeningStore()
+    thread_id = await screening.create_screening(store, "p.md", b"x")
+
+    settings = Settings(
+        _env_file=None,
+        notify_enabled=True,
+        notify_webhook_url="https://hooks.invalid/nope",
+        notify_timeout_seconds=0.1,
+    )
+    monkeypatch.setattr(screening, "get_settings", lambda: settings)
+
+    class Refusing:
+        async def __aenter__(self) -> "Refusing":
+            return self
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+        async def post(self, *_a: object, **_k: object) -> None:
+            raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(notifications.httpx, "AsyncClient", lambda **_kw: Refusing())
+
+    graph = StreamingGraph(
+        updates=[],
+        snapshot=FakeSnapshot(values={"current_step": "awaiting_approval"}, pending=("matcher",)),
+    )
+    frames = _frames(await _drain(await screening.stream_screening(store, graph, thread_id)))
+    assert frames[-1] == {"node": sse.INTERRUPT}
+    assert (await _first_row(store)).status == "awaiting_approval"
 
 
 # --- state ---------------------------------------------------------------

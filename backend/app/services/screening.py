@@ -3,7 +3,8 @@ store and the graph so route handlers stay thin HTTP translators.
 
 Routes hand this layer raw inputs (upload bytes, a thread_id) and the wired
 dependencies (`store`, `graph`); it owns everything in between — input parsing,
-state construction, graph invocation, status denormalization, and SSE framing.
+state construction, graph invocation, status denormalization, gate/escalation
+notification, and SSE framing.
 The graph is assembled here (`build_screening_graph`) so `app/main.py` never
 imports the graph builder directly.
 """
@@ -19,6 +20,7 @@ from uuid import uuid4
 from fastapi.encoders import jsonable_encoder
 
 from app.auth import Principal
+from app.config import get_settings
 from app.exceptions import (
     CriteriaRevisionConflictError,
     ScreenerError,
@@ -29,7 +31,7 @@ from app.exceptions import (
 from app.graph.builder import build_graph
 from app.graph.state import ScreeningStatus, event, initial_state
 from app.logging_config import bind_contextvars, get_logger
-from app.services import criteria_edits, sse
+from app.services import criteria_edits, notifications, sse
 from app.services.pdf import extract_eligibility_text
 from app.services.uploads import sanitize_filename
 
@@ -143,17 +145,45 @@ def _match_count(values: dict[str, Any]) -> int:
     return sum(1 for p in cohort if p.get("eligible") and not p.get("needs_review"))
 
 
-async def _record_outcome(store: ScreeningStore, thread_id: str, snapshot: Snapshot) -> None:
-    """Denormalize the finished (or parked) run into the store's summary columns.
+async def _record_outcome(store: ScreeningStore, thread_id: str, snapshot: Snapshot) -> str:
+    """Denormalize the finished (or parked) run into the store's summary columns,
+    returning the status it recorded.
 
     Called once per terminal frame, so the runs index (#51) can render status and
-    counts for every row without loading a checkpoint per screening.
+    counts for every row without loading a checkpoint per screening. The status is
+    handed back rather than recomputed by the caller, so the row the index shows
+    and the notification a reviewer gets (#60) can never disagree about the phase.
     """
+    status = _status_from_snapshot(snapshot)
     await store.set_status(
         thread_id,
-        _status_from_snapshot(snapshot),
+        status,
         criteria_count=_criteria_count(snapshot.values),
         match_count=_match_count(snapshot.values),
+    )
+    return status
+
+
+async def _notify_if_parked(thread_id: str, status: str, snapshot: Snapshot) -> None:
+    """Push a notification when the run stopped somewhere a human has to act (#60).
+
+    Dispatched here — after the outcome is recorded, before the terminal frame is
+    yielded — so it runs on the run's own task rather than a detached one. A
+    fire-and-forget task can be cancelled by a shutdown mid-flight, and moving
+    this after the final yield would skip it precisely when the client has already
+    disconnected, which is the departed reviewer this feature exists to reach.
+
+    The cost is bounded by `NOTIFY_TIMEOUT_SECONDS` and paid only by deployments
+    that opted in: `notify_gate` returns immediately when notifications are off or
+    the status isn't one a person has to act on, and never raises — a webhook
+    outage must not turn a successful screening into an `__error__` frame.
+    """
+    await notifications.notify_gate(
+        get_settings(),
+        thread_id=thread_id,
+        status=status,
+        source_filename=snapshot.values.get("source_filename"),
+        criteria_count=_criteria_count(snapshot.values),
     )
 
 
@@ -210,7 +240,8 @@ async def _graph_frames(
             for node, update in chunk.items():
                 yield sse.update_frame(node, jsonable_encoder(update))
         snapshot = await graph.aget_state(config)
-        await _record_outcome(store, thread_id, snapshot)
+        status = await _record_outcome(store, thread_id, snapshot)
+        await _notify_if_parked(thread_id, status, snapshot)
         yield _terminal_frame(snapshot)
         log.info(f"screening.{operation}_finished")
     except ScreenerError as exc:

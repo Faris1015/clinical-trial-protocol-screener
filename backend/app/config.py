@@ -135,6 +135,32 @@ class Settings(BaseSettings):
     # cookie would simply never be stored there); set true behind TLS.
     auth_cookie_secure: bool = False
 
+    # --- Notify on gate / escalation (#60) ---
+    # Off by default: a deployment opts in, and until it does nothing leaves the
+    # process. When on, a run that parks at the approval gate or escalates pushes
+    # one notification per configured channel (see app/services/notifications.py).
+    notify_enabled: bool = False
+    # Slack-compatible incoming webhook (or any endpoint that accepts a JSON POST).
+    notify_webhook_url: str | None = None
+    # Email recipients, comma-separated. Requires the SMTP settings below.
+    notify_email_to: str = ""
+    notify_email_from: str | None = None
+    notify_smtp_host: str | None = None
+    notify_smtp_port: int = Field(587, ge=1, le=65535)
+    notify_smtp_username: str | None = None
+    notify_smtp_password: str | None = None
+    # STARTTLS on the default submission port. Set false only for a plaintext
+    # relay on a trusted network (a local MTA, or MailHog in dev).
+    notify_smtp_starttls: bool = True
+    # Per-channel ceiling. A notification is dispatched on the run's own task, so
+    # this is also the worst case it can add to a run's completion — small enough
+    # that an unreachable webhook costs a beat, not a stalled reviewer.
+    notify_timeout_seconds: float = Field(5.0, gt=0)
+    # Public base URL of the frontend, e.g. "https://trialgate.example.com". Used
+    # to turn a thread_id into a link a reviewer can click. Unset omits the link
+    # rather than guessing a host.
+    notify_base_url: str | None = None
+
     # --- Pipeline ---
     max_parse_attempts: int = Field(3, ge=1, le=10)
     rules_path: Path = APP_DIR / "rules" / "compliance_rules.yaml"
@@ -172,6 +198,26 @@ class Settings(BaseSettings):
     @property
     def upload_content_type_set(self) -> frozenset[str]:
         return frozenset(t.strip() for t in self.upload_content_types.split(",") if t.strip())
+
+    @property
+    def notify_email_recipient_list(self) -> list[str]:
+        return [addr.strip() for addr in self.notify_email_to.split(",") if addr.strip()]
+
+    @property
+    def notify_email_configured(self) -> bool:
+        """Whether the email channel has everything it needs to send.
+
+        All three are required: a relay to hand the message to, at least one
+        recipient, and an envelope sender (SMTP servers reject a message without
+        one, so defaulting it would only move the failure to the relay).
+        """
+        return bool(
+            self.notify_smtp_host and self.notify_email_recipient_list and self.notify_email_from
+        )
+
+    @property
+    def notify_webhook_configured(self) -> bool:
+        return bool(self.notify_webhook_url)
 
     @model_validator(mode="after")
     def _require_anthropic_key(self) -> "Settings":
@@ -213,6 +259,23 @@ class Settings(BaseSettings):
                 "('email:role:hash' entries — mint a hash with `python -m app.auth hash`), "
                 "or AUTH_DEMO_USERS=true for the demo accounts, "
                 "or AUTH_ENABLED=false to run without authentication."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _require_a_notification_channel(self) -> "Settings":
+        # NOTIFY_ENABLED with nothing to notify *through* is the failure mode this
+        # feature has: it looks configured, reviewers assume they'll be paged, and
+        # every run silently no-ops. Catch it at startup, like the auth-accounts
+        # check — the half-configured email case (a host but no recipients) is the
+        # one most likely to slip through, so name what is missing.
+        if self.notify_enabled and not (
+            self.notify_webhook_configured or self.notify_email_configured
+        ):
+            raise ValueError(
+                "NOTIFY_ENABLED=true requires a channel: set NOTIFY_WEBHOOK_URL, or all of "
+                "NOTIFY_SMTP_HOST + NOTIFY_EMAIL_TO + NOTIFY_EMAIL_FROM for email. "
+                "Set NOTIFY_ENABLED=false to disable notifications."
             )
         return self
 

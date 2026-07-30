@@ -305,6 +305,46 @@ reviewers on the same parked run means the second save gets a 409 rather than
 silently discarding the first's corrections. A finished run is not editable (409)
 — its cohort was already scored against the criteria it had.
 
+### Notify on gate / escalation
+
+A run that parks at the approval gate — or escalates because the Critic couldn't
+converge — stops and waits indefinitely. Neither is an error, so neither shows up
+as one: without an outbound signal the only way to find out is to keep reloading
+the Review Queue. Set `NOTIFY_ENABLED=true` plus at least one channel and each of
+those stops pushes one notification instead.
+
+```bash
+# Slack (or Teams, or any endpoint that takes a JSON POST)
+NOTIFY_ENABLED=true
+NOTIFY_WEBHOOK_URL=https://hooks.slack.com/services/T000/B000/xxxx
+NOTIFY_BASE_URL=https://trialgate.example.com   # makes the message clickable
+
+# ...or email, over SMTP submission
+NOTIFY_ENABLED=true
+NOTIFY_EMAIL_TO=reviewers@example.com,oncall@example.com
+NOTIFY_EMAIL_FROM=trialgate@example.com
+NOTIFY_SMTP_HOST=smtp.example.com
+```
+
+Both channels can be on at once; each is dispatched concurrently under
+`NOTIFY_TIMEOUT_SECONDS`. Three properties are deliberate:
+
+- **Opt-in, and validated.** Off by default, and `NOTIFY_ENABLED=true` with no
+  usable channel fails at startup rather than no-op'ing — a notification setup
+  that looks configured while paging nobody is the failure mode worth catching.
+- **No PHI.** The payload is an explicit allowlist — run id, status, protocol
+  filename, criteria count, link — built from arguments rather than from graph
+  state, so nothing from `matched_patients` or the criteria themselves can leak
+  into Slack or a mail relay. A recipient learns a run needs attention and has to
+  sign in to see anything more.
+- **Never fatal.** Delivery is best-effort: a dead webhook or a refused SMTP
+  connection is logged and counted (`notifications_total{channel,outcome}`), never
+  surfaced — a notification outage must not fail a screening that succeeded.
+
+Only `awaiting_approval` and `escalated` notify. A run that finished or failed on
+its own isn't waiting for anybody, and paging on those is how a channel gets
+muted.
+
 ### Health & readiness
 
 ```bash
@@ -355,6 +395,7 @@ node latencies, Critic rejection rates, and LLM latency end-to-end.
 | `parse_attempts` | histogram | — | How deep the self-correction loop runs per screening |
 | `llm_call_duration_seconds` | histogram | `provider` (`ollama`/`anthropic`) | LLM call latency distribution |
 | `llm_call_failures_total` | counter | `provider` | LLM calls that exhausted retries |
+| `notifications_total` | counter | `channel` (`webhook`/`email`), `outcome` (`sent`/`failed`) | Whether gate/escalation notifications are actually landing |
 
 Nodes are instrumented through the graph's `_instrument` decorator and LLM calls
 through the single `invoke_with_retry` door, so agent bodies stay free of metrics
@@ -522,6 +563,7 @@ backend/
     services/
       screening.py             # Screening use-cases (create/stream/approve/edit/state)
       criteria_edits.py        # Before/after diff of a reviewer's criteria revision
+      notifications.py         # Gate/escalation notifications (webhook + email, PHI-free)
       sse.py                   # Server-Sent Events wire format (one place)
       llm.py, pdf.py           # LLM factory, PDF eligibility-section extraction
   tests/
@@ -677,6 +719,12 @@ with a clear message instead of erroring mid-screening.
 | `AUTH_SESSION_TTL_SECONDS` | `28800` | Session lifetime (8h) |
 | `AUTH_COOKIE_SECURE` | `false` | Add the cookie's `Secure` attribute; set `true` behind TLS |
 | `RATE_LIMIT_LOGIN` | `10/minute` | Per-IP cap on login attempts |
+| `NOTIFY_ENABLED` | `false` | Notify reviewers when a run parks at the gate or escalates; requires a channel below |
+| `NOTIFY_WEBHOOK_URL` | — | Slack-compatible incoming webhook (or any JSON POST endpoint) |
+| `NOTIFY_EMAIL_TO` / `NOTIFY_EMAIL_FROM` / `NOTIFY_SMTP_HOST` | — | Email channel; all three required together |
+| `NOTIFY_SMTP_PORT` / `NOTIFY_SMTP_USERNAME` / `NOTIFY_SMTP_PASSWORD` / `NOTIFY_SMTP_STARTTLS` | `587` / — / — / `true` | SMTP submission settings |
+| `NOTIFY_TIMEOUT_SECONDS` | `5` | Per-channel ceiling; also the most a notification can add to a run |
+| `NOTIFY_BASE_URL` | — | Public frontend URL, used to link to the run; unset omits the link |
 | `MAX_PARSE_ATTEMPTS` | `3` | Parser retries before human escalation (1–10) |
 | `RULES_PATH` | `app/rules/compliance_rules.yaml` | Compliance rules database |
 | `PATIENTS_PATH` | `app/data/patients.json` | Synthetic EHR location |
