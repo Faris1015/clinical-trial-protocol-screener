@@ -73,6 +73,19 @@ class CriteriaRevisionConflictError(ScreenerError):
     http_status = 409
 
 
+class ScreeningNotReportableError(ScreenerError):
+    """A report was requested for a screening that never ran (#56).
+
+    The upload exists but nothing was ever streamed for it, so there is no
+    checkpoint: no criteria, no findings, no execution log. Exporting that would
+    produce a branded page carrying only a filename, which reads as a broken
+    feature rather than as an empty run. Every other phase — parked at the gate,
+    escalated, failed partway, finished — has something to report and is allowed.
+    """
+
+    http_status = 409
+
+
 class PayloadTooLargeError(ScreenerError):
     """An upload exceeded the configured size cap."""
 

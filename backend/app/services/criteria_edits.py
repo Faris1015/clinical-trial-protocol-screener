@@ -49,7 +49,7 @@ def _number(value: Any) -> str:
     return "" if value is None else str(value)
 
 
-def _quantitative_label(criterion: Mapping[str, Any]) -> str:
+def quantitative_label(criterion: Mapping[str, Any]) -> str:
     """e.g. `age >= 18 years`, `egfr between 30–60 mL/min/1.73m2`."""
     high = (
         f"–{_number(criterion.get('value_high'))}" if criterion.get("operator") == "between" else ""
@@ -63,10 +63,25 @@ def _quantitative_label(criterion: Mapping[str, Any]) -> str:
     return " ".join(p for p in parts if p).strip()
 
 
-def _categorical_label(criterion: Mapping[str, Any]) -> str:
+def categorical_label(criterion: Mapping[str, Any]) -> str:
     """e.g. `NSCLC (diagnosis)`, `NOT active infection (condition)`."""
     negated = "NOT " if criterion.get("negated") else ""
     return f"{negated}{criterion.get('value', '')} ({criterion.get('category', '')})"
+
+
+def criterion_label(criterion: Mapping[str, Any]) -> str:
+    """One criterion in its technical one-line form, whichever kind it is.
+
+    Public — and shape-dispatched rather than bucket-dispatched — because the two
+    labellers above are also what the exported report (#56) renders criteria and
+    per-patient verdicts with, and a `criterion_results` entry arrives carrying no
+    bucket to look up. Sharing them is the point: a reviewer comparing a run's
+    report against its edit history must not see the same criterion written two
+    different ways.
+    """
+    return (
+        quantitative_label(criterion) if "attribute" in criterion else categorical_label(criterion)
+    )
 
 
 def _entry(bucket: str, item: Any) -> tuple[str, str]:
@@ -80,9 +95,7 @@ def _entry(bucket: str, item: Any) -> tuple[str, str]:
     if bucket == UNPARSEABLE_BUCKET:
         text = str(item)
         return text.strip().lower(), text
-    label = (
-        _quantitative_label(item) if bucket in QUANTITATIVE_BUCKETS else _categorical_label(item)
-    )
+    label = quantitative_label(item) if bucket in QUANTITATIVE_BUCKETS else categorical_label(item)
     provenance = str(item.get("source_text") or "").strip().lower()
     return provenance or f"label:{label.lower()}", label
 

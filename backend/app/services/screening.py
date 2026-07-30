@@ -27,11 +27,12 @@ from app.exceptions import (
     ScreeningNotApprovableError,
     ScreeningNotEditableError,
     ScreeningNotFoundError,
+    ScreeningNotReportableError,
 )
 from app.graph.builder import build_graph
 from app.graph.state import ScreeningStatus, event, initial_state
 from app.logging_config import bind_contextvars, get_logger
-from app.services import criteria_edits, notifications, sse
+from app.services import criteria_edits, notifications, report, sse
 from app.services.pdf import extract_eligibility_text
 from app.services.uploads import sanitize_filename
 
@@ -52,6 +53,7 @@ __all__ = [
     "approve_screening",
     "build_screening_graph",
     "create_screening",
+    "get_screening_report",
     "get_screening_state",
     "list_screenings",
     "resume_with_edited_criteria",
@@ -569,3 +571,33 @@ async def get_screening_state(store: ScreeningStore, graph: ScreeningGraph, thre
         if record
         else None,
     }
+
+
+async def get_screening_report(
+    store: ScreeningStore, graph: ScreeningGraph, thread_id: str, exporter: Principal
+) -> tuple[str, str]:
+    """One run rendered as a downloadable report (#56): `(filename, html)`.
+
+    Built from `get_screening_state`'s own payload rather than from a second read
+    of the checkpoint, so the exported document and the run detail view are two
+    renderings of one snapshot — a report that disagreed with the screen it was
+    exported from would be worse than no report.
+
+    A screening that was uploaded but never streamed is a 409
+    (`ScreeningNotReportableError`), not an empty document; every other phase has
+    something worth handing off. The `.html`/attachment mechanics belong to the
+    route — this layer returns the document and the name it should be saved under.
+
+    `exporter` is recorded in the *log*, not in the checkpoint: this document
+    carries patient data out of the app, so who took a copy belongs in the same
+    correlated stream as who approved the matching (#50) — but a replay must never
+    write to the run it is replaying, or opening a finished screening would keep
+    amending its state.
+    """
+    payload = await get_screening_state(store, graph, thread_id)
+    if not report.has_reportable_content(payload):
+        raise ScreeningNotReportableError(
+            "This screening has never run, so there is nothing to report — stream it first."
+        )
+    log.info("screening.report_exported", exported_by=exporter.email, exporter_role=exporter.role)
+    return report.report_filename(payload), report.render_report(payload)
