@@ -275,6 +275,36 @@ After approval, the run's state carries `approved_by`, `approved_by_role`, and
 curl -b cookies.txt http://localhost:8000/api/screenings/<thread_id>/state
 ```
 
+### Trace a criterion back to the protocol
+
+Every criterion carries the verbatim sentence it was extracted from — but a
+sentence quoted next to a criterion is still the extraction vouching for itself.
+On the live screening and on a past run's detail page, the criteria sit beside
+the uploaded protocol: **click a criterion and its source passage is highlighted
+and scrolled to** in the document. Passages the extraction accounts for are
+faintly underlined even when nothing is selected, so it is visible at a glance
+how much of the eligibility section was read and how much was skipped.
+
+```bash
+curl -b cookies.txt http://localhost:8000/api/screenings/<thread_id>/protocol
+# → {"thread_id", "source_filename", "text", "spans": [{"source_text", "start", "end", "exact"}]}
+```
+
+The spans are resolved server-side (`app/services/provenance.py`) because the
+match cannot be a plain substring search: PDF extraction wraps a sentence across
+lines, the Parser strips a folded-in header or list marker before storing it, and
+a model occasionally paraphrases the sentence it was told to quote. So the search
+runs on a whitespace-collapsed, casefolded projection of both strings, mapped back
+to real character offsets. Two outcomes are deliberately visible rather than
+smoothed over:
+
+- **Partial match** (`exact: false`) — only the leading run of words could be
+  located. The viewer highlights it and says the passage is approximate.
+- **No match** — the sentence is absent from `spans` entirely, and the viewer says
+  the source could not be found in the protocol, quoting what the extraction
+  claims. A confidently wrong highlight is worse for an audit than no highlight,
+  so a fallback that would keep fewer than five words is refused.
+
 ### Edit and re-run at the gate
 
 The gate is not approve-only. A reviewer looking at a bad threshold, a
@@ -600,6 +630,7 @@ backend/
     services/
       screening.py             # Screening use-cases (create/stream/approve/edit/state)
       criteria_edits.py        # Before/after diff of a reviewer's criteria revision
+      provenance.py            # criterion source_text → character span in the protocol
       report.py                # Self-contained, printable HTML screening report
       notifications.py         # Gate/escalation notifications (webhook + email, PHI-free)
       sse.py                   # Server-Sent Events wire format (one place)
@@ -613,6 +644,7 @@ frontend/
     lib/sse.ts                 # Framing for SSE bodies fetch returns (POST/PATCH)
     components/                # ScreeningRun, AgentCard, CriteriaTable, matches
     components/review/         # Review queue, criteria editor, before/after diff
+    components/provenance/     # Criteria beside the protocol, with source highlighting
     components/report-download.tsx # Export a run as a self-contained HTML report
     types.ts                   # Shared API contract, mirrors the Pydantic schemas
 ```
