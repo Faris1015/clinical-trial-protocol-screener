@@ -94,10 +94,13 @@ def test_the_fallback_keeps_every_word_that_matches():
         "14 days of the first dose of study drug.",
     )
 
-    assert PROTOCOL[span.start : span.end].split() == (
-        "Estimated glomerular filtration rate of at least 30 mL/min/1.73m2, measured within 14 "
-        "days of"
-    ).split()
+    # Whitespace-normalized for the comparison only: the protocol wraps this
+    # sentence, so the highlight itself carries the line break the reader sees.
+    highlighted = " ".join(PROTOCOL[span.start : span.end].split())
+    assert highlighted == (
+        "Estimated glomerular filtration rate of at least 30 mL/min/1.73m2, "
+        "measured within 14 days of"
+    )
     assert span.exact is False
 
 
