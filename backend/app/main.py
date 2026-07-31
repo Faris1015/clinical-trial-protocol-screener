@@ -573,6 +573,24 @@ async def get_state(
     return await screening.get_screening_state(_store(), _graph(), thread_id)
 
 
+@app.get("/api/screenings/{thread_id}/protocol")
+@limiter.limit(lambda: settings.rate_limit_read)
+async def get_protocol(
+    request: Request,
+    thread_id: str,
+    principal: Annotated[Principal, Depends(require_reviewer)],
+) -> dict:
+    """The uploaded protocol text and where each criterion came from in it (#54).
+
+    Returned as JSON rather than as the original upload: the payload carries the
+    resolved `spans` alongside the text, and the two have to describe the same
+    string for a highlight to land on the right passage. The text is rendered as
+    DOM text nodes by the viewer, never as markup — which is what keeps an
+    untrusted upload inert without needing the report route's download headers.
+    """
+    return await screening.get_screening_protocol(_store(), _graph(), thread_id)
+
+
 @app.get("/api/screenings/{thread_id}/report")
 @limiter.limit(lambda: settings.rate_limit_read)
 async def download_report(

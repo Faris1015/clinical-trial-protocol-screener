@@ -5,7 +5,7 @@ import Link from "next/link";
 import { AlertTriangle, CheckCircle2, PencilLine } from "lucide-react";
 import { useScreenerStream } from "@/hooks/useScreenerStream";
 import { AgentCard } from "@/components/AgentCard";
-import { CriteriaTable } from "@/components/CriteriaTable";
+import { CriteriaProvenance } from "@/components/provenance/criteria-provenance";
 import { PatientMatchTable } from "@/components/PatientMatchTable";
 import { ReportDownload } from "@/components/report-download";
 import { Button } from "@/components/ui/button";
@@ -132,7 +132,10 @@ export function ScreeningRun({ threadId }: { threadId: string | null }) {
         </Card>
       )}
 
-      {parsed && <CriteriaTable criteria={parsed} />}
+      {/* The criteria beside the protocol they came from (#54) — the reviewer at
+          the gate below is being asked to vouch for this extraction, so the
+          passage behind each criterion is one click away. */}
+      {parsed && <CriteriaProvenance key={threadId} threadId={threadId} criteria={parsed} />}
 
       {phase === "awaiting_approval" && (
         <Card data-region="banner-approval" className="border-primary/40 bg-primary/10">

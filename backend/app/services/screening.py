@@ -32,7 +32,7 @@ from app.exceptions import (
 from app.graph.builder import build_graph
 from app.graph.state import ScreeningStatus, event, initial_state
 from app.logging_config import bind_contextvars, get_logger
-from app.services import criteria_edits, notifications, report, sse
+from app.services import criteria_edits, notifications, provenance, report, sse
 from app.services.pdf import extract_eligibility_text
 from app.services.uploads import sanitize_filename
 
@@ -53,6 +53,7 @@ __all__ = [
     "approve_screening",
     "build_screening_graph",
     "create_screening",
+    "get_screening_protocol",
     "get_screening_report",
     "get_screening_state",
     "list_screenings",
@@ -570,6 +571,45 @@ async def get_screening_state(store: ScreeningStore, graph: ScreeningGraph, thre
         }
         if record
         else None,
+    }
+
+
+async def get_screening_protocol(
+    store: ScreeningStore, graph: ScreeningGraph, thread_id: str
+) -> dict:
+    """The uploaded protocol text plus each criterion's span within it (#54).
+
+    Provenance stops being a claim the moment a reviewer can see the passage a
+    criterion was read out of, so this pairs the stored upload with resolved
+    character offsets for every distinct `source_text` in the checkpoint.
+
+    The spans are resolved here rather than in the browser for two reasons: the
+    protocol and the criteria are both already in hand on this side, and the
+    matching is fuzzy enough (whitespace-collapsed, with a longest-prefix
+    fallback) to deserve tests. Sentences that cannot be located are absent from
+    `spans` — the caller renders that as "not found in the protocol" rather than
+    highlighting a guess.
+
+    A run with no checkpoint yet is not an error: the upload is exactly what such
+    a run *does* have, so the text comes back with an empty `spans`.
+    """
+    config = await _require_thread(store, thread_id)
+    bind_contextvars(thread_id=thread_id)
+    screening_input = await store.get_input(thread_id)
+    if screening_input is None:
+        raise ScreeningNotFoundError(f"No screening found for thread_id {thread_id}")
+    snapshot = await graph.aget_state(config)
+    criteria = snapshot.values.get("parsed_criteria")
+    text = screening_input.raw_protocol_text
+    spans = provenance.locate_all(text, provenance.source_texts(criteria))
+    return {
+        "thread_id": thread_id,
+        "source_filename": screening_input.source_filename,
+        "text": text,
+        "spans": [
+            {"source_text": s.source_text, "start": s.start, "end": s.end, "exact": s.exact}
+            for s in spans
+        ],
     }
 
 

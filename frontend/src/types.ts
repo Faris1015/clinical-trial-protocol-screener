@@ -25,6 +25,30 @@ export type CriteriaSchema = {
   unparseable: string[];
 };
 
+/**
+ * Where one criterion's `source_text` sits in the protocol (#54) — `[start, end)`
+ * in characters of `ProtocolPayload.text`.
+ *
+ * `exact` is false when only the leading run of words could be located, which
+ * happens when the model paraphrased the tail of a sentence it was told to quote
+ * verbatim; the viewer says so rather than presenting a partial hit as the
+ * sentence itself. A `source_text` that could not be located at all has no span.
+ */
+export type SourceSpan = {
+  source_text: string;
+  start: number;
+  end: number;
+  exact: boolean;
+};
+
+/** `GET /api/screenings/{thread_id}/protocol` — the upload plus its spans (#54). */
+export type ProtocolPayload = {
+  thread_id: string;
+  source_filename: string;
+  text: string;
+  spans: SourceSpan[];
+};
+
 export type AgentEvent = {
   agent: string;
   /** Node outcomes, plus the human-gate ones: `approved` (#50), `edited` (#53). */

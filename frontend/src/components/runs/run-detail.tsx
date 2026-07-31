@@ -6,7 +6,7 @@ import { useSearchParams } from "next/navigation";
 import { AlertTriangle, ArrowLeft, ShieldCheck } from "lucide-react";
 import { AgentCard } from "@/components/AgentCard";
 import { ComplianceFindings } from "@/components/ComplianceFindings";
-import { CriteriaTable } from "@/components/CriteriaTable";
+import { CriteriaProvenance } from "@/components/provenance/criteria-provenance";
 import { CriteriaDiff } from "@/components/review/criteria-diff";
 import { PatientMatchTable } from "@/components/PatientMatchTable";
 import { ReportDownload } from "@/components/report-download";
@@ -211,7 +211,14 @@ export function RunDetail() {
         </section>
       )}
 
-      <CriteriaTable criteria={values.parsed_criteria ?? null} />
+      {/* Provenance (#54): the criteria next to the protocol they were read out
+          of, so an auditor replaying this run can check any one of them against
+          the source passage rather than taking the extraction on trust. */}
+      <CriteriaProvenance
+        key={threadId}
+        threadId={threadId}
+        criteria={values.parsed_criteria ?? null}
+      />
 
       {/* If a reviewer corrected this run's criteria (#53), the replay has to say
           so — the criteria above are theirs, not the parser's, and the cohort below
