@@ -345,6 +345,43 @@ Only `awaiting_approval` and `escalated` notify. A run that finished or failed o
 its own isn't waiting for anybody, and paging on those is how a channel gets
 muted.
 
+### Download a screening report
+
+A screening is only useful if it can leave the app. **Download report** — on a
+run's detail page, and under the cohort on a finished live run — exports the whole
+run as one self-contained HTML document: the extracted criteria beside the
+verbatim protocol sentence each came from, any reviewer revisions, the Critic's
+findings in *both* the plain and the technical layer, who authorized patient
+matching, the full cohort with per-patient verdicts, and the execution log.
+
+```bash
+curl -b cookies.txt -OJ http://localhost:8000/api/screenings/<thread_id>/report
+# → trialgate-report-<protocol>-<run>.html
+```
+
+- **Self-contained, and printable.** No stylesheet, font, script, or image is
+  referenced — the file renders identically from a mail attachment or an evidence
+  folder years later. Print styles (`@page` margins, repeated table headers, no
+  break inside a row) mean **Print → Save as PDF** produces the same document,
+  which is why there is no PDF renderer (WeasyPrint's native stack, or a headless
+  browser) in the images.
+- **Both layers, no toggle.** The app lets a reader pick plain or technical (#52);
+  a document can't ask, so every finding and verdict carries the plain-language
+  sentence *and* the rule id / operator / threshold behind it.
+- **Branded, dated, and disclaimed.** Every report is stamped with its generation
+  time in UTC and carries the synthetic-data disclaimer at the top and in the
+  footer — the one artifact here that can end up somewhere with no app around it.
+- **Rendered from the run's own state.** The document is built from the same
+  `/state` payload the detail view renders, so an exported report cannot disagree
+  with the screen it came from. A screening that was uploaded but never streamed
+  has nothing to report and is a 409.
+
+Unlike a notification, this document *does* carry patient data — that is what it
+is for. It requires a session, is served as an attachment under a locked-down CSP,
+and every string in it is escaped: the criteria and source sentences are
+LLM-rewritten uploaded text, so a protocol containing markup must be text in the
+report, never markup in a page served from the app's origin.
+
 ### Health & readiness
 
 ```bash
@@ -563,6 +600,7 @@ backend/
     services/
       screening.py             # Screening use-cases (create/stream/approve/edit/state)
       criteria_edits.py        # Before/after diff of a reviewer's criteria revision
+      report.py                # Self-contained, printable HTML screening report
       notifications.py         # Gate/escalation notifications (webhook + email, PHI-free)
       sse.py                   # Server-Sent Events wire format (one place)
       llm.py, pdf.py           # LLM factory, PDF eligibility-section extraction
@@ -575,6 +613,7 @@ frontend/
     lib/sse.ts                 # Framing for SSE bodies fetch returns (POST/PATCH)
     components/                # ScreeningRun, AgentCard, CriteriaTable, matches
     components/review/         # Review queue, criteria editor, before/after diff
+    components/report-download.tsx # Export a run as a self-contained HTML report
     types.ts                   # Shared API contract, mirrors the Pydantic schemas
 ```
 

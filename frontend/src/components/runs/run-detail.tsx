@@ -9,6 +9,7 @@ import { ComplianceFindings } from "@/components/ComplianceFindings";
 import { CriteriaTable } from "@/components/CriteriaTable";
 import { CriteriaDiff } from "@/components/review/criteria-diff";
 import { PatientMatchTable } from "@/components/PatientMatchTable";
+import { ReportDownload } from "@/components/report-download";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -160,14 +161,25 @@ export function RunDetail() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="flex flex-wrap items-center gap-2 text-base">
-            {filename}
-            {phase && <Badge variant={statusVariant(phase)}>{statusLabel(phase)}</Badge>}
-          </CardTitle>
-          <p className="text-muted-foreground font-mono text-xs break-all">
-            {threadId}
-            {record ? ` · uploaded ${formatTimestamp(record.created_at)}` : ""}
-          </p>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0">
+              <CardTitle className="flex flex-wrap items-center gap-2 text-base">
+                {filename}
+                {phase && <Badge variant={statusVariant(phase)}>{statusLabel(phase)}</Badge>}
+              </CardTitle>
+              <p className="text-muted-foreground font-mono text-xs break-all">
+                {threadId}
+                {record ? ` · uploaded ${formatTimestamp(record.created_at)}` : ""}
+              </p>
+            </div>
+            {/* The export (#56) belongs on the header, not under the cohort: this
+                is the handoff artifact for the whole run, and it is offered at
+                every phase that produced something — a parked or escalated run's
+                criteria and findings are exactly what gets handed to whoever has
+                to act on it. Hidden only for a run that never streamed, which the
+                API answers with a 409 anyway. */}
+            {!neverRan && <ReportDownload threadId={threadId} size="sm" />}
+          </div>
         </CardHeader>
       </Card>
 

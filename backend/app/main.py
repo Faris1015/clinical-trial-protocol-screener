@@ -573,6 +573,45 @@ async def get_state(
     return await screening.get_screening_state(_store(), _graph(), thread_id)
 
 
+@app.get("/api/screenings/{thread_id}/report")
+@limiter.limit(lambda: settings.rate_limit_read)
+async def download_report(
+    request: Request,
+    thread_id: str,
+    principal: Annotated[Principal, Depends(require_reviewer)],
+) -> Response:
+    """Download one run as a self-contained HTML report (#56).
+
+    Three response headers carry weight beyond the download itself. The document
+    is rendered from a protocol an untrusted party uploaded and an LLM rewrote, and
+    in the demo topology this API shares an origin with the app — so even though
+    `services/report.py` escapes every interpolation, the response is pinned down
+    as a file rather than a page: `attachment` makes the browser save it instead of
+    rendering it in our origin, `nosniff` stops the declared type being second-
+    guessed, and the CSP means that a reference-free document stays reference-free
+    (no script, no network, no frame) if a reader opens it anyway. The report links
+    to nothing and loads nothing, so the policy costs it nothing.
+
+    `principal` is not only the guard here: the report carries patient data out of
+    the app, so the service logs who exported it.
+    """
+    filename, document = await screening.get_screening_report(
+        _store(), _graph(), thread_id, principal
+    )
+    return Response(
+        content=document,
+        media_type="text/html; charset=utf-8",
+        headers={
+            # `report_filename` emits only [A-Za-z0-9._-] (it runs the stored name
+            # back through `sanitize_filename`), so the quoted form needs no
+            # further escaping and cannot inject a header.
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'",
+        },
+    )
+
+
 def mount_frontend(app: FastAPI, dist: Path | None) -> bool:
     """Single-service demo mode: serve the built frontend bundle from this app.
 
