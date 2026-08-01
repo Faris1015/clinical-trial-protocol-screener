@@ -340,6 +340,69 @@ def test_execution_log_is_reported_in_order():
     assert html.index(EVENTS[0]["detail"]) < html.index(EVENTS[1]["detail"])
 
 
+def test_execution_log_names_the_steps_and_the_reviewer_who_cleared_the_gate():
+    """The log is rendered from `services.timeline` (#55), so the document carries
+    the same resolved labels and identities the run detail view shows."""
+    html = render()
+    assert "Router" in html
+    assert "Reviewer" in html
+    assert "Approved" in html
+    # Attributed from the durable approval trail, not from the event's sentence.
+    assert "reviewer@test.local (reviewer)" in html
+    # The gap between two steps, so a reader can see where the run spent its time.
+    assert "+3m 0s" in html
+
+
+def test_execution_log_leads_with_the_shape_of_the_run():
+    html = render(
+        values={
+            "events": [
+                *EVENTS,
+                {
+                    "agent": "parser",
+                    "status": "completed",
+                    "detail": "Extracted (attempt 1)",
+                    "timestamp": "2026-07-30T13:59:10+00:00",
+                },
+                {
+                    "agent": "critic",
+                    "status": "rejected",
+                    "detail": "2 findings (1 blocking)",
+                    "timestamp": "2026-07-30T13:59:12+00:00",
+                },
+                {
+                    "agent": "parser",
+                    "status": "completed",
+                    "detail": "Extracted (attempt 2)",
+                    "timestamp": "2026-07-30T13:59:20+00:00",
+                },
+            ]
+        }
+    )
+    assert "2 extraction attempts" in html
+    assert "1 Critic rejection" in html
+    # Numbered only because this run looped — see `_events_section`.
+    assert "attempt 2" in html
+
+
+def test_a_run_that_never_looped_does_not_number_its_one_attempt():
+    html = render(
+        values={
+            "events": [
+                *EVENTS,
+                {
+                    "agent": "parser",
+                    "status": "completed",
+                    "detail": "Extracted (attempt 1)",
+                    "timestamp": "2026-07-30T13:59:10+00:00",
+                },
+            ]
+        }
+    )
+    assert "attempt 1</div>" not in html
+    assert "extraction attempts" not in html
+
+
 # --- Partial runs -----------------------------------------------------------
 
 

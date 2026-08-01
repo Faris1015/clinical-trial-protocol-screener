@@ -90,3 +90,15 @@ export function formatTimestamp(iso: string): string {
   if (Number.isNaN(at.getTime())) return iso;
   return at.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 }
+
+/**
+ * The wall-clock time alone, to the second — for a list of instants that all
+ * share a date (#55's timeline). Repeating "Jul 31, 2026" on every step of a run
+ * that took nine milliseconds says nothing; the seconds do. The date is stated
+ * once, above the list.
+ */
+export function formatTime(iso: string): string {
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return iso;
+  return at.toLocaleTimeString(undefined, { timeStyle: "medium" });
+}

@@ -375,6 +375,36 @@ Only `awaiting_approval` and `escalated` notify. A run that finished or failed o
 its own isn't waiting for anybody, and paging on those is how a channel gets
 muted.
 
+### Per-run event timeline
+
+Every node appends to an event log in graph state, which read raw is a flat
+sequence of sentences. A past run's detail page renders it as an **event
+timeline** instead: each step in the order it happened, with the retry rounds
+numbered, the Critic's rejections named, the gap since the previous step, and —
+for a human step — who did it. Above the entries, the run's shape in one line:
+`Ran in 3m 4s · 2 extraction attempts · 1 Critic rejection · 1 reviewer revision
+· Authorized by lead@example.com`.
+
+```bash
+curl -b cookies.txt http://localhost:8000/api/screenings/<thread_id>/state
+# → {"values", "pending", "screening",
+#    "timeline": {"entries": [{"label", "outcome", "elapsed", "attempt",
+#                              "revision", "actor", ...}], "summary": {...}}}
+```
+
+- **Derived, never stored.** `app/services/timeline.py` reads the same `events`
+  list the pipeline already writes, so a run checkpointed months ago gains the
+  timeline too — and replaying a run never amends it. Retry rounds are counted
+  from the Parser's own runs, which reproduces the numbering in its `(attempt N)`
+  detail; an edit-and-rerun deliberately spends none, matching the escalation cap.
+- **Identity is correlated, not parsed.** The approver comes from `approved_by`
+  (the durable trail, [B1](../../issues/50)) and the Nth reviewer edit from the
+  Nth `criteria_edits` record ([#53](../../issues/53)) — not from scraping the
+  sentence a node happened to log.
+- **Rendered once, shown twice.** The labels, attempt numbers and elapsed gaps are
+  resolved server-side, so the exported report below prints the same trail rather
+  than a second implementation of it.
+
 ### Download a screening report
 
 A screening is only useful if it can leave the app. **Download report** — on a
@@ -382,7 +412,7 @@ run's detail page, and under the cohort on a finished live run — exports the w
 run as one self-contained HTML document: the extracted criteria beside the
 verbatim protocol sentence each came from, any reviewer revisions, the Critic's
 findings in *both* the plain and the technical layer, who authorized patient
-matching, the full cohort with per-patient verdicts, and the execution log.
+matching, the full cohort with per-patient verdicts, and the event timeline above.
 
 ```bash
 curl -b cookies.txt -OJ http://localhost:8000/api/screenings/<thread_id>/report

@@ -32,7 +32,7 @@ from app.exceptions import (
 from app.graph.builder import build_graph
 from app.graph.state import ScreeningStatus, event, initial_state
 from app.logging_config import bind_contextvars, get_logger
-from app.services import criteria_edits, notifications, provenance, report, sse
+from app.services import criteria_edits, notifications, provenance, report, sse, timeline
 from app.services.pdf import extract_eligibility_text
 from app.services.uploads import sanitize_filename
 
@@ -542,8 +542,8 @@ async def resume_with_edited_criteria(
 
 
 async def get_screening_state(store: ScreeningStore, graph: ScreeningGraph, thread_id: str) -> dict:
-    """The screening's current graph state, its pending (interrupted) nodes, and
-    its store row.
+    """The screening's current graph state, its pending (interrupted) nodes, its
+    event timeline, and its store row.
 
     The `screening` block is not redundant with `values`: a screening that was
     uploaded but never streamed has no checkpoint at all, so `values` is `{}` and
@@ -551,14 +551,23 @@ async def get_screening_state(store: ScreeningStore, graph: ScreeningGraph, thre
     store row always exists, and it is the same row the runs index renders — so
     including it is what keeps a run's detail view from contradicting the list it
     was opened from (#51).
+
+    `timeline` is the audit view of `values["events"]` (#55) — retry rounds,
+    Critic rejections, escalation, and who cleared the gate, resolved into the
+    order they happened. Derived here rather than in the browser and served on
+    this payload rather than behind its own route: everything it reads is already
+    in hand, the derivation deserves tests, and the report exported from this
+    same payload has to tell the same story the screen does.
     """
     config = await _require_thread(store, thread_id)
     bind_contextvars(thread_id=thread_id)
     snapshot = await graph.aget_state(config)
     record = await store.get_record(thread_id)
+    values = jsonable_encoder(snapshot.values)
     return {
-        "values": jsonable_encoder(snapshot.values),
+        "values": values,
         "pending": list(snapshot.next),
+        "timeline": timeline.build_timeline(values),
         # `_require_thread` just passed, so the row is there; guard anyway rather
         # than assert, since the two reads aren't in one transaction.
         "screening": {
