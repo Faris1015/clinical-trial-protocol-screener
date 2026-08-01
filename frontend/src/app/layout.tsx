@@ -3,6 +3,7 @@ import "./globals.css";
 import { ThemeProvider } from "@/components/theme-provider";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthProvider } from "@/components/AuthProvider";
+import { MotionProvider } from "@/components/motion";
 import { AppShell } from "@/components/shell/app-shell";
 
 export const metadata: Metadata = {
@@ -31,17 +32,24 @@ export const metadata: Metadata = {
  * screen, not a sidebar of nav they can't use — and that is a client-side
  * decision. `AuthProvider` sits above it so the shell, the nav's role gating, and
  * the account menu all read one session check.
+ *
+ * `MotionProvider` (#49) is the outermost of the client providers because it is
+ * the only one every animated element must sit under: it loads the animation
+ * features `m.*` renders with and sets the app-wide reduced-motion policy. See
+ * components/motion.tsx for why it is `m` + LazyMotion rather than `motion`.
  */
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" suppressHydrationWarning>
       <body>
         <ThemeProvider>
-          <TooltipProvider>
-            <AuthProvider>
-              <AppShell>{children}</AppShell>
-            </AuthProvider>
-          </TooltipProvider>
+          <MotionProvider>
+            <TooltipProvider>
+              <AuthProvider>
+                <AppShell>{children}</AppShell>
+              </AuthProvider>
+            </TooltipProvider>
+          </MotionProvider>
         </ThemeProvider>
       </body>
     </html>

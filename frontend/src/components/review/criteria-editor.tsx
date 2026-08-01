@@ -6,10 +6,10 @@ import { useSearchParams } from "next/navigation";
 import { AlertTriangle, ArrowLeft, CheckCircle2, Play, RotateCcw, Trash2 } from "lucide-react";
 import { ComplianceFindings } from "@/components/ComplianceFindings";
 import { CriteriaDiff } from "@/components/review/criteria-diff";
+import { CriteriaEditorSkeleton } from "@/components/skeletons";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Skeleton } from "@/components/ui/skeleton";
 import { apiFetch, problemDetail } from "@/lib/api";
 import {
   CATEGORIES,
@@ -332,12 +332,10 @@ export function CriteriaEditor() {
       <div className="space-y-4">
         {backLink}
         {error && alert(error)}
-        {!error && (
-          <div className="space-y-2" aria-hidden="true">
-            <Skeleton className="h-24 w-full" />
-            <Skeleton className="h-40 w-full" />
-          </div>
-        )}
+        {/* Shaped like the page it precedes (#49) — header, then the criteria
+            buckets — so the run lands in place instead of pushing the page
+            about as it arrives. */}
+        {!error && <CriteriaEditorSkeleton />}
       </div>
     );
   }

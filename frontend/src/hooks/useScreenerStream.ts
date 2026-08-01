@@ -25,6 +25,11 @@ export function useScreenerStream(threadId: string | null) {
   const [nodeStates, setNodeStates] = useState<Record<string, NodeState>>({});
   const [phase, setPhase] = useState<Phase>(threadId ? "running" : "idle");
   const [error, setError] = useState<string | null>(null);
+  // The node the most recent frame came from. `nodeStates` is a dictionary and
+  // so has no order, but which node reported *last* is exactly what says where
+  // the graph is — including on the Critic→parser retry loop, where the highest
+  // stage that has ever reported is no longer the newest one (#49).
+  const [lastNode, setLastNode] = useState<string | null>(null);
 
   // Apply one parsed frame to state. Returns true when the frame is terminal
   // (the caller should stop reading / close its source).
@@ -59,6 +64,7 @@ export function useScreenerStream(threadId: string | null) {
           update: { events: [{ agent: "matcher", status: "started", detail, timestamp: "" }] },
         },
       }));
+      setLastNode("matcher");
       return false;
     }
     if (msg.node === "human_escalation") setPhase("failed");
@@ -66,6 +72,7 @@ export function useScreenerStream(threadId: string | null) {
       ...prev,
       [msg.node]: { status: "completed", update: msg.update ?? {} },
     }));
+    setLastNode(msg.node);
     return false;
   }, []);
 
@@ -93,5 +100,5 @@ export function useScreenerStream(threadId: string | null) {
     return () => es.close();
   }, [threadId, applyFrame]);
 
-  return { nodeStates, phase, setPhase, error, setError, applyFrame };
+  return { nodeStates, lastNode, phase, setPhase, error, setError, applyFrame };
 }

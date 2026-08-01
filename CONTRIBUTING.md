@@ -87,6 +87,26 @@ Add UI components with the CLI so `components.json` stays authoritative:
 npx shadcn@latest add <component>
 ```
 
+### Motion and loading states
+
+Animation goes through `src/components/motion.tsx`. Two rules it enforces:
+
+- **Import `m`, never `motion`.** The provider is `LazyMotion … strict`, which
+  loads only the `domAnimation` feature set; a stray `motion.div` throws at
+  render rather than quietly pulling the whole library into a static export.
+  `Reveal` is the shared fade-up entrance — prefer it to a bespoke one.
+- **Motion is opt-out by OS setting.** `MotionConfig reducedMotion="user"` drops
+  every transform when `prefers-reduced-motion` is set, leaving the fade. Any
+  *looping* animation must additionally switch itself off via `useReducedMotion`
+  (see `AgentCard`'s activity bar), and CSS animations use Tailwind's
+  `motion-safe:` variant.
+
+Loading states are shaped placeholders from `src/components/skeletons.tsx`, not
+bare bars: a skeleton should be the same card in the same box as the thing it is
+waiting for, so data arriving is a cross-fade rather than a relayout. Where a
+route has a Suspense fallback and its client component also fetches, both use the
+same skeleton, so the wait doesn't visibly restart at hydration.
+
 ### Git hooks (recommended)
 
 Install once — every commit then runs the same checks CI runs, on staged files:

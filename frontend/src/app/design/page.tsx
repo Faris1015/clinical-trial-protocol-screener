@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
+import { AgentCard } from "@/components/AgentCard";
 import { PageHeader } from "@/components/shell/page-header";
+import { CohortSkeleton, CriteriaSkeleton } from "@/components/skeletons";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -13,6 +15,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import type { NodeState } from "@/hooks/useScreenerStream";
+import type { AgentEvent } from "@/types";
 
 export const metadata: Metadata = { title: "Design kit · TrialGate" };
 
@@ -40,6 +44,14 @@ const TOKENS = [
   { name: "status-warn", cls: "bg-status-warn text-white" },
   { name: "status-fail", cls: "bg-status-fail text-white" },
 ];
+
+/** A one-event node state, so the pipeline cards below can be rendered statically. */
+function agentState(status: AgentEvent["status"], detail: string): NodeState {
+  return {
+    status,
+    update: { events: [{ agent: "demo", status, detail, timestamp: "" }] },
+  };
+}
 
 function Section({
   title,
@@ -208,12 +220,46 @@ export default function DesignPage() {
 
         <Section
           title="Skeleton"
-          description="Loading and not-yet-built placeholders. Animated pulse on the muted token; #49 replaces the pipeline's idle state with these."
+          description="The loading primitive: a pulsing bar on the muted token. The pulse is motion-safe, so it holds still under prefers-reduced-motion. Compose these into the shape of whatever is loading rather than using bare bars — see the next section."
         >
           <div className="space-y-2">
             <Skeleton className="h-8 w-full" />
             <Skeleton className="h-8 w-5/6" />
             <Skeleton className="h-8 w-2/3" />
+          </div>
+        </Section>
+
+        <Section
+          title="Loading placeholders"
+          description="Every wait a screening has, shaped like the thing it is waiting for (#49): same card, same header, same columns, so data arriving is a cross-fade in place instead of the page relayouting under the reader. `RunDetailSkeleton` (not shown — it is a full page) does the same for a past run rehydrating from its checkpoint."
+        >
+          <div className="grid items-start gap-3 lg:grid-cols-2">
+            <CriteriaSkeleton />
+            <CohortSkeleton />
+          </div>
+        </Section>
+
+        <Section
+          title="Pipeline card"
+          description="One agent in the run. `active` marks the node currently executing — the sliver sweeping the bottom edge is the app's only looping animation, and it is switched off (left as a static bar) under prefers-reduced-motion. Status changes cross-fade, so a handoff reads as movement across the row."
+        >
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+            <AgentCard
+              id="router"
+              active={false}
+              state={agentState("completed", "Routed as a phase II oncology protocol")}
+            />
+            <AgentCard
+              id="parser"
+              active={true}
+              state={agentState("started", "Extracting eligibility criteria…")}
+            />
+            <AgentCard id="critic" active={false} />
+            <AgentCard
+              id="matcher"
+              active={false}
+              state={agentState("failed", "Cohort scoring failed")}
+            />
           </div>
         </Section>
 

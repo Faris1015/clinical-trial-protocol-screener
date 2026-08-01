@@ -2,9 +2,12 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import { AnimatePresence } from "motion/react";
 import { AlertTriangle, CheckCircle2, PencilLine } from "lucide-react";
-import { useScreenerStream } from "@/hooks/useScreenerStream";
+import { useScreenerStream, type NodeState } from "@/hooks/useScreenerStream";
 import { AgentCard } from "@/components/AgentCard";
+import { Reveal } from "@/components/motion";
+import { CohortSkeleton, CriteriaSkeleton } from "@/components/skeletons";
 import { CriteriaProvenance } from "@/components/provenance/criteria-provenance";
 import { PatientMatchTable } from "@/components/PatientMatchTable";
 import { ReportDownload } from "@/components/report-download";
@@ -19,6 +22,38 @@ import type { PatientEvaluation } from "@/types";
 const AGENTS = ["router", "parser", "critic", "matcher"];
 
 /**
+ * Which agent is executing right now (#49) — the card that gets the ring and the
+ * activity bar.
+ *
+ * This is not "the last agent we heard from". `stream_mode="updates"` only emits
+ * once a node *finishes*, so the newest frame names the agent that just stopped;
+ * the one actually working is the stage after it, and before any frame has
+ * landed that is the router. Reading it the other way round left the whole
+ * router phase — the first several seconds of every screening — with no card lit
+ * at all, and then lit whichever agent had most recently finished.
+ *
+ * Two exceptions to "the next stage", both of them real graph behaviour:
+ *  - the matcher reports while it is still working (its progress keepalives), so
+ *    a non-terminal status means the sender is itself the running node;
+ *  - a Critic rejection sends the graph back to the parser for another attempt
+ *    rather than on to the matcher.
+ */
+function runningAgent(
+  lastNode: string | null,
+  nodeStates: Record<string, NodeState>
+): string | null {
+  if (!lastNode) return AGENTS[0];
+  const events = nodeStates[lastNode]?.update.events ?? [];
+  const status = events[events.length - 1]?.status;
+  if (status === "started") return lastNode;
+  if (status === "rejected") return "parser";
+  const index = AGENTS.indexOf(lastNode);
+  // An off-pipeline node (human_escalation) is terminal — nothing is running.
+  if (index < 0) return null;
+  return AGENTS[index + 1] ?? null;
+}
+
+/**
  * One screening: the live pipeline, the parsed criteria, the approval gate and
  * the resulting cohort. All of its state belongs to a single `threadId`, so the
  * caller mounts it under `key={threadId}` and a new upload gets a clean instance
@@ -31,8 +66,15 @@ export function ScreeningRun({ threadId }: { threadId: string | null }) {
   const [matches, setMatches] = useState<PatientEvaluation[]>([]);
   const [matchSummary, setMatchSummary] = useState<string | null>(null);
   const [approvedBy, setApprovedBy] = useState<string | null>(null);
+  // True from the moment the approval is accepted until the matcher's stream
+  // ends, which is what the cohort skeleton stands in for (#49). Tracked
+  // separately from `phase`, which is back to "running" for the matcher exactly
+  // as it was for the parse — the two waits look identical to the reducer but
+  // need different placeholders.
+  const [matching, setMatching] = useState(false);
   const { principal } = useAuth();
-  const { nodeStates, phase, setPhase, error, setError, applyFrame } = useScreenerStream(threadId);
+  const { nodeStates, lastNode, phase, setPhase, error, setError, applyFrame } =
+    useScreenerStream(threadId);
 
   async function approve() {
     // Flip to "running" first: it hides the approval banner (and its button),
@@ -61,25 +103,32 @@ export function ScreeningRun({ threadId }: { threadId: string | null }) {
     // this is its local echo, since that write lands before the resume and so
     // never appears in the SSE stream. #55's audit view reads it back via /state.
     setApprovedBy(principal?.email ?? null);
+    setMatching(true);
     // The matcher streams over SSE like the initial phase, but EventSource can't
     // POST — so the body is framed by hand (lib/sse, shared with the edit-and-rerun
     // page) and each frame goes through the same reducer the GET stream uses.
-    await readEventStream(res, (msg) => {
-      if (msg.node === "matcher" && msg.update?.matched_patients) {
-        setMatches(msg.update.matched_patients);
-        // The cohort's plain-language line (#52) rides the same frame as the
-        // evaluations it summarizes, so they can never describe different runs.
-        setMatchSummary(msg.update.match_summary ?? null);
-      }
-      return applyFrame(msg);
-    });
+    try {
+      await readEventStream(res, (msg) => {
+        if (msg.node === "matcher" && msg.update?.matched_patients) {
+          setMatches(msg.update.matched_patients);
+          // The cohort's plain-language line (#52) rides the same frame as the
+          // evaluations it summarizes, so they can never describe different runs.
+          setMatchSummary(msg.update.match_summary ?? null);
+        }
+        return applyFrame(msg);
+      });
+    } finally {
+      // In a `finally` so a stream that dies mid-cohort takes the skeleton down
+      // with it — a placeholder left pulsing over a dead connection promises
+      // patients that are never coming.
+      setMatching(false);
+    }
   }
 
   // Latest parsed criteria streamed from the parser node
   const parsed = nodeStates.parser?.update.parsed_criteria ?? null;
   const complianceSummary = nodeStates.critic?.update.compliance_summary ?? null;
-  const activeAgent =
-    phase === "running" ? ([...AGENTS].reverse().find((a) => nodeStates[a]) ?? null) : null;
+  const activeAgent = phase === "running" ? runningAgent(lastNode, nodeStates) : null;
 
   // Route to the editor (#53) from both human-facing stops — the gate and the
   // blocked/escalated path — rather than only from a failure. Requires a parsed
@@ -106,52 +155,78 @@ export function ScreeningRun({ threadId }: { threadId: string | null }) {
         ))}
       </section>
 
-      {phase === "failed" && (
-        <Card
-          data-region="banner-failed"
-          role="alert"
-          className="border-status-warn/40 bg-status-warn-soft"
-        >
-          <CardContent className="flex flex-col gap-3 text-sm sm:flex-row sm:items-start">
-            <AlertTriangle className="text-status-warn mt-0.5 size-4 shrink-0" aria-hidden="true" />
-            <span className="flex-1">
-              {error ?? "Could not converge — escalated to human review after 3 attempts."}
-              {/* What the Critic actually objected to, in plain language (#52):
-                  a reviewer heading for the editor needs to know what to fix,
-                  and "could not converge" alone does not say. Only for a
-                  compliance escalation — a stream `error` is a different story. */}
-              {!error && complianceSummary && (
-                <span className="block pt-1">{complianceSummary}</span>
-              )}
-            </span>
-            {/* The escalation exit (#53). Offered only when there is an extraction
-                to correct: a run that died in the router or the parser has nothing
-                for a reviewer to edit, and linking there would be a dead end. */}
-            {editorLink}
-          </CardContent>
-        </Card>
-      )}
+      <AnimatePresence>
+        {phase === "failed" && (
+          <Reveal key="banner-failed">
+            <Card
+              data-region="banner-failed"
+              role="alert"
+              className="border-status-warn/40 bg-status-warn-soft"
+            >
+              <CardContent className="flex flex-col gap-3 text-sm sm:flex-row sm:items-start">
+                <AlertTriangle
+                  className="text-status-warn mt-0.5 size-4 shrink-0"
+                  aria-hidden="true"
+                />
+                <span className="flex-1">
+                  {error ?? "Could not converge — escalated to human review after 3 attempts."}
+                  {/* What the Critic actually objected to, in plain language (#52):
+                      a reviewer heading for the editor needs to know what to fix,
+                      and "could not converge" alone does not say. Only for a
+                      compliance escalation — a stream `error` is a different story. */}
+                  {!error && complianceSummary && (
+                    <span className="block pt-1">{complianceSummary}</span>
+                  )}
+                </span>
+                {/* The escalation exit (#53). Offered only when there is an extraction
+                    to correct: a run that died in the router or the parser has nothing
+                    for a reviewer to edit, and linking there would be a dead end. */}
+                {editorLink}
+              </CardContent>
+            </Card>
+          </Reveal>
+        )}
+      </AnimatePresence>
 
       {/* The criteria beside the protocol they came from (#54) — the reviewer at
           the gate below is being asked to vouch for this extraction, so the
-          passage behind each criterion is one click away. */}
-      {parsed && <CriteriaProvenance key={threadId} threadId={threadId} criteria={parsed} />}
+          passage behind each criterion is one click away.
+          Until the parser answers, its skeleton holds the place (#49): the
+          router and the parser are both model calls, so this is the longest
+          blank stretch of a live run. `mode="wait"` because the two are the same
+          box — the placeholder leaves before the real card arrives, instead of
+          the page briefly showing both. */}
+      <AnimatePresence mode="wait" initial={false}>
+        {parsed ? (
+          <Reveal key="criteria">
+            <CriteriaProvenance key={threadId} threadId={threadId} criteria={parsed} />
+          </Reveal>
+        ) : phase === "running" ? (
+          <Reveal key="criteria-skeleton">
+            <CriteriaSkeleton />
+          </Reveal>
+        ) : null}
+      </AnimatePresence>
 
-      {phase === "awaiting_approval" && (
-        <Card data-region="banner-approval" className="border-primary/40 bg-primary/10">
-          <CardContent className="flex flex-col gap-3 text-sm sm:flex-row sm:items-center">
-            <CheckCircle2 className="text-primary size-4 shrink-0" aria-hidden="true" />
-            <span className="flex-1">
-              Compliance checks passed. Review the criteria above, then approve patient matching —
-              or correct them first if the extraction is wrong.
-            </span>
-            {editorLink}
-            <Button onClick={approve} size="lg" className="shrink-0">
-              Approve → run matching
-            </Button>
-          </CardContent>
-        </Card>
-      )}
+      <AnimatePresence>
+        {phase === "awaiting_approval" && (
+          <Reveal key="banner-approval">
+            <Card data-region="banner-approval" className="border-primary/40 bg-primary/10">
+              <CardContent className="flex flex-col gap-3 text-sm sm:flex-row sm:items-center">
+                <CheckCircle2 className="text-primary size-4 shrink-0" aria-hidden="true" />
+                <span className="flex-1">
+                  Compliance checks passed. Review the criteria above, then approve patient matching
+                  — or correct them first if the extraction is wrong.
+                </span>
+                {editorLink}
+                <Button onClick={approve} size="lg" className="shrink-0">
+                  Approve → run matching
+                </Button>
+              </CardContent>
+            </Card>
+          </Reveal>
+        )}
+      </AnimatePresence>
 
       {/* Audit trail: patient data was only touched because a named reviewer
           authorized it (#50). Rendered with the cohort, so results are never shown
@@ -163,7 +238,20 @@ export function ScreeningRun({ threadId }: { threadId: string | null }) {
         </p>
       )}
 
-      {matches.length > 0 && <PatientMatchTable patients={matches} summary={matchSummary} />}
+      {/* The cohort, or the shape of it while the matcher is still scoring —
+          one evaluation per patient, so this is the wait the reviewer has just
+          explicitly asked for by approving the gate. */}
+      <AnimatePresence mode="wait" initial={false}>
+        {matches.length > 0 ? (
+          <Reveal key="cohort">
+            <PatientMatchTable patients={matches} summary={matchSummary} />
+          </Reveal>
+        ) : matching ? (
+          <Reveal key="cohort-skeleton">
+            <CohortSkeleton />
+          </Reveal>
+        ) : null}
+      </AnimatePresence>
 
       {/* Offered here only once the run has finished (#56). The report is built
           server-side from the checkpoint, so exporting mid-run would hand a

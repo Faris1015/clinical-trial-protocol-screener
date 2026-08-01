@@ -11,9 +11,10 @@ import { CriteriaDiff } from "@/components/review/criteria-diff";
 import { PatientMatchTable } from "@/components/PatientMatchTable";
 import { ReportDownload } from "@/components/report-download";
 import { RunTimeline } from "@/components/runs/run-timeline";
+import { Reveal } from "@/components/motion";
+import { RunDetailSkeleton } from "@/components/skeletons";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Skeleton } from "@/components/ui/skeleton";
 import { apiFetch, problemDetail } from "@/lib/api";
 import { formatTimestamp, statusLabel, statusVariant } from "@/lib/runs";
 import type { AgentEvent, ScreeningState } from "@/types";
@@ -111,13 +112,13 @@ export function RunDetail() {
   }
 
   if (!state) {
+    // Shaped like the run it is standing in for (#49) — header, pipeline row,
+    // criteria beside protocol — so the rehydrated run lands in the boxes the
+    // reader is already looking at rather than shoving them down the page.
     return (
       <div className="space-y-4">
         {backLink}
-        <div className="space-y-2" aria-hidden="true">
-          <Skeleton className="h-24 w-full" />
-          <Skeleton className="h-40 w-full" />
-        </div>
+        <RunDetailSkeleton />
       </div>
     );
   }
@@ -143,7 +144,10 @@ export function RunDetail() {
   const neverRan = events.length === 0 && !values.parsed_criteria;
 
   return (
-    <div className="space-y-4" data-region="run-detail" data-phase={phase}>
+    // The whole replay fades up as one block (#49) rather than section by
+    // section: `GET /state` fills every card below from the same response, so
+    // staggering them would invent a sequence the data never had.
+    <Reveal className="space-y-4" data-region="run-detail" data-phase={phase}>
       {backLink}
 
       <Card>
@@ -239,6 +243,6 @@ export function RunDetail() {
           reviewer behind each human step attributed. Derived server-side, so this
           is the same trail the exported report prints. */}
       <RunTimeline timeline={state.timeline} />
-    </div>
+    </Reveal>
   );
 }
