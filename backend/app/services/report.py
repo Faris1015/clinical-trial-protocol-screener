@@ -45,6 +45,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
+from app.services import timeline
 from app.services.criteria_edits import criterion_label
 from app.services.uploads import sanitize_filename
 
@@ -506,18 +507,82 @@ def _cohort_section(values: Mapping[str, Any]) -> str:
     )
 
 
+# How each step's outcome reads as a tag. `rejected`/`escalated` are the Critic
+# pushing work back and `edited` is a reviewer correcting it — neither is a
+# failure, and only `failed` is terminal-bad. Mirrors the run detail view's
+# `outcomeVariant` (frontend/src/components/runs/run-timeline.tsx).
+_OUTCOME_TAGS = {
+    "completed": "pass",
+    "approved": "pass",
+    "failed": "fail",
+    "rejected": "warn",
+    "escalated": "warn",
+    "edited": "warn",
+}
+
+
+def _timeline_lead(summary: timeline.TimelineSummary) -> str:
+    """The run's shape in one line, above the log (#55).
+
+    Only the figures that say something: a run that never looped, was never
+    edited and never escalated is the normal case and gets none of those clauses
+    rather than a row of zeros. The counts are this process's own, but they go
+    through `_esc` like every other interpolation — the invariant this module
+    relies on is that there are no exceptions to check for.
+    """
+    parts: list[str] = []
+    if summary["duration"]:
+        parts.append(f"Ran in {_esc(summary['duration'])}")
+    if summary["attempts"] > 1:
+        parts.append(f"{_esc(summary['attempts'])} extraction attempts")
+    rejections = summary["critic_rejections"]
+    if rejections:
+        parts.append(f"{_esc(rejections)} Critic rejection{'s' if rejections != 1 else ''}")
+    revisions = summary["revisions"]
+    if revisions:
+        parts.append(f"{_esc(revisions)} reviewer revision{'s' if revisions != 1 else ''}")
+    if summary["escalated"]:
+        parts.append("escalated for human review")
+    return f"<p>{' · '.join(parts)}.</p>" if parts else ""
+
+
 def _events_section(values: Mapping[str, Any]) -> str:
-    """The run's own execution log, in order — what each agent did, and when."""
-    rows = [
-        f"<tr><td>{_esc(_timestamp(entry.get('timestamp')))}</td>"
-        f"<td>{_esc(entry.get('agent'))}</td>"
-        f"<td>{_esc(entry.get('status'))}</td>"
-        f"<td>{_esc(entry.get('detail'))}</td></tr>"
-        for entry in (_mapping(item) for item in _items(values, "events"))
-    ]
+    """The run's execution timeline, in order — who did what, when (#55).
+
+    Built by `services.timeline` rather than walked here, so the document and the
+    run detail view are two renderings of one derivation: the attempt numbers, the
+    elapsed gaps and the reviewer identities all come out the same in both.
+    """
+    trail = timeline.build_timeline(values)
+    # Number the retry rounds only for a run that actually looped: on the common
+    # single-attempt run "attempt 1" on two rows is noise, not provenance.
+    numbered = trail["summary"]["attempts"] > 1
+    rows: list[str] = []
+    for entry in trail["entries"]:
+        # Attempt number for a step inside the retry loop, the acting reviewer for
+        # a human step — the two things a flat log leaves the reader to infer.
+        qualifier = ""
+        if entry["attempt"] and numbered:
+            qualifier = f"attempt {entry['attempt']}"
+        elif entry["actor"]:
+            role = f" ({entry['actor_role']})" if entry["actor_role"] else ""
+            qualifier = f"{entry['actor']}{role}"
+        if entry["revision"]:
+            qualifier = f"revision {entry['revision']}" + (f" · {qualifier}" if qualifier else "")
+        rows.append(
+            f"<tr><td>{_esc(_timestamp(entry['timestamp']))}"
+            f'<div class="detail">{_esc(entry["elapsed"])}</div></td>'
+            f"<td>{_esc(entry['label'])}"
+            f'<div class="detail">{_esc(qualifier)}</div></td>'
+            f"<td>{_tag(entry['outcome'], _OUTCOME_TAGS.get(entry['status'], 'plain'))}</td>"
+            f"<td>{_esc(entry['detail'])}</td></tr>"
+        )
+    table = _table(("When", "Step", "Outcome", "Detail"), rows)
+    if not table:
+        return ""
     return _section(
         "Execution log",
-        _table(("When", "Agent", "Outcome", "Detail"), rows),
+        _timeline_lead(trail["summary"]) + table,
         region="report-events",
     )
 

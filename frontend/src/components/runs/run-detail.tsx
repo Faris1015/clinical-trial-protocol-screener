@@ -10,6 +10,7 @@ import { CriteriaProvenance } from "@/components/provenance/criteria-provenance"
 import { CriteriaDiff } from "@/components/review/criteria-diff";
 import { PatientMatchTable } from "@/components/PatientMatchTable";
 import { ReportDownload } from "@/components/report-download";
+import { RunTimeline } from "@/components/runs/run-timeline";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -28,20 +29,6 @@ function latestEventPerAgent(events: AgentEvent[]): Record<string, AgentEvent> {
   const latest: Record<string, AgentEvent> = {};
   for (const entry of events) latest[entry.agent] = entry;
   return latest;
-}
-
-function eventVariant(status: AgentEvent["status"]): "pass" | "fail" | "warn" | "secondary" {
-  switch (status) {
-    case "completed":
-      return "pass";
-    case "failed":
-      return "fail";
-    case "rejected":
-    case "escalated":
-      return "warn";
-    default:
-      return "secondary";
-  }
 }
 
 /**
@@ -247,28 +234,11 @@ export function RunDetail() {
 
       <PatientMatchTable patients={matches} summary={values.match_summary} />
 
-      {events.length > 0 && (
-        <Card data-region="run-events">
-          <CardHeader>
-            <CardTitle className="text-base">Execution log</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <ol className="space-y-2.5">
-              {events.map((entry, i) => (
-                <li key={i} className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-sm">
-                  <Badge variant={eventVariant(entry.status)} className="uppercase">
-                    {entry.agent}
-                  </Badge>
-                  <span className="min-w-0 flex-1">{entry.detail}</span>
-                  <span className="text-muted-foreground shrink-0 text-xs">
-                    {entry.timestamp ? formatTimestamp(entry.timestamp) : ""}
-                  </span>
-                </li>
-              ))}
-            </ol>
-          </CardContent>
-        </Card>
-      )}
+      {/* The audit view (#55): every agent transition in the order it happened,
+          with the retry rounds numbered, the Critic's rejections named and the
+          reviewer behind each human step attributed. Derived server-side, so this
+          is the same trail the exported report prints. */}
+      <RunTimeline timeline={state.timeline} />
     </div>
   );
 }

@@ -58,6 +58,53 @@ export type AgentEvent = {
 };
 
 /**
+ * One step of a run's audit timeline (#55) — derived server-side from the same
+ * `events` log, so the run detail view and the exported report tell one story.
+ *
+ * `label`, `outcome` and `elapsed` arrive already rendered (`"Regulatory
+ * Critic"`, `"Rejected"`, `"+1.5s"`); `agent`/`status`/`timestamp` are the raw
+ * values behind them, kept for data attributes and colour mapping. `attempt` is
+ * the retry round a Parser/Critic step belongs to and 0 for every other step;
+ * `revision` is the criteria revision an `edited` step produced, 0 otherwise;
+ * `actor` names the human behind a human step and is empty for machine steps.
+ */
+export type TimelineEntry = {
+  seq: number;
+  agent: string;
+  label: string;
+  status: AgentEvent["status"] | string;
+  outcome: string;
+  detail: string;
+  timestamp: string;
+  elapsed: string;
+  attempt: number;
+  revision: number;
+  actor: string;
+  actor_role: string;
+};
+
+/** The run's shape in numbers, above the timeline's entries (#55). */
+export type TimelineSummary = {
+  started_at: string;
+  ended_at: string;
+  /** Rendered span from the first event to the last, e.g. `"3m 4s"`. */
+  duration: string;
+  /** Parser runs — more than one means the Critic sent the extraction back. */
+  attempts: number;
+  critic_rejections: number;
+  revisions: number;
+  escalated: boolean;
+  approved_by: string;
+  approved_by_role: string;
+  approved_at: string;
+};
+
+export type RunTimeline = {
+  entries: TimelineEntry[];
+  summary: TimelineSummary;
+};
+
+/**
  * One field-level difference between two revisions of the criteria (#53).
  *
  * `before`/`after` are labels rendered by the backend rather than raw criteria:
@@ -199,6 +246,12 @@ export type ScreeningState = {
   };
   /** Nodes the graph is parked before — non-empty means it's at the approval gate. */
   pending: string[];
+  /**
+   * The run's audit timeline (#55), derived from `values.events` by the API.
+   * Optional so a payload from an older build renders the rest of the page
+   * instead of failing on a missing key.
+   */
+  timeline?: RunTimeline;
   /**
    * The same metadata row the runs index shows. Present even when the run has
    * no checkpoint yet (uploaded but never streamed), which is exactly when
