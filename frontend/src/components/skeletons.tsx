@@ -198,6 +198,44 @@ export function RulesSkeleton() {
 }
 
 /**
+ * The metrics summary (#58) while it fetches the domain counters.
+ *
+ * Shaped like the three panels: a titled card with a caption, then rows of
+ * figure-plus-bar. Four rows against the funnel's three and the breakdown's
+ * one-per-rule — enough to hold the fold without promising a length, since how
+ * many rules an instance has ever blocked on is not knowable up front.
+ */
+export function MetricsSkeleton() {
+  return (
+    <Placeholder region="metrics-skeleton" label="Loading the screening metrics…">
+      <div className="grid items-start gap-3 lg:grid-cols-2">
+        {[0, 1].map((panel) => (
+          <Card key={panel}>
+            <CardHeader className="gap-2">
+              <Skeleton className="h-5 w-40" />
+              <Skeleton className="h-3 w-52 max-w-full" />
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {[0, 1, 2, 3].map((row) => (
+                // Label line then the bar — the same two-line row `MeterRow`
+                // renders, so the numbers land without the card resizing.
+                <div key={row} className="space-y-1.5">
+                  <div className="flex items-center gap-2">
+                    <Skeleton className="h-4 flex-1" />
+                    <Skeleton className="h-4 w-8" />
+                  </div>
+                  <Skeleton className="h-1.5 w-full rounded-full" />
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+    </Placeholder>
+  );
+}
+
+/**
  * The edit-and-rerun page (#53) while it rehydrates the run being corrected —
  * the same `GET /state` wait as the replay, opening on the same run header and
  * then the criteria grouped into their editable buckets.

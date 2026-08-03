@@ -14,12 +14,20 @@ duplicate-registration error. Nothing else in the codebase constructs a metric
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from prometheus_client import Counter, Histogram
 
 if TYPE_CHECKING:
     from app.graph.state import ScreenerState
+
+# The epoch every counter below covers. They are created at import — once per
+# process, before the first request — and prometheus_client holds their values in
+# memory, so a restart resets them to zero. Anything that *reports* these numbers
+# has to say which window they describe (see services/metrics_summary.py, #58);
+# Prometheus itself works this out from the `_created` samples in the exposition.
+COUNTERS_SINCE = datetime.now(UTC)
 
 # Terminal `current_step` values a screening run can end on. Counted once per
 # run in `record_node_metrics` — the parse/critic loop's intermediate steps
