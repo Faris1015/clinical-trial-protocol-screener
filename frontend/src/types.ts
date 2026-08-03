@@ -224,6 +224,30 @@ export type ScreeningPage = {
   offset: number;
 };
 
+/**
+ * One file's outcome from `POST /api/screenings/batch` (#61).
+ *
+ * Exactly one of `thread_id` and `error` is set: the file became a screening, or
+ * it was refused (an unreadable PDF, a disallowed type, one over the size cap)
+ * while the rest of the batch went through. `error`/`detail` are the same pair
+ * every API rejection carries, so a refused file renders like a failed single
+ * upload. `filename` is the server's sanitized name — the one history will show —
+ * and the items echo the order the files were submitted in.
+ */
+export type BatchItem = {
+  filename: string;
+  thread_id: string | null;
+  error: string | null;
+  detail: string | null;
+};
+
+/** `POST /api/screenings/batch` — one item per submitted file, plus the tally. */
+export type BatchCreated = {
+  items: BatchItem[];
+  created: number;
+  rejected: number;
+};
+
 /** One issue the Critic raised — `reject` blocks screening, `warn` is advisory. */
 export type ComplianceFinding = {
   rule_id: string;

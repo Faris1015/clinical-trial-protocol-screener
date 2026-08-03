@@ -98,6 +98,18 @@ class UnsupportedMediaTypeError(ScreenerError):
     http_status = 415
 
 
+class InvalidBatchError(ScreenerError):
+    """A batch upload carried more protocols than one submission may (#61).
+
+    Distinct from a per-file rejection: an unreadable or disallowed document is
+    reported as that item's own error and the rest of the batch still screens
+    (see services/screening.create_screening_batch). This is the whole submission
+    being refused before any of it is processed.
+    """
+
+    http_status = 422
+
+
 class TooManyActiveScreeningsError(ScreenerError):
     """Every concurrency slot is in use; the caller should retry shortly."""
 

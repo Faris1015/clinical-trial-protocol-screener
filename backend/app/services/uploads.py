@@ -24,6 +24,24 @@ class Readable(Protocol):
     async def read(self, size: int = -1) -> bytes: ...
 
 
+class UploadedFile(Readable, Protocol):
+    """A whole upload: its bytes plus the two attacker-controlled hints the edge
+    checks them against.
+
+    `Readable` is enough for one caller that already holds the name and type
+    (the single-upload route reads them off the request itself). The batch path
+    (#61) validates a *sequence* of uploads, so it needs the name and type to
+    travel with the bytes rather than as parallel argument lists — hence this
+    narrow extension rather than a dependency on the concrete UploadFile.
+    """
+
+    @property
+    def filename(self) -> str | None: ...
+
+    @property
+    def content_type(self) -> str | None: ...
+
+
 # Read the multipart part in bounded chunks so a hostile upload never buffers
 # more than one chunk past the cap before we abort.
 _CHUNK_BYTES = 64 * 1024

@@ -2,57 +2,103 @@
 
 import { useState } from "react";
 import { AlertTriangle, Upload } from "lucide-react";
+import { BatchScreening } from "@/components/batch/batch-screening";
 import { ScreeningRun } from "@/components/ScreeningRun";
 import { PageHeader } from "@/components/shell/page-header";
 import { Card, CardContent } from "@/components/ui/card";
 import { apiFetch, problemDetail } from "@/lib/api";
+import { BATCH_MAX_FILES } from "@/lib/batch";
+import type { BatchCreated } from "@/types";
 
 /**
- * New-screening route: upload a protocol, then watch that screening run. A client
- * component end to end — every byte of state below comes from a live SSE
- * connection, so there is nothing for the server to render ahead of time.
+ * New-screening route: upload one protocol and watch it run, or several and watch
+ * the batch (#61). A client component end to end — every byte of state below comes
+ * from a live SSE connection, so there is nothing for the server to render ahead of
+ * time.
+ *
+ * One file and many files are two views rather than one generalized view: a single
+ * screening shows its pipeline, criteria, provenance and approval gate in full,
+ * and that is exactly what does not scale to ten of them side by side. The upload
+ * control is shared, so the reviewer makes no choice up front — the number of
+ * files they pick decides which view they get.
  */
 export default function NewScreeningPage() {
   const [threadId, setThreadId] = useState<string | null>(null);
+  const [batch, setBatch] = useState<BatchCreated | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  // Bumped per submission and used as the batch view's key, so re-uploading the
+  // same set of files mounts a fresh batch instead of leaving the finished one on
+  // screen (the previous response object would otherwise be shallow-equal enough
+  // to keep its rows).
+  const [submission, setSubmission] = useState(0);
 
   async function upload(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    // Clear the input now that the file is captured. A file input only fires
+    const files = Array.from(e.target.files ?? []);
+    if (files.length === 0) return;
+    // Clear the input now that the files are captured. A file input only fires
     // `change` when its value actually changes, so without this, re-selecting the
     // same protocol — the obvious way to retry a failed upload — is a silent
     // no-op.
     e.target.value = "";
     setUploadError(null);
 
+    // Refused here as well as by the API: uploading thirty documents only to be
+    // told the limit is ten wastes the upload and the reviewer's time.
+    if (files.length > BATCH_MAX_FILES) {
+      setUploadError(
+        `Select at most ${BATCH_MAX_FILES} protocols at once — this batch has ${files.length}. ` +
+          "Split it into smaller batches."
+      );
+      return;
+    }
+
+    const single = files.length === 1;
     const body = new FormData();
-    body.append("file", file);
+    // Two endpoints, one field name each: `file` for a single screening, repeated
+    // `files` for a batch. A one-file batch would work, but it would trade the live
+    // pipeline view for a one-row table, which is a worse answer to "screen this
+    // protocol".
+    for (const file of files) body.append(single ? "file" : "files", file);
+
     let res: Response;
     try {
-      res = await apiFetch("/api/screenings", { method: "POST", body });
+      res = await apiFetch(single ? "/api/screenings" : "/api/screenings/batch", {
+        method: "POST",
+        body,
+      });
     } catch {
       setUploadError("Could not reach the server. Check your connection and try again.");
       return;
     }
     if (!res.ok) {
       // Every rejection the API knows how to describe (401 expired session, 413
-      // too large, 415 wrong type, 422 unreadable document, 429 rate limited, 503
-      // backend down) arrives as {error, detail}. Surface it and leave any
-      // screening already on screen untouched — a failed upload started nothing,
-      // so it should not look like it wiped the previous run.
+      // too large, 415 wrong type, 422 unreadable document or too many files, 429
+      // rate limited, 503 backend down) arrives as {error, detail}. Surface it and
+      // leave any screening already on screen untouched — a failed upload started
+      // nothing, so it should not look like it wiped the previous run.
       setUploadError(await problemDetail(res, "Upload failed"));
       return;
     }
-    const { thread_id } = (await res.json()) as { thread_id: string };
-    setThreadId(thread_id);
+
+    setSubmission((n) => n + 1);
+    if (single) {
+      const { thread_id } = (await res.json()) as { thread_id: string };
+      setBatch(null);
+      setThreadId(thread_id);
+      return;
+    }
+    // A batch answers 200 even when some files were refused — the accepted ones
+    // are already screening. The view lists both, so the error card above stays
+    // for whole-submission failures only.
+    setThreadId(null);
+    setBatch((await res.json()) as BatchCreated);
   }
 
   return (
     <>
       <PageHeader
         title="New Screening"
-        description="Upload a trial protocol to parse its eligibility criteria and match a cohort."
+        description="Upload one or more trial protocols to parse their eligibility criteria and match a cohort."
       />
 
       <div className="space-y-4">
@@ -71,9 +117,17 @@ export default function NewScreeningPage() {
           data-region="upload"
         >
           <Upload className="text-muted-foreground size-5" aria-hidden="true" />
-          <span className="text-sm font-medium">Upload protocol</span>
-          <span className="text-muted-foreground text-xs">PDF, Markdown or plain text</span>
-          <input type="file" accept=".pdf,.md,.txt" onChange={upload} className="sr-only" />
+          <span className="text-sm font-medium">Upload protocols</span>
+          <span className="text-muted-foreground text-xs">
+            PDF, Markdown or plain text · up to {BATCH_MAX_FILES} at once
+          </span>
+          <input
+            type="file"
+            accept=".pdf,.md,.txt"
+            multiple
+            onChange={upload}
+            className="sr-only"
+          />
         </label>
 
         {uploadError && (
@@ -92,9 +146,15 @@ export default function NewScreeningPage() {
           </Card>
         )}
 
-        {/* Keyed by thread: a second upload mounts a fresh run rather than mixing
-            the new stream's frames into the previous screening's state. */}
-        <ScreeningRun key={threadId ?? "idle"} threadId={threadId} />
+        {/* Keyed by submission: a second upload mounts a fresh view rather than
+            mixing the new stream's frames into the previous screening's state. The
+            idle pipeline is what an unused page shows, so the single-run view holds
+            the floor until a batch replaces it. */}
+        {batch ? (
+          <BatchScreening key={`batch-${submission}`} created={batch} />
+        ) : (
+          <ScreeningRun key={threadId ?? "idle"} threadId={threadId} />
+        )}
       </div>
     </>
   );

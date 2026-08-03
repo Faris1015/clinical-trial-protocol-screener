@@ -12,7 +12,7 @@ imports the graph builder directly.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 from uuid import uuid4
@@ -23,18 +23,26 @@ from app.auth import Principal
 from app.config import get_settings
 from app.exceptions import (
     CriteriaRevisionConflictError,
+    ExtractionError,
+    PayloadTooLargeError,
     ScreenerError,
     ScreeningNotApprovableError,
     ScreeningNotEditableError,
     ScreeningNotFoundError,
     ScreeningNotReportableError,
+    UnsupportedMediaTypeError,
 )
 from app.graph.builder import build_graph
 from app.graph.state import ScreeningStatus, event, initial_state
 from app.logging_config import bind_contextvars, get_logger
 from app.services import criteria_edits, notifications, provenance, report, sse, timeline
 from app.services.pdf import extract_eligibility_text
-from app.services.uploads import sanitize_filename
+from app.services.uploads import (
+    UploadedFile,
+    read_upload_capped,
+    sanitize_filename,
+    validate_content_type,
+)
 
 if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
@@ -53,6 +61,7 @@ __all__ = [
     "approve_screening",
     "build_screening_graph",
     "create_screening",
+    "create_screening_batch",
     "get_screening_protocol",
     "get_screening_report",
     "get_screening_state",
@@ -298,6 +307,95 @@ async def create_screening(
     # PHI hygiene: log the size of the upload, never its contents.
     log.info("screening.created", source_filename=safe_filename, text_chars=len(text))
     return thread_id
+
+
+# The per-file rejections a batch reports without failing: "this document is not
+# one we can screen". Everything else a create can raise — a store outage
+# (DataStoreError), an unexpected crash — is about the server rather than the
+# file, so it propagates and fails the whole submission instead of being reported
+# ten times as ten bad protocols.
+_BATCH_ITEM_ERRORS = (UnsupportedMediaTypeError, PayloadTooLargeError, ExtractionError)
+
+
+async def create_screening_batch(
+    store: ScreeningStore,
+    files: Sequence[UploadedFile],
+    *,
+    allowed_content_types: frozenset[str],
+    max_upload_bytes: int,
+    max_pdf_pages: int | None = None,
+    max_text_chars: int | None = None,
+) -> dict:
+    """Turn several uploaded protocols into several screenings, one submission (#61).
+
+    Each file becomes its own thread — the same `create_screening` the single
+    upload route calls, so a batched run is indistinguishable from an individually
+    uploaded one everywhere downstream: the runs index, the review queue, the
+    report. There is deliberately no batch entity in the store; grouping N runs
+    under a batch id would invent a second thing to navigate, and what a
+    coordinator needs is the N runs.
+
+    **Partial success is the contract.** A batch of eight protocols where the
+    third is a scanned PDF with no extractable text must still screen the other
+    seven, so the three per-file rejections (`_BATCH_ITEM_ERRORS`) are reported
+    per item and the response is a 200 either way. `items` echoes the submission's
+    order, one entry per file, each carrying `thread_id` or `{error, detail}` —
+    the same error/detail pair the HTTP contract uses, so a client renders a
+    rejected file exactly as it renders a failed single upload.
+
+    Files are processed one at a time rather than concurrently: PDF extraction is
+    CPU-bound (offloaded per file to a thread), and ten of them at once would put
+    the event loop's threadpool under a spike that every other in-flight request
+    pays for. The wait is the reviewer's own upload, and they are the one who
+    asked for ten.
+
+    Nothing is *run* here. Like a single upload, each screening only executes when
+    a client streams it (`GET /api/screenings/{id}/stream`), which is what keeps
+    the concurrency gate — not the size of someone's file picker — in charge of how
+    many graph runs are in flight.
+    """
+    items: list[dict[str, Any]] = []
+    for file in files:
+        # Sanitized up front so the echoed name is safe even on the paths that
+        # never reach the store (a 415 rejection still names the file back).
+        safe_filename = sanitize_filename(file.filename)
+        try:
+            validate_content_type(file.content_type, file.filename, allowed_content_types)
+            raw = await read_upload_capped(file, max_upload_bytes)
+            thread_id = await create_screening(
+                store,
+                file.filename,
+                raw,
+                content_type=file.content_type,
+                max_pdf_pages=max_pdf_pages,
+                max_text_chars=max_text_chars,
+            )
+        except _BATCH_ITEM_ERRORS as exc:
+            log.warning(
+                "screening.batch_item_rejected",
+                source_filename=safe_filename,
+                error=type(exc).__name__,
+                detail=str(exc),
+            )
+            items.append(
+                {
+                    "filename": safe_filename,
+                    "thread_id": None,
+                    "error": type(exc).__name__,
+                    "detail": str(exc),
+                }
+            )
+            continue
+        items.append(
+            {"filename": safe_filename, "thread_id": thread_id, "error": None, "detail": None}
+        )
+
+    created = sum(1 for item in items if item["thread_id"])
+    rejected = len(items) - created
+    # One line per submission, with the split: each rejection also logs its own
+    # warning above, but this is what says whether a batch was mostly refused.
+    log.info("screening.batch_created", files=len(items), created=created, rejected=rejected)
+    return {"items": items, "created": created, "rejected": rejected}
 
 
 async def list_screenings(

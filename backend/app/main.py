@@ -46,7 +46,12 @@ from app.auth import (
     session_secret,
 )
 from app.config import get_settings
-from app.exceptions import InvalidCredentialsError, PayloadTooLargeError, ScreenerError
+from app.exceptions import (
+    InvalidBatchError,
+    InvalidCredentialsError,
+    PayloadTooLargeError,
+    ScreenerError,
+)
 from app.health import app_version, readiness
 from app.logging_config import bind_contextvars, clear_contextvars, configure_logging, get_logger
 from app.persistence import Persistence, ScreeningStore, open_persistence
@@ -70,6 +75,14 @@ _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 # turns a cheap read into a full table scan serialized into a single response.
 DEFAULT_PAGE_SIZE = 25
 MAX_PAGE_SIZE = 100
+
+# How many protocols one batch submission may carry (#61). The cap is the point:
+# the multipart body is parsed before a handler runs, so an uncapped `list[UploadFile]`
+# would let one request spool an arbitrary number of documents to disk and then hand
+# the pipeline an arbitrary amount of PDF extraction to do. Ten covers the realistic
+# case — a coordinator dropping in a trial's worth of protocols — and a larger set is
+# two submissions.
+MAX_BATCH_FILES = 10
 
 # Ceiling on an edited extraction (#53), measured on its JSON form. Unlike an
 # upload — which `read_upload_capped` bounds — a JSON body has no size gate of its
@@ -400,20 +413,29 @@ async def list_users(
 # --- Screenings -------------------------------------------------------------
 
 
+def _reject_oversized_body(request: Request, max_bytes: int) -> None:
+    """Turn away an upload from its *declared* size, before anything reads it.
+
+    A 100 MB spam POST is refused in well under a second this way — nothing here
+    parses, extracts or persists it. It is a fast path, not the guard:
+    `read_upload_capped` is what bounds a spoofed or absent Content-Length, per
+    file. The slack covers the multipart framing (boundaries, part headers) that
+    rides along with the file bytes.
+    """
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > max_bytes + 8192:
+        raise PayloadTooLargeError(
+            f"Upload exceeds the {max_bytes} byte limit.",
+            headers={"Connection": "close"},
+        )
+
+
 @app.post("/api/screenings")
 @limiter.limit(lambda: settings.rate_limit_create)
 async def create_screening(
     request: Request, file: UploadFile, principal: Annotated[Principal, Depends(require_reviewer)]
 ) -> dict:
-    # Reject an oversized upload from its declared size before touching the body,
-    # so a 100 MB spam POST is turned away in well under a second (the streamed
-    # read below is the exact guard for a spoofed/absent Content-Length).
-    declared = request.headers.get("content-length")
-    if declared and declared.isdigit() and int(declared) > settings.max_upload_bytes + 8192:
-        raise PayloadTooLargeError(
-            f"Upload exceeds the {settings.max_upload_bytes} byte limit.",
-            headers={"Connection": "close"},
-        )
+    _reject_oversized_body(request, settings.max_upload_bytes)
     validate_content_type(file.content_type, file.filename, settings.upload_content_type_set)
     raw = await read_upload_capped(file, settings.max_upload_bytes)
     thread_id = await screening.create_screening(
@@ -425,6 +447,52 @@ async def create_screening(
         max_text_chars=settings.max_protocol_text_chars,
     )
     return {"thread_id": thread_id}
+
+
+@app.post("/api/screenings/batch")
+@limiter.limit(lambda: settings.rate_limit_create)
+async def create_screening_batch(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_reviewer)],
+    files: list[UploadFile],
+) -> dict:
+    """Screen several protocols in one submission (#61) — one thread per file.
+
+    Not a loop the client could run itself over `POST /api/screenings`: that route
+    is rate limited per request (`RATE_LIMIT_CREATE`, 10/minute), so a coordinator
+    with a folder of protocols would trip the limiter on the tenth file and have
+    the rest of their batch silently refused. One submission is one request against
+    that budget, and `MAX_BATCH_FILES` — not the limiter — is what bounds it.
+
+    Answers 200 with a per-file breakdown even when some files were rejected;
+    `services/screening.create_screening_batch` documents why partial success is
+    the contract here. The whole submission is refused (422) only for the file
+    *set* being wrong, and 413 for a body over the aggregate cap.
+
+    The created screenings are not started here. Each runs when a client streams
+    it, exactly as a single upload does, so the concurrency gate stays in charge of
+    how many graph runs are in flight (the frontend's batch view streams them a
+    couple at a time).
+    """
+    # A submission with no `files` part at all is already a 422 from FastAPI's own
+    # body validation, so the only file-set rule left to state is the ceiling.
+    if len(files) > MAX_BATCH_FILES:
+        raise InvalidBatchError(
+            f"A batch carries at most {MAX_BATCH_FILES} protocols; this one has {len(files)}. "
+            "Split it into smaller submissions."
+        )
+    # Every file is capped individually inside the service; this bounds the
+    # submission as a whole, so `MAX_BATCH_FILES` full-size protocols is the most
+    # one request can ever be.
+    _reject_oversized_body(request, settings.max_upload_bytes * MAX_BATCH_FILES)
+    return await screening.create_screening_batch(
+        _store(),
+        files,
+        allowed_content_types=settings.upload_content_type_set,
+        max_upload_bytes=settings.max_upload_bytes,
+        max_pdf_pages=settings.max_pdf_pages,
+        max_text_chars=settings.max_protocol_text_chars,
+    )
 
 
 @app.get("/api/screenings")

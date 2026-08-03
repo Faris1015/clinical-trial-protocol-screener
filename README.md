@@ -275,6 +275,44 @@ After approval, the run's state carries `approved_by`, `approved_by_role`, and
 curl -b cookies.txt http://localhost:8000/api/screenings/<thread_id>/state
 ```
 
+### Screen several protocols at once
+
+A coordinator opening a trial rarely has one protocol. **New Screening** takes a
+multi-file selection: each file becomes its own screening thread, and the page
+shows one row per protocol with its live phase and a link into the run. There is
+no batch entity to navigate afterwards — the runs are ordinary runs, so they land
+in **Past Runs**, queue up in **Review Queue**, and export like any other.
+
+```bash
+curl -b cookies.txt -X POST http://localhost:8000/api/screenings/batch \
+  -F "files=@nsclc.pdf" -F "files=@scan.pdf" -F "files=@crc.md"
+# → {"created": 2, "rejected": 1,
+#    "items": [{"filename": "nsclc.pdf", "thread_id": "…", "error": null, "detail": null},
+#              {"filename": "scan.pdf",  "thread_id": null,
+#               "error": "ExtractionError", "detail": "…"},
+#              {"filename": "crc.md",    "thread_id": "…", "error": null, "detail": null}]}
+```
+
+- **Partial success is the contract.** One scanned PDF in a folder of eight must
+  not lose the other seven, so a file the edge refuses (415 wrong type, 413 too
+  large, 422 unreadable) is reported as that item's `{error, detail}` — the same
+  pair every rejection carries — and the batch still answers 200. A broken *server*
+  is not a broken file: a store outage fails the whole submission rather than being
+  reported as eight bad protocols. `items` echoes the submission's order.
+- **One request, not N.** `POST /api/screenings` is rate limited per request
+  (`RATE_LIMIT_CREATE`), so a client looping over ten files would trip the limiter
+  partway through its own batch. A submission is one request against that budget,
+  bounded instead by `MAX_BATCH_FILES` (10) and, in aggregate, by
+  `MAX_UPLOAD_BYTES` × that cap.
+- **Uploading is not running.** Like a single upload, each thread executes when a
+  client streams it — so the batch view streams two at a time against a gate that
+  allows four (`MAX_CONCURRENT_SCREENINGS`), leaving room for someone else's
+  screening rather than filling the instance. A row that finds the gate saturated
+  waits out the server's `Retry-After` instead of reporting itself failed.
+- **Each run stops where a single one does.** The human gate is not batched away:
+  every protocol runs to `awaiting_approval` (or escalates), and approving one is
+  still a named reviewer's decision on its own run.
+
 ### Trace a criterion back to the protocol
 
 Every criterion carries the verbatim sentence it was extracted from — but a
@@ -761,6 +799,8 @@ frontend/
     components/provenance/     # Criteria beside the protocol, with source highlighting
     components/rules/          # The compliance rules viewer findings link into
     components/metrics/        # In-app funnel, rejection breakdown, loop depth
+    components/batch/          # Batch upload progress, one row per protocol
+    lib/batch.ts               # The batch's stream queue and phase mapping
     components/report-download.tsx # Export a run as a self-contained HTML report
     types.ts                   # Shared API contract, mirrors the Pydantic schemas
 ```
