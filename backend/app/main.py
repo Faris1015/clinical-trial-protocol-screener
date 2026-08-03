@@ -51,7 +51,7 @@ from app.health import app_version, readiness
 from app.logging_config import bind_contextvars, clear_contextvars, configure_logging, get_logger
 from app.persistence import Persistence, ScreeningStore, open_persistence
 from app.schemas.criteria import CriteriaSchema
-from app.services import rules, screening, sse
+from app.services import metrics_summary, rules, screening, sse
 from app.services.concurrency import ConcurrencyLimiter, release_after
 from app.services.uploads import read_upload_capped, validate_content_type
 
@@ -152,9 +152,13 @@ app.add_middleware(
 # from the OpenAPI schema and the access log (see _QUIET_PATHS) — it's an
 # operator endpoint, not part of the API contract.
 if settings.metrics_enabled:
-    Instrumentator(excluded_handlers=["/metrics", "/health", "/ready"]).instrument(app).expose(
-        app, endpoint="/metrics", include_in_schema=False
-    )
+    # The exclusions are regexes matched with `re.search`, so they are anchored:
+    # bare "/metrics" also matches "/api/metrics/summary" (#58), which would drop
+    # a real API route out of the HTTP metrics for looking like the scrape
+    # endpoint. Three operator paths are meant here, exactly.
+    Instrumentator(excluded_handlers=[r"^/metrics$", r"^/health$", r"^/ready$"]).instrument(
+        app
+    ).expose(app, endpoint="/metrics", include_in_schema=False)
 
 
 @app.middleware("http")
@@ -649,6 +653,28 @@ async def list_compliance_rules(
     hand them to an unauthenticated caller.
     """
     return rules.list_compliance_rules()
+
+
+@app.get("/api/metrics/summary")
+@limiter.limit(lambda: settings.rate_limit_read)
+async def metrics_overview(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_reviewer)],
+) -> dict:
+    """The domain metrics as an in-app summary — funnel, rejections, depth (#58).
+
+    Distinct from `/metrics` in audience, not in data: this reads the same
+    collectors that endpoint serializes (see services/metrics_summary.py), so the
+    two cannot disagree. Under `/api` and reviewer-guarded because it is part of
+    the app, while `/metrics` stays unauthenticated for the scraper and out of the
+    OpenAPI schema.
+
+    Reviewer-guarded rather than admin: these are aggregates over the pipeline's
+    own behaviour, with no patient data and no per-run detail, and the reviewers
+    being asked to act on escalations are the people who should see how often they
+    happen.
+    """
+    return metrics_summary.summarize_metrics()
 
 
 def mount_frontend(app: FastAPI, dist: Path | None) -> bool:

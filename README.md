@@ -479,6 +479,47 @@ Read-only, deliberately. An admin editor is the natural follow-up, but a rules
 file the app can rewrite needs a change trail of its own before a compliance
 artifact can rest on it.
 
+### Read the metrics in-app
+
+The domain metrics below have been exported since #7, but reading a screening
+funnel out of `screenings_total{outcome="escalated"} 3.0` needs a Prometheus and a
+dashboard in front of it. **Metrics** answers the three questions a reviewer asks
+of the pipeline — where runs end up, which rules block protocols, and how often
+the Parser gets it right first time — and stops there.
+
+```bash
+curl -b cookies.txt http://localhost:8000/api/metrics/summary
+# → {"since": "2026-08-03T18:22:11+00:00", "exported": true,
+#    "funnel": {"total": 12, "outcomes": [{"outcome": "done", "label": "Completed",
+#                                          "count": 9, "share": 75.0}, ...]},
+#    "rejections": {"total": 10, "per_run": 0.83,
+#                   "rules": [{"rule_id": "RENAL-001", "count": 4, "share": 40.0,
+#                              "layer": "deterministic"}, ...]},
+#    "attempts": {"observations": 11, "mean": 1.82, "first_pass_share": 54.5,
+#                 "buckets": [{"label": "1", "count": 6, "share": 54.5}, ...]}}
+```
+
+- **It cannot disagree with `/metrics`.** Every number is read off the same
+  collectors the exposition endpoint serializes — one source read twice, not a
+  second count of the same events. Recounting terminal outcomes out of the
+  screening store would have been a second implementation of "what counts as done",
+  and a summary whose numbers differ from the metrics they summarize is worse than
+  no summary, because a reviewer can't tell which one lied. A test drives a real
+  run and compares the payload against the parsed exposition, sample by sample.
+- **Process-scoped, and it says so.** These counters live in the serving
+  process's memory and reset with it, so the epoch they cover travels in the
+  payload and the page states it. "9 completed" means something very different on
+  a process up for a week.
+- **Rendered server-side.** Shares, outcome labels and the de-cumulated histogram
+  captions ("1", "6–10", "more than 10") arrive resolved — reading a Prometheus
+  histogram is knowledge about the exposition format, and it belongs beside the
+  metric definitions rather than in a component.
+- **Every rule id links into the rules viewer.** "RENAL-001 blocks more protocols
+  than anything else" is one click from what RENAL-001 actually requires.
+
+It complements Grafana rather than replacing it: no time series, no percentiles,
+no alerting. Those are what the dashboard below is for.
+
 ### Health & readiness
 
 ```bash
@@ -534,6 +575,9 @@ node latencies, Critic rejection rates, and LLM latency end-to-end.
 Nodes are instrumented through the graph's `_instrument` decorator and LLM calls
 through the single `invoke_with_retry` door, so agent bodies stay free of metrics
 plumbing. Definitions live in one place — [`app/services/metrics.py`](backend/app/services/metrics.py).
+Recording is unconditional: `METRICS_ENABLED=false` unmounts `/metrics`, but the
+counters are still collected, so the [in-app summary](#read-the-metrics-in-app)
+above works on an instance nothing is scraping.
 
 ## Code quality
 
@@ -700,6 +744,8 @@ backend/
       provenance.py            # criterion source_text → character span in the protocol
       report.py                # Self-contained, printable HTML screening report
       rules.py                 # The compliance rules database, rendered for reading
+      metrics.py               # Custom Prometheus metric definitions (one home)
+      metrics_summary.py       # Those metrics reduced for the in-app dashboard
       notifications.py         # Gate/escalation notifications (webhook + email, PHI-free)
       sse.py                   # Server-Sent Events wire format (one place)
       llm.py, pdf.py           # LLM factory, PDF eligibility-section extraction
@@ -714,6 +760,7 @@ frontend/
     components/review/         # Review queue, criteria editor, before/after diff
     components/provenance/     # Criteria beside the protocol, with source highlighting
     components/rules/          # The compliance rules viewer findings link into
+    components/metrics/        # In-app funnel, rejection breakdown, loop depth
     components/report-download.tsx # Export a run as a self-contained HTML report
     types.ts                   # Shared API contract, mirrors the Pydantic schemas
 ```

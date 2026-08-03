@@ -274,6 +274,68 @@ export type RulesPayload = {
   source: string;
 };
 
+/**
+ * One row of the metrics summary (#58) — a count and its percentage of the panel
+ * it belongs to.
+ *
+ * `share` is 0–100 with one decimal, resolved by the API and used for both the
+ * figure and the bar's width, so the number a reviewer reads and the bar they
+ * compare are the same value rather than two roundings of it.
+ */
+export type MetricShare = {
+  count: number;
+  share: number;
+};
+
+/** One terminal outcome of the screening funnel, with `label` pre-rendered. */
+export type FunnelOutcome = MetricShare & {
+  outcome: ScreeningStatus | string;
+  label: string;
+};
+
+/** Which rules the Critic blocked on, ranked — `share` is of all blocking findings. */
+export type RejectionRule = MetricShare & {
+  rule_id: string;
+  /** `semantic` is the LLM layer, whose findings are not a fixed threshold (#57). */
+  layer: "deterministic" | "semantic";
+};
+
+/**
+ * `GET /api/metrics/summary` — the domain metrics as an in-app summary (#58).
+ *
+ * Read off the same collectors `/metrics` serializes, so the page and a scrape
+ * cannot disagree. The counters live in the serving process's memory and reset
+ * with it, which is why `since` travels: these are the runs this instance has
+ * seen, not an all-time total.
+ */
+export type MetricsSummary = {
+  /** ISO-8601 epoch of the counters — when this instance's registry came up. */
+  since: string;
+  /** Whether `/metrics` is exposed here (METRICS_ENABLED); recording is unconditional. */
+  exported: boolean;
+  funnel: {
+    /** Runs that reached a terminal outcome. The denominator of every share. */
+    total: number;
+    outcomes: FunnelOutcome[];
+  };
+  rejections: {
+    /** Blocking findings, counted once per finding per Critic pass. */
+    total: number;
+    rules: RejectionRule[];
+    /** Blocking findings ÷ terminal runs — not the share of runs rejected. */
+    per_run: number;
+  };
+  attempts: {
+    /** Runs whose parse/critic loop resolved; excludes failures, so ≤ funnel total. */
+    observations: number;
+    mean: number;
+    /** Share that needed one attempt, or null when the buckets can't say. */
+    first_pass_share: number | null;
+    /** De-cumulated histogram, captioned by attempt count ("1", "6–10"). */
+    buckets: (MetricShare & { label: string })[];
+  };
+};
+
 /** `GET /api/screenings/{thread_id}/state` — a run rehydrated from its checkpoint. */
 export type ScreeningState = {
   values: StateUpdate & {
