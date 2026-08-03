@@ -412,6 +412,10 @@ export function CriteriaEditor() {
         title="What the Critic rejected"
         region="blocking-findings"
         className="border-status-warn/40 bg-status-warn-soft"
+        // This page holds an unsaved draft with no navigation guard, so reading
+        // up on the rule that blocked the run opens beside the corrections
+        // rather than throwing them away (#57).
+        ruleLinksInNewTab
       />
 
       {!draft ? (

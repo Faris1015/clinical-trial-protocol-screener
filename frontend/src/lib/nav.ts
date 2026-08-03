@@ -28,7 +28,7 @@ export const NAV_ITEMS: NavItem[] = [
   { href: "/", label: "New Screening", icon: FilePlus2 },
   { href: "/runs", label: "Past Runs", icon: History },
   { href: "/review", label: "Review Queue", icon: ClipboardCheck },
-  { href: "/rules", label: "Rules", icon: Scale, pendingIssue: 57 },
+  { href: "/rules", label: "Rules", icon: Scale },
   { href: "/metrics", label: "Metrics", icon: BarChart3, pendingIssue: 58 },
   { href: "/admin", label: "Accounts", icon: Users, minRole: "admin" },
 ];

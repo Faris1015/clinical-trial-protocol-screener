@@ -49,6 +49,25 @@ schemas: one sentence of plain English about the protocol itself, no attribute n
 operators, no rule ids."""
 
 
+# The severity each check kind carries when it fires. A property of the check,
+# not of the rule row: a range is either plausible or it is not, while a missing
+# age bound is a judgement call for a human — so no rule in the file can pick its
+# own. Named here rather than inlined at the four `_finding` calls because the
+# rules viewer (#57) has to state a rule's severity without running the engine,
+# and a viewer that disagreed with the engine would be worse than no viewer.
+CHECK_SEVERITY = {
+    "must_be_quantitative": "reject",
+    "range": "reject",
+    "required_attribute": "warn",
+    "keyword_implies_criterion": "reject",
+}
+
+# Layer 2's findings are stamped with this in place of a rule id — they come from
+# the semantic pass below, which has no row in the rules file. Named so the rules
+# viewer can describe that layer under the same id its findings cite (#57).
+SEMANTIC_RULE_ID = "LLM-SEM"
+
+
 def load_rules() -> list[dict]:
     """Load the compliance rules; a missing or malformed file is a DataStoreError.
 
@@ -74,18 +93,21 @@ def _all_quantitative(criteria: dict) -> list[dict]:
     return quantitative
 
 
-def _finding(rule: dict, severity: str, message: str, plain_detail: str = "") -> dict:
+def _finding(rule: dict, message: str, plain_detail: str = "") -> dict:
     """One finding carrying both layers (#52).
 
     `message` stays technical — it is what loops back to the Parser as feedback.
     `explanation` is the reviewer-facing sentence: the rule's own `plain` prose
     (falling back to `description` for a rule that has none) plus whatever
     specific the check found, e.g. the implausible number it read.
+
+    Severity is read from `CHECK_SEVERITY` rather than passed in, so the value a
+    finding carries and the value the rules viewer publishes are the same lookup.
     """
     plain = rule.get("plain") or rule["description"]
     return {
         "rule_id": rule["id"],
-        "severity": severity,
+        "severity": CHECK_SEVERITY[rule["check"]],
         "message": message,
         "explanation": f"{plain} {plain_detail}".strip(),
     }
@@ -113,7 +135,6 @@ def run_deterministic_checks(criteria: dict, raw_text: str, rules: list[dict]) -
                 findings.append(
                     _finding(
                         rule,
-                        "reject",
                         f"{rule['description']} — found only vague language, no numeric threshold.",
                     )
                 )
@@ -126,7 +147,6 @@ def run_deterministic_checks(criteria: dict, raw_text: str, rules: list[dict]) -
                     findings.append(
                         _finding(
                             rule,
-                            "reject",
                             f"{rule['description']}: extracted {c['value']} {c['unit']} "
                             f"from '{c['source_text']}'",
                             f"It read {c['value']} {c['unit']} from “{c['source_text']}”.",
@@ -135,7 +155,7 @@ def run_deterministic_checks(criteria: dict, raw_text: str, rules: list[dict]) -
 
         elif check == "required_attribute":
             if not any(c["attribute"] == rule["attribute"] for c in quantitative):
-                findings.append(_finding(rule, "warn", rule["description"]))
+                findings.append(_finding(rule, rule["description"]))
 
         elif check == "keyword_implies_criterion":
             mentioned = any(k in raw_text.lower() for k in rule["keywords"])
@@ -152,7 +172,7 @@ def run_deterministic_checks(criteria: dict, raw_text: str, rules: list[dict]) -
                 for c in categorical
             )
             if mentioned and not covered:
-                findings.append(_finding(rule, "reject", rule["description"]))
+                findings.append(_finding(rule, rule["description"]))
 
     return findings
 
@@ -190,7 +210,7 @@ def run_llm_semantic_review(state: ScreenerState) -> list[dict]:
         log.warning("critic.semantic_review_unavailable", detail=str(exc))
         return [
             {
-                "rule_id": "LLM-SEM",
+                "rule_id": SEMANTIC_RULE_ID,
                 "severity": "warn",
                 "message": "Semantic review skipped — LLM backend unavailable; "
                 "deterministic compliance checks only.",
@@ -205,7 +225,7 @@ def run_llm_semantic_review(state: ScreenerState) -> list[dict]:
 
     findings = [
         {
-            "rule_id": "LLM-SEM",
+            "rule_id": SEMANTIC_RULE_ID,
             "severity": f.severity,
             "message": f.message,
             # A model that skipped the plain layer still gets a finding — the

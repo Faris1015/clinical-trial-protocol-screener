@@ -442,6 +442,43 @@ and every string in it is escaped: the criteria and source sentences are
 LLM-rewritten uploaded text, so a protocol containing markup must be text in the
 report, never markup in a page served from the app's origin.
 
+### Browse the compliance rules
+
+A Critic finding names the rule that fired — `RENAL-001`, `PLT-001` — and until
+now that id was unresolvable without opening the repo. **Rules** lists the whole
+deterministic rules database: each rule's id, what it actually tests
+(`90 ≤ systolic_bp ≤ 200`), whether it blocks a run or only advises, and why it
+exists. Every finding's rule id links straight to its row, so "why was my protocol
+blocked" is one click from the block itself.
+
+```bash
+curl -b cookies.txt http://localhost:8000/api/rules
+# → {"source": "compliance_rules.yaml",
+#    "rules": [{"id": "BP-001", "condition": "90 ≤ systolic_bp ≤ 200",
+#               "severity": "reject", "check_label": "Plausible range",
+#               "description": ..., "plain": ..., "keywords": [...]}]}
+```
+
+- **It agrees with the engine, by construction.** Severity is read from the same
+  `CHECK_SEVERITY` map `run_deterministic_checks` stamps onto a finding, not
+  restated — a page claiming "advisory" for a rule that blocks the run would be
+  worse than no page, because a reviewer would believe it. A test trips two rules
+  for real and compares the finding's severity against the published one.
+- **Served, not bundled.** `RULES_PATH` is deployment configuration, so the page
+  fetches the rules the running instance is actually enforcing and names the file
+  they came from — not whatever was in the repo when the frontend was built.
+- **Both layers again.** The rationale renders as the rule's plain-language
+  sentence or its regulatory wording, on the same toggle the findings use (#52),
+  so a reviewer arriving from a plain finding doesn't hit a wall of citations.
+- **The LLM layer is listed too, and labelled.** Semantic findings cite
+  `LLM-SEM`, which has no row in the YAML; the listing describes that pass under
+  the same id so the link resolves, marked as a model review rather than a fixed
+  rule.
+
+Read-only, deliberately. An admin editor is the natural follow-up, but a rules
+file the app can rewrite needs a change trail of its own before a compliance
+artifact can rest on it.
+
 ### Health & readiness
 
 ```bash
@@ -662,6 +699,7 @@ backend/
       criteria_edits.py        # Before/after diff of a reviewer's criteria revision
       provenance.py            # criterion source_text → character span in the protocol
       report.py                # Self-contained, printable HTML screening report
+      rules.py                 # The compliance rules database, rendered for reading
       notifications.py         # Gate/escalation notifications (webhook + email, PHI-free)
       sse.py                   # Server-Sent Events wire format (one place)
       llm.py, pdf.py           # LLM factory, PDF eligibility-section extraction
@@ -675,6 +713,7 @@ frontend/
     components/                # ScreeningRun, AgentCard, CriteriaTable, matches
     components/review/         # Review queue, criteria editor, before/after diff
     components/provenance/     # Criteria beside the protocol, with source highlighting
+    components/rules/          # The compliance rules viewer findings link into
     components/report-download.tsx # Export a run as a self-contained HTML report
     types.ts                   # Shared API contract, mirrors the Pydantic schemas
 ```
