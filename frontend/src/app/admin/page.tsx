@@ -22,7 +22,8 @@ import { apiFetch, problemDetail, type Principal } from "@/lib/api";
  *
  * The nav entry is admin-only, but a reviewer can still type the URL (a static
  * export has no server to stop them), so the page checks the role itself — and
- * either way `/api/admin/users` answers 403. Rules management lands here with #57.
+ * either way `/api/admin/users` answers 403. The compliance rules are readable by
+ * every reviewer at /rules (#57); an admin editor for them would land here.
  */
 export default function AdminPage() {
   const { hasRole } = useAuth();

@@ -165,6 +165,39 @@ export function RunDetailSkeleton() {
 }
 
 /**
+ * The rules viewer (#57) while it fetches the compliance database.
+ *
+ * Shaped like `RuleRow`: id, severity chip and check kind on one line, then the
+ * rationale and the condition. Five rows against the nine the listing currently
+ * returns — enough to fill the fold without promising a specific length, since
+ * the rules file is deployment configuration and an instance may run more or fewer.
+ */
+export function RulesSkeleton() {
+  return (
+    <Placeholder region="rules-skeleton" label="Loading the compliance rules…">
+      <div className="space-y-4">
+        <Skeleton className="h-9 w-full" />
+        <Card>
+          <CardContent className="divide-border divide-y p-0">
+            {[0, 1, 2, 3, 4].map((row) => (
+              <div key={row} className="space-y-2 p-4">
+                <div className="flex items-center gap-2">
+                  <Skeleton className="h-4 w-24" />
+                  <Skeleton className="h-5 w-20 rounded-4xl" />
+                  <Skeleton className="h-3 w-32" />
+                </div>
+                <Skeleton className="h-4 w-full" />
+                <Skeleton className="h-3 w-48" />
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      </div>
+    </Placeholder>
+  );
+}
+
+/**
  * The edit-and-rerun page (#53) while it rehydrates the run being corrected —
  * the same `GET /state` wait as the replay, opening on the same run header and
  * then the criteria grouped into their editable buckets.

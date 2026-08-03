@@ -51,7 +51,7 @@ from app.health import app_version, readiness
 from app.logging_config import bind_contextvars, clear_contextvars, configure_logging, get_logger
 from app.persistence import Persistence, ScreeningStore, open_persistence
 from app.schemas.criteria import CriteriaSchema
-from app.services import screening, sse
+from app.services import rules, screening, sse
 from app.services.concurrency import ConcurrencyLimiter, release_after
 from app.services.uploads import read_upload_capped, validate_content_type
 
@@ -381,7 +381,8 @@ async def list_users(
 ) -> list[PrincipalResponse]:
     """Configured accounts — admin only, and never their password hashes.
 
-    The user-management half of the admin role (rules management lands with #57).
+    The user-management half of the admin role. The compliance rules are readable
+    by any reviewer (`GET /api/rules`, #57); writing them would land here.
     It is also what gives the role ladder a real 403 to enforce: a reviewer
     hitting this gets Forbidden, and the frontend hides the nav entry for them.
     """
@@ -628,6 +629,26 @@ async def download_report(
             "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'",
         },
     )
+
+
+@app.get("/api/rules")
+@limiter.limit(lambda: settings.rate_limit_read)
+async def list_compliance_rules(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_reviewer)],
+) -> dict:
+    """The compliance rules the Critic checks every extraction against (#57).
+
+    Read-only, and served rather than bundled into the frontend: the rules file is
+    deployment configuration (`RULES_PATH`), so an instance running amended rules
+    must show the rules it is actually running, not the ones that were in the repo
+    when the bundle was built.
+
+    Reviewer-guarded like every other read. Nothing here is patient data, but the
+    thresholds are this deployment's compliance posture and there is no reason to
+    hand them to an unauthenticated caller.
+    """
+    return rules.list_compliance_rules()
 
 
 def mount_frontend(app: FastAPI, dist: Path | None) -> bool:

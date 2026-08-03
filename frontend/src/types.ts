@@ -237,6 +237,43 @@ export type ComplianceFinding = {
   explanation?: string;
 };
 
+/**
+ * One rule from the compliance database (#57) — a row of
+ * `app/rules/compliance_rules.yaml`, or the synthetic `LLM-SEM` entry standing
+ * for the Critic's semantic layer.
+ *
+ * `condition`, `check_label` and `severity` arrive already resolved by the API:
+ * how a threshold reads depends on the check kind, and that knowledge belongs
+ * beside the engine that runs it (services/rules.py) rather than in a component
+ * that would re-derive it and drift. `severity` is `"varies"` for the semantic
+ * layer, whose findings pick their own, and empty for a check kind the engine
+ * has no branch for — such a rule can never fire.
+ */
+export type ComplianceRule = {
+  id: string;
+  /** The criterion attribute the rule is scoped to; empty when it isn't. */
+  attribute: string;
+  check: string;
+  check_label: string;
+  /** The threshold/operator in one line, e.g. `"90 ≤ systolic_bp ≤ 200"`. */
+  condition: string;
+  severity: "reject" | "warn" | "varies" | "";
+  /** The technical rationale — the wording that rides back to the Parser. */
+  description: string;
+  /** The same rationale for a non-technical reviewer (#52). */
+  plain: string;
+  /** Protocol words that bring the rule into play; empty when it always runs. */
+  keywords: string[];
+  layer: "deterministic" | "semantic";
+};
+
+/** `GET /api/rules` — every rule the Critic checks against, in file order (#57). */
+export type RulesPayload = {
+  rules: ComplianceRule[];
+  /** The rules file this instance is actually running, by name. */
+  source: string;
+};
+
 /** `GET /api/screenings/{thread_id}/state` — a run rehydrated from its checkpoint. */
 export type ScreeningState = {
   values: StateUpdate & {
