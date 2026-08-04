@@ -558,6 +558,64 @@ curl -b cookies.txt http://localhost:8000/api/metrics/summary
 It complements Grafana rather than replacing it: no time series, no percentiles,
 no alerting. Those are what the dashboard below is for.
 
+### Compare two runs
+
+The same protocol screened twice does not have to produce the same run: the Parser
+is an LLM, the Critic can push an extraction back, a reviewer can correct it by
+hand (#53), and the rules file is deployment configuration that can be amended. So
+"we re-ran it — did anything change?" was a question you could only answer by
+opening two tabs and reading. Hold two runs on **Past Runs** and choose
+**Compare**: the two extractions land side by side with every difference typed, and
+under them the cohort's verdicts, patient by patient. Two *different* protocols
+compare the same way — an amendment against the version it replaces.
+
+```bash
+curl -b cookies.txt "http://localhost:8000/api/screenings/compare?a=$A&b=$B"
+# → {"runs": [{"side": "a", "source_filename": "v1.pdf", "status": "done",
+#              "criteria_count": 7, "criteria_revision": 0,
+#              "cohort": {"eligible": 4, "review": 1, "ineligible": 7, "total": 12}}, ...],
+#    "criteria": {"identical": false, "differences": 2,
+#                 "totals": {"unchanged": 6, "modified": 1, "added": 1, "removed": 0},
+#                 "buckets": [{"bucket": "inclusion_quantitative",
+#                              "rows": [{"kind": "modified", "a": "age >= 18 years",
+#                                        "b": "age >= 65 years"}, ...]}]},
+#    "matches": {"compared": true, "differences": 1,
+#                "totals": {"changed": 1, "only_a": 0, "only_b": 0, "same": 11},
+#                "patients": [{"patient_id": "PT-7", "name": "…", "kind": "changed",
+#                              "a": {"bucket": "eligible", "label": "Eligible"},
+#                              "b": {"bucket": "ineligible", "label": "Ineligible"}}, ...]}}
+```
+
+- **Criteria are paired by provenance, not by position.** A run that emitted the
+  same criteria in a different order changed nothing, and an index-wise diff would
+  report every row below a deletion as modified — which is the failure mode that
+  makes a diff useless, because then every re-run looks like a rewrite. The pairing
+  key and the labels are the *same ones* the reviewer-edit diff uses
+  ([`criteria_edits.bucket_entries`](backend/app/services/criteria_edits.py)), so
+  the two views cannot disagree about whether two criteria are the same one.
+- **It cannot disagree with either run's own page.** Both columns are built from
+  the same `GET /state` payload the run detail view and the exported report render
+  from — one read path, three renderings — and a test compares each column against
+  that endpoint directly.
+- **Unchanged rows are kept.** "The other fourteen criteria are the same" is what
+  makes the three differences meaningful; only the differences carry a badge and a
+  tint, so they are still what the eye lands on.
+- **Every difference is stated in words, not only in colour.** A row says
+  `modified` / `added` / `removed`, a removal is struck through, and an absent side
+  renders an em dash with screen-reader text — the page survives a monochrome
+  printout, which is the form an audit trail tends to arrive in.
+- **A verdict that moved is the point.** The cohort table pairs patients on their
+  EHR id and lists changed verdicts first; "who was eligible" comes from one shared
+  rule ([`services/cohort.py`](backend/app/services/cohort.py)), so this view, the
+  runs index's match count and the report agree by construction.
+- **Empty columns say why.** A run parked at the approval gate has no cohort and a
+  run that never streamed has no criteria — both read as the phase they are in,
+  never as "nothing was found".
+
+Comparing a run with itself is refused (422) rather than answered with an
+all-identical table: it is a mistyped link, and a page confirming that a run
+matches itself reads like a working comparison.
+
 ### Health & readiness
 
 ```bash
@@ -779,6 +837,8 @@ backend/
     services/
       screening.py             # Screening use-cases (create/stream/approve/edit/state)
       criteria_edits.py        # Before/after diff of a reviewer's criteria revision
+      comparison.py            # Two runs paired side by side: criteria + cohort verdicts
+      cohort.py                # Which bucket a patient lands in — one rule, every reader
       provenance.py            # criterion source_text → character span in the protocol
       report.py                # Self-contained, printable HTML screening report
       rules.py                 # The compliance rules database, rendered for reading
@@ -796,6 +856,7 @@ frontend/
     lib/sse.ts                 # Framing for SSE bodies fetch returns (POST/PATCH)
     components/                # ScreeningRun, AgentCard, CriteriaTable, matches
     components/review/         # Review queue, criteria editor, before/after diff
+    components/runs/           # Runs index, one run replayed, two runs compared
     components/provenance/     # Criteria beside the protocol, with source highlighting
     components/rules/          # The compliance rules viewer findings link into
     components/metrics/        # In-app funnel, rejection breakdown, loop depth

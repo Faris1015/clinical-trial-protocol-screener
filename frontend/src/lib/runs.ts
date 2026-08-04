@@ -27,6 +27,18 @@ export function runHref(threadId: string): string {
   return `/runs/view/?id=${encodeURIComponent(threadId)}`;
 }
 
+/**
+ * Deep link to the side-by-side comparison of two runs (#59).
+ *
+ * Both ids in the query string, matching the API's own `?a=&b=` shape, and a
+ * query parameter for the same static-export reason `runHref` uses one. Order is
+ * load-bearing: `a` is the left column and additions/removals are stated from its
+ * point of view, so swapping the pair mirrors the diff.
+ */
+export function compareHref(a: string, b: string): string {
+  return `/runs/compare/?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`;
+}
+
 /** Every status, in pipeline order — the order the filter offers them in. */
 export const RUN_STATUSES: ScreeningStatus[] = [
   "routing",

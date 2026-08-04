@@ -24,6 +24,7 @@ from app.config import get_settings
 from app.exceptions import (
     CriteriaRevisionConflictError,
     ExtractionError,
+    InvalidComparisonError,
     PayloadTooLargeError,
     ScreenerError,
     ScreeningNotApprovableError,
@@ -35,7 +36,16 @@ from app.exceptions import (
 from app.graph.builder import build_graph
 from app.graph.state import ScreeningStatus, event, initial_state
 from app.logging_config import bind_contextvars, get_logger
-from app.services import criteria_edits, notifications, provenance, report, sse, timeline
+from app.services import (
+    cohort,
+    comparison,
+    criteria_edits,
+    notifications,
+    provenance,
+    report,
+    sse,
+    timeline,
+)
 from app.services.pdf import extract_eligibility_text
 from app.services.uploads import (
     UploadedFile,
@@ -60,6 +70,7 @@ __all__ = [
     "ScreeningStatus",
     "approve_screening",
     "build_screening_graph",
+    "compare_screenings",
     "create_screening",
     "create_screening_batch",
     "get_screening_protocol",
@@ -145,16 +156,13 @@ def _criteria_count(values: dict[str, Any]) -> int:
 
 
 def _match_count(values: dict[str, Any]) -> int:
-    """How many patients the run actually matched.
+    """How many patients the run actually matched — the eligible bucket alone.
 
-    `matched_patients` is the whole evaluated cohort, so this counts the
-    eligible bucket only — with `needs_review` outranking `eligible`, exactly as
-    the cohort table buckets them (frontend PatientMatchTable.bucketOf). A run
-    that scored 300 patients and cleared none is a 0-match run, and the index
-    should say so.
+    The bucketing rule lives in services/cohort.py, shared with the exported
+    report and the run comparison (#59), so this column and those views can't
+    disagree about who was eligible.
     """
-    cohort = values.get("matched_patients") or []
-    return sum(1 for p in cohort if p.get("eligible") and not p.get("needs_review"))
+    return cohort.matched_count(values.get("matched_patients") or [])
 
 
 async def _record_outcome(store: ScreeningStore, thread_id: str, snapshot: Snapshot) -> str:
@@ -679,6 +687,39 @@ async def get_screening_state(store: ScreeningStore, graph: ScreeningGraph, thre
         if record
         else None,
     }
+
+
+async def compare_screenings(
+    store: ScreeningStore, graph: ScreeningGraph, a_thread_id: str, b_thread_id: str
+) -> dict:
+    """Two runs diffed side by side — criteria and cohort (#59).
+
+    Built from two `get_screening_state` payloads rather than from its own reads of
+    the checkpoints, so each column of a comparison is the same data that run's own
+    detail page renders. `services/comparison.py` owns the reduction and is pure;
+    this function is the part that needs the store and the graph.
+
+    Comparing a run with itself is refused (422) rather than answered with an
+    all-identical table: it is a mistyped link or a double-clicked checkbox, and a
+    page confirming that a run matches itself is a worse answer than saying so.
+    Either id being unknown is the 404 `get_screening_state` already raises.
+
+    The two states are fetched in sequence, not concurrently: each is a checkpoint
+    read against the same store and graph, and two of them are cheap next to
+    holding two `aget_state` calls in flight for what is a read-only view.
+    """
+    if a_thread_id == b_thread_id:
+        raise InvalidComparisonError(
+            "A comparison needs two different runs — pick a second screening to compare this one "
+            "against."
+        )
+    a_payload = await get_screening_state(store, graph, a_thread_id)
+    b_payload = await get_screening_state(store, graph, b_thread_id)
+    # Both ids explicitly: this is the one request that is about two threads, and
+    # the bound `thread_id` contextvar can only name one of them (the last one
+    # read), so the line has to carry the pair itself to be useful.
+    log.info("screening.compared", run_a=a_thread_id, run_b=b_thread_id)
+    return comparison.compare_runs(a_payload, b_payload)
 
 
 async def get_screening_protocol(

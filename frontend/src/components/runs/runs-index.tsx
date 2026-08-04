@@ -2,7 +2,14 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { AlertTriangle, ChevronLeft, ChevronRight, History, Search } from "lucide-react";
+import {
+  AlertTriangle,
+  ChevronLeft,
+  ChevronRight,
+  GitCompare,
+  History,
+  Search,
+} from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -17,10 +24,28 @@ import {
 } from "@/components/ui/table";
 import { apiFetch, problemDetail } from "@/lib/api";
 import { FIELD } from "@/lib/field";
-import { RUN_STATUSES, formatTimestamp, runHref, statusLabel, statusVariant } from "@/lib/runs";
-import type { ScreeningPage, ScreeningStatus } from "@/types";
+import {
+  RUN_STATUSES,
+  compareHref,
+  formatTimestamp,
+  runHref,
+  statusLabel,
+  statusVariant,
+} from "@/lib/runs";
+import type { Screening, ScreeningPage, ScreeningStatus } from "@/types";
 
 const PAGE_SIZE = 25;
+
+/** A comparison is between exactly two runs (#59), so the selection stops there. */
+const COMPARE_LIMIT = 2;
+
+/**
+ * A run held for comparison. The filename travels with the id: a coordinator can
+ * pick one run, page on, and pick the second, and the action bar still has to name
+ * what it is about to compare after the row itself has scrolled out of the result
+ * set.
+ */
+type Held = { threadId: string; filename: string };
 
 // Typing shouldn't fire a request per keystroke — the endpoint is rate limited
 // (RATE_LIMIT_READ) and a half-typed protocol name isn't a query anyone wants
@@ -43,6 +68,12 @@ export function RunsIndex() {
   const [offset, setOffset] = useState(0);
   const [page, setPage] = useState<ScreeningPage | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The runs held for a side-by-side comparison (#59), in the order they were
+  // picked: the first is the comparison's left column, and the diff's additions and
+  // removals are stated from its point of view. Deliberately not reset by a filter
+  // change or a page turn — picking the two runs to compare is often exactly why
+  // someone searches twice.
+  const [held, setHeld] = useState<Held[]>([]);
 
   // The query string whose response is currently on screen. `loading` is
   // *derived* from it rather than stored, which keeps every setState in this
@@ -130,6 +161,23 @@ export function RunsIndex() {
     resetPaging();
   }
 
+  /**
+   * Hold or release one run.
+   *
+   * At the limit, a further checkbox is disabled rather than silently evicting the
+   * older selection: which two runs get compared — and in which order — is the
+   * whole input to the next page, and having a third click quietly reassign it is
+   * how someone ends up reading a diff of the wrong pair.
+   */
+  function toggleHeld(run: Screening) {
+    setHeld((current) => {
+      const without = current.filter((entry) => entry.threadId !== run.thread_id);
+      if (without.length < current.length) return without;
+      if (current.length >= COMPARE_LIMIT) return current;
+      return [...current, { threadId: run.thread_id, filename: run.source_filename }];
+    });
+  }
+
   const loading = settledQuery !== query;
   const rows = page?.items ?? [];
   const total = page?.total ?? 0;
@@ -179,6 +227,8 @@ export function RunsIndex() {
         </select>
       </div>
 
+      {held.length > 0 && <CompareBar held={held} onClear={() => setHeld([])} />}
+
       {error && (
         <Card className="border-destructive/40 bg-destructive/10" role="alert">
           <CardContent className="flex items-start gap-2.5 text-sm">
@@ -221,6 +271,11 @@ export function RunsIndex() {
               <Table>
                 <TableHeader>
                   <TableRow>
+                    <TableHead className="w-8">
+                      {/* The column is a strip of checkboxes whose own labels say
+                          what they do; a visible header would only repeat them. */}
+                      <span className="sr-only">Hold for comparison</span>
+                    </TableHead>
                     <TableHead>Protocol</TableHead>
                     <TableHead>Status</TableHead>
                     <TableHead className="text-right">Criteria</TableHead>
@@ -229,34 +284,61 @@ export function RunsIndex() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {rows.map((run) => (
-                    <TableRow key={run.thread_id} data-status={run.status}>
-                      <TableCell className="font-medium">
-                        {/* The filename is the link: it's the thing a
+                  {rows.map((run) => {
+                    const isHeld = held.some((entry) => entry.threadId === run.thread_id);
+                    return (
+                      <TableRow key={run.thread_id} data-status={run.status} data-held={isHeld}>
+                        <TableCell>
+                          {/* A native checkbox, like the status filter's native
+                            select: it needs no extra dependency and is already
+                            what works with a keyboard, a screen reader and a
+                            phone. */}
+                          <input
+                            type="checkbox"
+                            className="accent-primary size-4 disabled:cursor-not-allowed disabled:opacity-40"
+                            checked={isHeld}
+                            disabled={!isHeld && held.length >= COMPARE_LIMIT}
+                            // The filename, not "this row": the accessible name has
+                            // to identify the run when read out of context, and it
+                            // is what the compare bar will name back.
+                            aria-label={`Hold ${run.source_filename} for comparison`}
+                            title={
+                              !isHeld && held.length >= COMPARE_LIMIT
+                                ? "Two runs are already held — clear one to pick a different pair."
+                                : undefined
+                            }
+                            onChange={() => toggleHeld(run)}
+                          />
+                        </TableCell>
+                        <TableCell className="font-medium">
+                          {/* The filename is the link: it's the thing a
                             coordinator recognizes, and it gives the row a
                             target big enough to hit on a phone. */}
-                        <Link
-                          href={runHref(run.thread_id)}
-                          className="hover:text-primary underline-offset-4 hover:underline"
-                        >
-                          {run.source_filename}
-                        </Link>
-                        <span className="text-muted-foreground block font-mono text-xs">
-                          {run.thread_id}
-                        </span>
-                      </TableCell>
-                      <TableCell>
-                        <Badge variant={statusVariant(run.status)}>{statusLabel(run.status)}</Badge>
-                      </TableCell>
-                      <TableCell className="text-right tabular-nums">
-                        {run.criteria_count}
-                      </TableCell>
-                      <TableCell className="text-right tabular-nums">{run.match_count}</TableCell>
-                      <TableCell className="text-muted-foreground whitespace-nowrap">
-                        {formatTimestamp(run.created_at)}
-                      </TableCell>
-                    </TableRow>
-                  ))}
+                          <Link
+                            href={runHref(run.thread_id)}
+                            className="hover:text-primary underline-offset-4 hover:underline"
+                          >
+                            {run.source_filename}
+                          </Link>
+                          <span className="text-muted-foreground block font-mono text-xs">
+                            {run.thread_id}
+                          </span>
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant={statusVariant(run.status)}>
+                            {statusLabel(run.status)}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums">
+                          {run.criteria_count}
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums">{run.match_count}</TableCell>
+                        <TableCell className="text-muted-foreground whitespace-nowrap">
+                          {formatTimestamp(run.created_at)}
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
                 </TableBody>
               </Table>
             </div>
@@ -295,5 +377,67 @@ export function RunsIndex() {
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * The staging area for a comparison (#59): which runs are held, and the way in.
+ *
+ * Held runs are named by filename rather than counted ("2 selected"): the two ids
+ * can be picked pages apart, and a coordinator about to read a diff of two
+ * protocol versions needs to see *which* two they are holding before they commit
+ * to the page. `aria-live` because this bar appears — and rewords itself — in
+ * response to a checkbox further down the table, which is not where the reader is
+ * looking.
+ *
+ * Compare is a link, not a fetch: the comparison page owns the request, so the
+ * result is bookmarkable and shareable rather than a state only this table can
+ * reach.
+ */
+function CompareBar({ held, onClear }: { held: Held[]; onClear: () => void }) {
+  const [first, second] = held;
+  const ready = held.length === COMPARE_LIMIT;
+  // Two runs of the *same* protocol is the case this feature exists for, so the
+  // two filenames are usually identical and naming them alone would read as
+  // "comparing x against x". When they collide, the head of each run id
+  // disambiguates them — the same prefix the rows show under the filename.
+  const ambiguous = ready && first.filename === second.filename;
+  const name = (run: Held) =>
+    ambiguous ? `${run.filename} (${run.threadId.slice(0, 8)})` : run.filename;
+
+  return (
+    <Card data-region="runs-compare-bar">
+      <CardContent className="flex flex-wrap items-center gap-x-3 gap-y-2 text-sm">
+        <GitCompare className="text-muted-foreground size-4 shrink-0" aria-hidden="true" />
+        <p className="min-w-0 flex-1" aria-live="polite">
+          {ready ? (
+            <>
+              Comparing <span className="font-medium">{name(first)}</span> against{" "}
+              <span className="font-medium">{name(second)}</span>.
+            </>
+          ) : (
+            <>
+              Holding <span className="font-medium">{first.filename}</span> — pick a second run to
+              compare it against.
+            </>
+          )}
+        </p>
+        <div className="flex gap-2">
+          <Button variant="ghost" onClick={onClear}>
+            Clear
+          </Button>
+          {/* Rendered as the anchor rather than wrapping one, so there is a single
+              focusable control. Disabled until there are two runs: a link to a
+              comparison of one run has nowhere to go. */}
+          {ready ? (
+            <Button render={<Link href={compareHref(first.threadId, second.threadId)} />}>
+              Compare
+            </Button>
+          ) : (
+            <Button disabled>Compare</Button>
+          )}
+        </div>
+      </CardContent>
+    </Card>
   );
 }

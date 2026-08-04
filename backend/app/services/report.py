@@ -45,7 +45,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
-from app.services import timeline
+from app.services import cohort, timeline
 from app.services.criteria_edits import criterion_label
 from app.services.uploads import sanitize_filename
 
@@ -233,21 +233,11 @@ def _phase(payload: Mapping[str, Any]) -> str:
     return str(record.get("status") or values.get("current_step") or "")
 
 
-def _bucket_of(evaluation: Mapping[str, Any]) -> str:
-    """Which cohort bucket one patient lands in.
-
-    `needs_review` outranks `eligible`, matching the cohort table
-    (frontend PatientMatchTable.bucketOf) and the runs index's match count
-    (services.screening._match_count) — three renderings of one run must not
-    disagree about who was eligible.
-    """
-    if evaluation.get("needs_review"):
-        return "review"
-    return "eligible" if evaluation.get("eligible") else "ineligible"
-
-
+# Which cohort bucket a patient lands in, and how it reads, come from
+# services/cohort.py — the report, the runs index's match count and the run
+# comparison (#59) must not disagree about who was eligible. Only the tag colour is
+# this document's own business.
 _BUCKET_TAGS = {"eligible": "pass", "review": "warn", "ineligible": "fail"}
-_BUCKET_LABELS = {"eligible": "Eligible", "review": "Needs review", "ineligible": "Ineligible"}
 
 
 def _tag(text: str, variant: str) -> str:
@@ -468,11 +458,10 @@ def _cohort_section(values: Mapping[str, Any]) -> str:
     evaluations = [_mapping(item) for item in _items(values, "matched_patients")]
     if not evaluations:
         return ""
-    counts = {"eligible": 0, "review": 0, "ineligible": 0}
+    counts = cohort.bucket_counts(evaluations)
     rows: list[str] = []
     for evaluation in evaluations:
-        bucket = _bucket_of(evaluation)
-        counts[bucket] += 1
+        bucket = cohort.bucket_of(evaluation)
         unresolved = [
             result
             for result in (_mapping(item) for item in _items(evaluation, "criterion_results"))
@@ -491,12 +480,12 @@ def _cohort_section(values: Mapping[str, Any]) -> str:
         rows.append(
             f'<tr><td><span class="mono">{_esc(evaluation.get("patient_id"))}</span>'
             f'<div class="detail">{_esc(evaluation.get("name"))}</div></td>'
-            f"<td>{_tag(_BUCKET_LABELS[bucket], _BUCKET_TAGS[bucket])}</td>"
+            f"<td>{_tag(cohort.BUCKET_LABELS[bucket], _BUCKET_TAGS[bucket])}</td>"
             f"<td>{_esc(evaluation.get('summary'))}{detail}</td></tr>"
         )
     tally = "".join(
-        _tag(f"{counts[bucket]} {_BUCKET_LABELS[bucket].lower()}", _BUCKET_TAGS[bucket])
-        for bucket in ("eligible", "review", "ineligible")
+        _tag(f"{counts[bucket]} {cohort.BUCKET_LABELS[bucket].lower()}", _BUCKET_TAGS[bucket])
+        for bucket in cohort.BUCKET_ORDER
     )
     summary = values.get("match_summary")
     lead = f'<div class="counts">{tally}</div>' + (f"<p>{_esc(summary)}</p>" if summary else "")

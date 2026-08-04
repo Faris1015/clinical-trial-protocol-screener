@@ -360,6 +360,97 @@ export type MetricsSummary = {
   };
 };
 
+/**
+ * One run's column header in a side-by-side comparison (#59).
+ *
+ * `side` echoes the query parameter that named it, so a row's `a`/`b` fields are
+ * unambiguous without matching thread ids. The counts come from the same
+ * checkpoint the rows below are built from rather than from the runs index's
+ * denormalized columns, so a header can't contradict the table under it.
+ */
+export type ComparisonRun = {
+  side: "a" | "b";
+  thread_id: string;
+  source_filename: string;
+  status: ScreeningStatus | string;
+  created_at: string;
+  trial_title: string;
+  /** 0 for the parser's own extraction, N for the Nth reviewer revision (#53). */
+  criteria_revision: number;
+  /** Criteria across the four real buckets — `unparseable` excluded, as elsewhere. */
+  criteria_count: number;
+  cohort: { eligible: number; review: number; ineligible: number; total: number };
+  /** Whether this run has an extraction at all — false for one that never streamed. */
+  parsed: boolean;
+  /** Whether it got as far as scoring a cohort; false for one parked at the gate. */
+  matched: boolean;
+};
+
+/** `unchanged` is not a difference; the other three are what gets highlighted. */
+export type CriteriaCompareKind = "unchanged" | "modified" | "added" | "removed";
+
+/**
+ * One criterion as the two runs have it — paired on the protocol sentence both
+ * quote, so a criterion that moved position is not reported as a change. Exactly
+ * one side is null for an addition or a removal, both are set otherwise.
+ */
+export type CriteriaCompareRow = {
+  kind: CriteriaCompareKind;
+  a: string | null;
+  b: string | null;
+};
+
+/** One criteria bucket's paired rows. Buckets neither run used are absent. */
+export type CriteriaCompareBucket = {
+  bucket: string;
+  rows: CriteriaCompareRow[];
+};
+
+/** One patient's verdict in one run, with `label` pre-rendered by the API. */
+export type CohortVerdict = {
+  bucket: "eligible" | "review" | "ineligible" | string;
+  label: string;
+};
+
+/** `changed` is the same patient with a different verdict; `only_*` one run scored. */
+export type MatchCompareKind = "same" | "changed" | "only_a" | "only_b";
+
+/** One patient's verdict in each run. `a`/`b` are null when that run never scored them. */
+export type PatientCompareRow = {
+  patient_id: string;
+  name: string;
+  kind: MatchCompareKind;
+  a: CohortVerdict | null;
+  b: CohortVerdict | null;
+};
+
+/**
+ * `GET /api/screenings/compare?a=…&b=…` — two runs diffed side by side (#59).
+ *
+ * `runs` is `[a, b]`, the order the request named them, and every row below states
+ * its A and B side under those same keys. The pairing (criteria by protocol
+ * sentence, patients by EHR id) happens server-side, beside the reviewer-edit diff
+ * that uses the same keying — see backend/app/services/comparison.py.
+ */
+export type RunComparison = {
+  runs: ComparisonRun[];
+  criteria: {
+    buckets: CriteriaCompareBucket[];
+    totals: Record<CriteriaCompareKind, number>;
+    /** modified + added + removed — 0 when the two extractions agree. */
+    differences: number;
+    /** True only when both runs parsed *and* nothing differs. */
+    identical: boolean;
+  };
+  matches: {
+    patients: PatientCompareRow[];
+    totals: Record<MatchCompareKind, number>;
+    differences: number;
+    /** Whether both runs scored a cohort; false leaves one column empty by phase. */
+    compared: boolean;
+  };
+};
+
 /** `GET /api/screenings/{thread_id}/state` — a run rehydrated from its checkpoint. */
 export type ScreeningState = {
   values: StateUpdate & {

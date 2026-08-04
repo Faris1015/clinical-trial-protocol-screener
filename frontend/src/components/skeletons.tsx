@@ -165,6 +165,56 @@ export function RunDetailSkeleton() {
 }
 
 /**
+ * Two runs being compared (#59) while the comparison is fetched.
+ *
+ * Shaped like the real page — the two run headers side by side, then a table of
+ * paired rows — because one request fills all of it at once, and the columns are
+ * what the reader is already looking for. Four rows: a comparison is as long as
+ * the extraction, which is not knowable up front.
+ */
+export function RunCompareSkeleton() {
+  return (
+    <Placeholder region="run-compare-skeleton" label="Comparing these two runs…">
+      <div className="space-y-4">
+        <div className="grid items-start gap-3 md:grid-cols-2">
+          {[0, 1].map((column) => (
+            <Card key={column}>
+              <CardHeader className="gap-2">
+                <Skeleton className="h-3 w-20" />
+                <Skeleton className="h-5 w-56 max-w-full" />
+                <Skeleton className="h-3 w-40 max-w-full" />
+              </CardHeader>
+              <CardContent className="flex flex-wrap gap-1.5">
+                <Skeleton className="h-5 w-24 rounded-4xl" />
+                <Skeleton className="h-5 w-20 rounded-4xl" />
+                <Skeleton className="h-5 w-28 rounded-4xl" />
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+        <Card>
+          <CardHeader className="gap-2">
+            <Skeleton className="h-5 w-40" />
+            <Skeleton className="h-3 w-64 max-w-full" />
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {[0, 1, 2, 3].map((row) => (
+              // Difference · first run · second run — the three columns the rows
+              // land in, so the header row doesn't shift them sideways.
+              <div key={row} className="grid grid-cols-[6rem_1fr_1fr] items-center gap-2">
+                <Skeleton className="h-5 w-20 rounded-4xl" />
+                <Skeleton className="h-4 w-full" />
+                <Skeleton className="h-4 w-5/6" />
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      </div>
+    </Placeholder>
+  );
+}
+
+/**
  * The rules viewer (#57) while it fetches the compliance database.
  *
  * Shaped like `RuleRow`: id, severity chip and check kind on one line, then the
