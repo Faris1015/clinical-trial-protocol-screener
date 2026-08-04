@@ -1,0 +1,100 @@
+version: 2
+
+# Dependabot was previously configured through the GitHub UI, which only watched
+# npm in /frontend. The backend's Python deps and the workflow actions were
+# unwatched entirely — the Node 20 action deprecations surfaced only as a build
+# annotation, and nothing was tracking the FastAPI/LangGraph tree at all. This
+# file makes coverage explicit, reviewable, and version-controlled.
+#
+# Note on security updates: `groups` below applies to *version* updates only.
+# Dependabot still raises security advisories as their own individual PRs, which
+# is what we want — a CVE fix should not be held up behind a batch of routine
+# bumps.
+updates:
+  # ── Frontend (npm) ──────────────────────────────────────────────────────────
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      # Matches the repo's Conventional Commits convention, which pr-title.yml
+      # enforces on every PR title.
+      prefix: chore
+      include: scope
+    # Without grouping, Dependabot opens one PR per advisory chain and can raise
+    # the same underlying change twice under different framings — it filed the
+    # byte-for-byte identical next+postcss+sharp bump as both #80 and #82.
+    # Groups are matched in order, so the specific buckets come first.
+    groups:
+      # Next and its lockstep companions move together or not at all;
+      # eslint-config-next tracks the Next minor.
+      next:
+        patterns:
+          - next
+          - eslint-config-next
+          - "@next/*"
+      # React runtime and its types must stay on the same major.
+      react:
+        patterns:
+          - react
+          - react-dom
+          - "@types/react"
+          - "@types/react-dom"
+      # Everything else, split so a dev-tooling bump never rides along with a
+      # change that reaches the shipped bundle.
+      dev-tooling:
+        dependency-type: development
+      production:
+        dependency-type: production
+
+  # ── Backend (pip) ───────────────────────────────────────────────────────────
+  - package-ecosystem: pip
+    directory: /backend
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      include: scope
+    # pyproject.toml pins floors (`fastapi>=0.115`) with no upper bounds, so a
+    # routine upstream release already satisfies the constraint and needs no
+    # edit. `increase-if-necessary` keeps Dependabot quiet in that common case
+    # and moves a floor only when it genuinely must — i.e. when the installed
+    # version is vulnerable. That makes backend PRs rare and high-signal.
+    versioning-strategy: increase-if-necessary
+    # CAVEAT: ci.yml's "Lock drift check" regenerates requirements.lock with
+    # pip-compile and fails on any diff. Dependabot does not run pip-compile, so
+    # any PR here that *does* change pyproject.toml will go red on that check
+    # until the lock is regenerated:
+    #
+    #     cd backend && pip-compile --output-file=requirements.lock \
+    #       --strip-extras pyproject.toml
+    #
+    # Expect to push that one commit onto Dependabot's branch before merging.
+    groups:
+      dev-tooling:
+        dependency-type: development
+      production:
+        dependency-type: production
+
+  # ── GitHub Actions ──────────────────────────────────────────────────────────
+  # Watches .github/workflows/. All four workflows currently sit on actions
+  # pinned to Node 20 majors, which GitHub has deprecated and is force-running
+  # on Node 24; this keeps that class of drift visible instead of buried in a
+  # run annotation.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: ci
+      include: scope
+    groups:
+      actions:
+        patterns:
+          - "*"
