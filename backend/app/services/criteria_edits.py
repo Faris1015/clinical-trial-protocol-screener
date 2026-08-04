@@ -100,7 +100,15 @@ def _entry(bucket: str, item: Any) -> tuple[str, str]:
     return provenance or f"label:{label.lower()}", label
 
 
-def _entries(criteria: Mapping[str, Any] | None, bucket: str) -> list[tuple[str, str]]:
+def bucket_entries(criteria: Mapping[str, Any] | None, bucket: str) -> list[tuple[str, str]]:
+    """One bucket's items as `(provenance_key, label)`, in the order they appear.
+
+    Public because the run comparison (#59, services/comparison.py) pairs two
+    *runs*' criteria the same way this module pairs two revisions of one run's — on
+    provenance, with the same labels. Sharing the keying is the point: two views
+    that disagreed about whether two criteria are "the same one" would be two
+    different answers to the same question.
+    """
     items = (criteria or {}).get(bucket) or []
     if not isinstance(items, Sequence) or isinstance(items, str | bytes):
         return []
@@ -138,8 +146,8 @@ def diff_criteria(
     added: list[tuple[str, str, str]] = []
 
     for bucket in DIFFED_BUCKETS:
-        unmatched_after = _entries(after, bucket)
-        for key, label in _entries(before, bucket):
+        unmatched_after = bucket_entries(after, bucket)
+        for key, label in bucket_entries(before, bucket):
             position = next((i for i, (k, _) in enumerate(unmatched_after) if k == key), None)
             if position is None:
                 removed.append((bucket, key, label))

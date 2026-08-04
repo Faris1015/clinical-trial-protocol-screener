@@ -12,25 +12,9 @@ import {
 } from "@/components/ui/table";
 import { ViewModeToggle } from "@/components/view-mode-toggle";
 import { useViewMode } from "@/hooks/useViewMode";
+import { bucketOf, cohortVariant, type CohortBucket } from "@/lib/cohort";
 import { cn } from "@/lib/utils";
 import type { CriterionResult, PatientEvaluation } from "@/types";
-
-type Bucket = "eligible" | "ineligible" | "review";
-
-/**
- * `needs_review` outranks `eligible`: a patient the matcher could not fully
- * determine must reach a human, even if every criterion it *could* evaluate passed.
- */
-function bucketOf(e: PatientEvaluation): Bucket {
-  if (e.needs_review) return "review";
-  return e.eligible ? "eligible" : "ineligible";
-}
-
-const BUCKET_VARIANT = {
-  eligible: "pass",
-  ineligible: "fail",
-  review: "warn",
-} as const;
 
 /** The unresolved criteria — the technical layer's answer to "why not". */
 function unresolved(e: PatientEvaluation): CriterionResult[] {
@@ -48,7 +32,7 @@ export function PatientMatchTable({
   const { technical } = useViewMode();
   if (!patients.length) return null;
 
-  const counts = patients.reduce<Record<Bucket, number>>(
+  const counts = patients.reduce<Record<CohortBucket, number>>(
     (acc, e) => {
       acc[bucketOf(e)] += 1;
       return acc;
@@ -97,7 +81,7 @@ export function PatientMatchTable({
                     {e.name}
                   </TableCell>
                   <TableCell className="align-top">
-                    <Badge variant={BUCKET_VARIANT[bucket]}>{bucket}</Badge>
+                    <Badge variant={cohortVariant(bucket)}>{bucket}</Badge>
                   </TableCell>
                   {/* Plain mode is prose, so it wraps: TableCell defaults to
                       `whitespace-nowrap`, which turns a full sentence into a

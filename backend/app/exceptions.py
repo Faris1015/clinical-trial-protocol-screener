@@ -110,6 +110,17 @@ class InvalidBatchError(ScreenerError):
     http_status = 422
 
 
+class InvalidComparisonError(ScreenerError):
+    """A side-by-side comparison was asked for between a run and itself (#59).
+
+    Not answered with an all-identical table: the request is a mistyped link or a
+    double-selected row, and a page solemnly confirming that a run matches itself
+    would read as a working comparison of two runs.
+    """
+
+    http_status = 422
+
+
 class TooManyActiveScreeningsError(ScreenerError):
     """Every concurrency slot is in use; the caller should retry shortly."""
 

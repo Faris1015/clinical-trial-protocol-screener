@@ -518,6 +518,30 @@ async def list_screenings(
     )
 
 
+@app.get("/api/screenings/compare")
+@limiter.limit(lambda: settings.rate_limit_read)
+async def compare_screenings(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_reviewer)],
+    a: Annotated[str, Query(min_length=1, max_length=200)],
+    b: Annotated[str, Query(min_length=1, max_length=200)],
+) -> dict:
+    """Two runs side by side — criteria and cohort verdicts diffed (#59).
+
+    A collection-level route with both runs in the query string rather than
+    `/{thread_id}/compare/{other}`: a comparison is symmetric and belongs to
+    neither run, and nesting it under one of them would imply an owner. It cannot
+    collide with the `/{thread_id}/…` routes below — those carry a second path
+    segment, `compare` does not.
+
+    Both ids are declared as plain strings with a length cap, not a checked format:
+    a thread id is minted as a UUID here, but the store is the authority on what
+    exists, and validating the shape would turn an unknown id's clear 404 into a
+    422 about characters. `a == b` is a 422 (see services.screening).
+    """
+    return await screening.compare_screenings(_store(), _graph(), a, b)
+
+
 @app.get("/api/screenings/{thread_id}/stream")
 @limiter.limit(lambda: settings.rate_limit_read)
 async def stream_screening(
