@@ -32,7 +32,7 @@ jobs:
   build-images:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build backend image (no push)
         run: docker build -t screener-backend backend
       - name: Assert backend image size < 300MB
