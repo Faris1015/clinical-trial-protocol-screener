@@ -438,3 +438,217 @@ async def test_approve_before_streaming_is_conflict(monkeypatch):
             resp = await client.post(f"/api/screenings/{thread_id}/approve")
             assert resp.status_code == 409
             assert resp.json()["error"] == "ScreeningNotApprovableError"
+
+
+async def _park_at_the_gate(client) -> str:
+    """Upload a protocol and stream it until it interrupts at the human gate."""
+    upload = await client.post(
+        "/api/screenings",
+        files={"file": ("protocol.md", PROTOCOL_TEXT.encode(), "text/markdown")},
+    )
+    thread_id = str(upload.json()["thread_id"])
+    async with client.stream("GET", f"/api/screenings/{thread_id}/stream") as resp:
+        lines = [line async for line in resp.aiter_lines()]
+    assert _sse_frames(lines)[-1]["node"] == "__interrupt__"
+    return thread_id
+
+
+async def test_reject_at_the_gate_ends_the_run_on_the_record(monkeypatch):
+    """The gate's other exit, end to end (#91) — through the real checkpointer, so
+    this is what proves the run actually *terminates* rather than staying parked
+    with a rejection written next to a pending matcher."""
+    monkeypatch.setattr(parser_mod, "get_llm", lambda: FakeChatModel([good_criteria()]))
+    monkeypatch.setattr(critic_mod, "run_llm_semantic_review", lambda _state: [])
+
+    async with main.lifespan(main.app):
+        transport = ASGITransport(app=main.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            sign_in(client)
+            thread_id = await _park_at_the_gate(client)
+
+            reason = "Phase 0 device trial — this cohort has no data for its criteria."
+            response = await client.post(
+                f"/api/screenings/{thread_id}/reject", json={"reason": reason}
+            )
+            assert response.status_code == 200
+            assert response.json()["status"] == "rejected"
+            assert response.json()["rejected_by"] == REVIEWER.email
+
+            # Nothing is pending any more: this is the fix for a run sitting in
+            # `awaiting_approval` forever, and it can only be checked against a
+            # real graph.
+            state = (await client.get(f"/api/screenings/{thread_id}/state")).json()
+            assert state["pending"] == []
+            values = state["values"]
+            assert values["current_step"] == "rejected"
+            assert values["rejected_by"] == REVIEWER.email
+            assert values["rejected_by_role"] == REVIEWER.role
+            assert values["rejected_at"]
+            assert values["rejected_reason"] == reason
+            # The matcher never ran, so no patient was ever scored.
+            assert not values.get("matched_patients")
+            # Nor was it mistaken for an approval.
+            assert values["approved_by"] is None
+
+            # The event log carries it, attributed to the reviewer rather than to
+            # the Critic's own `rejected` push-backs.
+            rejections = [
+                e for e in values["events"] if e["agent"] == "human" and e["status"] == "rejected"
+            ]
+            assert len(rejections) == 1
+            assert reason in rejections[0]["detail"]
+
+            # And the derived timeline names the actor from the durable trail.
+            entry = [
+                e
+                for e in state["timeline"]["entries"]
+                if e["agent"] == "human" and e["status"] == "rejected"
+            ][-1]
+            assert entry["actor"] == REVIEWER.email
+            assert entry["outcome"] == "Rejected"
+            assert state["timeline"]["summary"]["rejected_by"] == REVIEWER.email
+            assert state["timeline"]["summary"]["rejected_reason"] == reason
+
+
+async def test_a_rejected_run_is_listed_and_filterable_as_rejected(monkeypatch):
+    """The runs index has to stop counting it as in flight — which means both the
+    row and the status filter accept the new terminal value (#91)."""
+    monkeypatch.setattr(parser_mod, "get_llm", lambda: FakeChatModel([good_criteria()]))
+    monkeypatch.setattr(critic_mod, "run_llm_semantic_review", lambda _state: [])
+
+    async with main.lifespan(main.app):
+        transport = ASGITransport(app=main.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            sign_in(client)
+            thread_id = await _park_at_the_gate(client)
+            await client.post(
+                f"/api/screenings/{thread_id}/reject", json={"reason": "Not screenable."}
+            )
+
+            row = (await client.get("/api/screenings")).json()["items"][0]
+            assert row["status"] == "rejected"
+            # The criteria it did extract stay on the row; the cohort is empty.
+            assert row["criteria_count"] > 0
+            assert row["match_count"] == 0
+
+            filtered = (await client.get("/api/screenings?status=rejected")).json()
+            assert [item["thread_id"] for item in filtered["items"]] == [thread_id]
+            assert (await client.get("/api/screenings?status=awaiting_approval")).json()[
+                "total"
+            ] == 0
+
+
+async def test_a_rejected_run_accepts_no_further_gate_decisions(monkeypatch):
+    """Rejection is terminal: approving, re-rejecting or editing it afterwards
+    would each rewrite a decision that has already been recorded."""
+    monkeypatch.setattr(parser_mod, "get_llm", lambda: FakeChatModel([good_criteria()]))
+    monkeypatch.setattr(critic_mod, "run_llm_semantic_review", lambda _state: [])
+
+    async with main.lifespan(main.app):
+        transport = ASGITransport(app=main.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            sign_in(client)
+            thread_id = await _park_at_the_gate(client)
+            await client.post(
+                f"/api/screenings/{thread_id}/reject", json={"reason": "Wrong document."}
+            )
+
+            again = await client.post(
+                f"/api/screenings/{thread_id}/reject", json={"reason": "Still wrong."}
+            )
+            assert again.status_code == 409
+            assert again.json()["error"] == "ScreeningNotRejectableError"
+
+            approve = await client.post(f"/api/screenings/{thread_id}/approve")
+            assert approve.status_code == 409
+            assert approve.json()["error"] == "ScreeningNotApprovableError"
+
+            edit = await client.patch(
+                f"/api/screenings/{thread_id}/criteria",
+                json={"base_revision": 0, "criteria": _edited(good_criteria())},
+            )
+            assert edit.status_code == 409
+            assert edit.json()["error"] == "ScreeningNotEditableError"
+
+            # And the first decision is still the one on file, unamended.
+            values = (await client.get(f"/api/screenings/{thread_id}/state")).json()["values"]
+            assert values["rejected_reason"] == "Wrong document."
+
+
+async def test_reject_without_a_reason_is_422(monkeypatch):
+    """The reason is the whole point of recording the decision, so a blank one is
+    refused before the run is touched — whitespace included."""
+    monkeypatch.setattr(parser_mod, "get_llm", lambda: FakeChatModel([good_criteria()]))
+    monkeypatch.setattr(critic_mod, "run_llm_semantic_review", lambda _state: [])
+
+    async with main.lifespan(main.app):
+        transport = ASGITransport(app=main.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            sign_in(client)
+            thread_id = await _park_at_the_gate(client)
+
+            for body in ({}, {"reason": ""}, {"reason": "   "}):
+                response = await client.post(f"/api/screenings/{thread_id}/reject", json=body)
+                assert response.status_code == 422, body
+
+            # Untouched: still parked, still approvable.
+            state = (await client.get(f"/api/screenings/{thread_id}/state")).json()
+            assert state["pending"] == ["matcher"]
+            assert state["values"].get("rejected_by") is None
+
+
+async def test_reject_of_a_run_that_never_streamed_is_conflict(monkeypatch):
+    """Nothing has asked a reviewer anything yet — the same shape of 409 approving
+    such a run gets."""
+    monkeypatch.setattr(parser_mod, "get_llm", lambda: FakeChatModel([good_criteria()]))
+
+    async with main.lifespan(main.app):
+        transport = ASGITransport(app=main.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            sign_in(client)
+            upload = await client.post(
+                "/api/screenings",
+                files={"file": ("protocol.md", PROTOCOL_TEXT.encode(), "text/markdown")},
+            )
+            response = await client.post(
+                f"/api/screenings/{upload.json()['thread_id']}/reject",
+                json={"reason": "No."},
+            )
+            assert response.status_code == 409
+            assert response.json()["error"] == "ScreeningNotRejectableError"
+
+
+async def test_an_escalated_run_can_be_rejected_rather_than_fixed(monkeypatch):
+    """The blocked path's other exit (#91). An escalated run has already reached
+    END, so this covers the branch that merges the decision without moving the
+    cursor — the one case `as_node="matcher"` would be wrong for."""
+    monkeypatch.setattr(parser_mod, "get_llm", lambda: FakeChatModel([bad_criteria()]))
+    monkeypatch.setattr(critic_mod, "run_llm_semantic_review", lambda _state: [])
+
+    async with main.lifespan(main.app):
+        transport = ASGITransport(app=main.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            sign_in(client)
+            upload = await client.post(
+                "/api/screenings",
+                files={"file": ("protocol.md", PROTOCOL_TEXT.encode(), "text/markdown")},
+            )
+            thread_id = upload.json()["thread_id"]
+            async with client.stream("GET", f"/api/screenings/{thread_id}/stream") as resp:
+                lines = [line async for line in resp.aiter_lines()]
+            assert "human_escalation" in [f["node"] for f in _sse_frames(lines)]
+
+            response = await client.post(
+                f"/api/screenings/{thread_id}/reject",
+                json={"reason": "The protocol's eligibility section is unusable as written."},
+            )
+            assert response.status_code == 200
+
+            state = (await client.get(f"/api/screenings/{thread_id}/state")).json()
+            # Still terminal, and now terminal for a reason a person owns: the
+            # escalation stands in the log, the rejection is what closed it.
+            assert state["pending"] == []
+            assert state["values"]["current_step"] == "rejected"
+            assert state["values"]["rejected_by"] == REVIEWER.email
+            assert any(e["status"] == "escalated" for e in state["values"]["events"])
+            assert (await client.get("/api/screenings")).json()["items"][0]["status"] == "rejected"

@@ -46,8 +46,8 @@ _ACTOR_LABELS = {
     "parser": "Parser",
     "critic": "Regulatory Critic",
     "matcher": "Patient Matcher",
-    # Both human-gate outcomes — an approval (#50) and an edit-and-rerun (#53) —
-    # are logged under the one `human` agent.
+    # Every human-gate outcome — an approval (#50), an edit-and-rerun (#53) and a
+    # rejection (#91) — is logged under the one `human` agent.
     "human": "Reviewer",
 }
 
@@ -96,9 +96,13 @@ class TimelineSummary(TypedDict):
 
     `attempts` counts Parser *runs*, which is one more than the checkpoint's
     `parse_attempts` for a run whose last extraction failed (that counter only
-    advances on a successful one). The approval fields come from the durable
-    trail in state, not from the log, so they survive a checkpoint whose
-    approval event is missing.
+    advances on a successful one). The approval and rejection fields come from the
+    durable trail in state, not from the log, so they survive a checkpoint whose
+    gate event is missing.
+
+    A run has at most one of the two: `approved_by` means patient matching was
+    authorized, `rejected_by` means the run was stopped at the gate instead (#91).
+    Both empty is a run that never reached a human.
     """
 
     started_at: str
@@ -111,6 +115,10 @@ class TimelineSummary(TypedDict):
     approved_by: str
     approved_by_role: str
     approved_at: str
+    rejected_by: str
+    rejected_by_role: str
+    rejected_at: str
+    rejected_reason: str
 
 
 class RunTimeline(TypedDict):
@@ -242,6 +250,13 @@ def build_timeline(values: Mapping[str, Any]) -> RunTimeline:
         elif agent == "human" and status == "approved":
             actor = _text(values.get("approved_by"))
             actor_role = _text(values.get("approved_by_role"))
+        elif agent == "human" and status == "rejected":
+            # The gate's other decision (#91). Keyed on the `human` agent, not on
+            # the status alone: `rejected` is also what the Critic logs when it
+            # sends an extraction back, and attributing that to a person would put
+            # a reviewer's name on a machine's verdict.
+            actor = _text(values.get("rejected_by"))
+            actor_role = _text(values.get("rejected_by_role"))
 
         entries.append(
             TimelineEntry(
@@ -295,4 +310,8 @@ def _summarize(values: Mapping[str, Any], entries: Sequence[TimelineEntry]) -> T
         approved_by=_text(values.get("approved_by")),
         approved_by_role=_text(values.get("approved_by_role")),
         approved_at=_text(values.get("approved_at")),
+        rejected_by=_text(values.get("rejected_by")),
+        rejected_by_role=_text(values.get("rejected_by_role")),
+        rejected_at=_text(values.get("rejected_at")),
+        rejected_reason=_text(values.get("rejected_reason")),
     )

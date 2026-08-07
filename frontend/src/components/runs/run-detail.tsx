@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { AlertTriangle, ArrowLeft, ShieldCheck } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Ban, ShieldCheck } from "lucide-react";
 import { AgentCard } from "@/components/AgentCard";
 import { ComplianceFindings } from "@/components/ComplianceFindings";
 import { CriteriaProvenance } from "@/components/provenance/criteria-provenance";
@@ -231,6 +231,32 @@ export function RunDetail() {
               <span className="font-medium">{values.approved_by}</span>
               {values.approved_by_role ? ` (${values.approved_by_role})` : ""}
               {values.approved_at ? ` on ${formatTimestamp(values.approved_at)}` : ""}.
+            </span>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* The gate's other durable decision (#91). Where the approval card
+          attributes a cohort, this explains the absence of one: a rejected run's
+          reason is the only thing that says why it stops here, and it has to
+          outlive the session that typed it. */}
+      {values.rejected_by && (
+        <Card
+          className="border-destructive/40 bg-destructive/10"
+          data-region="rejection-provenance"
+        >
+          <CardContent className="flex items-start gap-2.5 text-sm">
+            <Ban className="text-destructive mt-0.5 size-4 shrink-0" aria-hidden="true" />
+            <span>
+              <span className="font-medium">
+                Rejected by {values.rejected_by}
+                {values.rejected_by_role ? ` (${values.rejected_by_role})` : ""}
+                {values.rejected_at ? ` on ${formatTimestamp(values.rejected_at)}` : ""}
+              </span>
+              . No patient data was matched.
+              {values.rejected_reason && (
+                <span className="block pt-1">{values.rejected_reason}</span>
+              )}
             </span>
           </CardContent>
         </Card>

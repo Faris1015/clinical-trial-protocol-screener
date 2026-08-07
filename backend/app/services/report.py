@@ -71,11 +71,12 @@ _PHASE_LABELS = {
     "done": "Done",
     "failed": "Failed",
     "escalated": "Escalated",
+    "rejected": "Rejected",
 }
 
-# What each non-final phase means for the report's completeness. A reader holding
-# a report for a parked run has to be told the cohort is absent *because the run
-# has not reached matching* — not because nobody matched.
+# What a phase other than "done" means for the report's completeness. A reader
+# holding a report for a parked run has to be told the cohort is absent *because
+# the run has not reached matching* — not because nobody matched.
 _PHASE_NOTES = {
     "awaiting_approval": (
         "This run is parked at the approval gate: the criteria below have passed "
@@ -88,6 +89,13 @@ _PHASE_NOTES = {
     "failed": (
         "This run did not finish. Whatever it produced before failing is reported "
         "below; the cohort is absent because matching never ran."
+    ),
+    # Terminal, but for a reason worth stating differently from a failure (#91):
+    # the pipeline worked and a person decided against it. The named reviewer and
+    # their reason are in the rejection section below.
+    "rejected": (
+        "A reviewer rejected this screening at the approval gate, so no patient "
+        "data was matched. Their reason is recorded below."
     ),
     "routing": "This run had not progressed past intake when the report was taken.",
     "parsing": "This run was still extracting criteria when the report was taken.",
@@ -446,6 +454,32 @@ def _authorization_section(values: Mapping[str, Any]) -> str:
     )
 
 
+def _rejection_section(values: Mapping[str, Any]) -> str:
+    """Who stopped the run at the gate, and why (#91) — the other audit line.
+
+    Its own section rather than a branch of the authorization one: they are
+    mutually exclusive outcomes of the same decision, and a report of a rejected
+    run has no cohort to attribute — what it has is the reason, which is the whole
+    reason the document is worth handing to anyone. The reason is printed verbatim
+    (escaped), because paraphrasing a reviewer's words in an audit record would
+    defeat the point of recording them.
+    """
+    rejecter = values.get("rejected_by")
+    if not rejecter:
+        return ""
+    role = f" ({_esc(values.get('rejected_by_role'))})" if values.get("rejected_by_role") else ""
+    at = _timestamp(values.get("rejected_at"))
+    when = f" on {_esc(at)}" if at else ""
+    reason = values.get("rejected_reason")
+    given = f"<p>Reason given: {_esc(reason)}</p>" if reason else ""
+    return _section(
+        "Rejected at the approval gate",
+        f"<p>This screening was rejected by <strong>{_esc(rejecter)}</strong>{role}{when}. "
+        f"No patient data was matched.</p>{given}",
+        region="report-rejection",
+    )
+
+
 def _cohort_section(values: Mapping[str, Any]) -> str:
     """The match table: every evaluated patient, their verdict, and why.
 
@@ -509,6 +543,15 @@ _OUTCOME_TAGS = {
     "edited": "warn",
 }
 
+# The one step whose tag depends on who took it: `rejected` from the Critic is
+# another round of the retry loop, while `rejected` from a human ends the run
+# (#91). Same word, opposite consequences — keyed on `(agent, status)`.
+_ACTOR_OUTCOME_TAGS = {("human", "rejected"): "fail"}
+
+
+def _outcome_tag(agent: str, status: str) -> str:
+    return _ACTOR_OUTCOME_TAGS.get((agent, status)) or _OUTCOME_TAGS.get(status, "plain")
+
 
 def _timeline_lead(summary: timeline.TimelineSummary) -> str:
     """The run's shape in one line, above the log (#55).
@@ -563,7 +606,7 @@ def _events_section(values: Mapping[str, Any]) -> str:
             f'<div class="detail">{_esc(entry["elapsed"])}</div></td>'
             f"<td>{_esc(entry['label'])}"
             f'<div class="detail">{_esc(qualifier)}</div></td>'
-            f"<td>{_tag(entry['outcome'], _OUTCOME_TAGS.get(entry['status'], 'plain'))}</td>"
+            f"<td>{_tag(entry['outcome'], _outcome_tag(entry['agent'], entry['status']))}</td>"
             f"<td>{_esc(entry['detail'])}</td></tr>"
         )
     table = _table(("When", "Step", "Outcome", "Detail"), rows)
@@ -634,6 +677,7 @@ def render_report(payload: Mapping[str, Any], *, generated_at: datetime | None =
             _edits_section(values),
             _findings_section(values),
             _authorization_section(values),
+            _rejection_section(values),
             _cohort_section(values),
             _events_section(values),
         )

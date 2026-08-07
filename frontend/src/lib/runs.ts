@@ -49,6 +49,7 @@ export const RUN_STATUSES: ScreeningStatus[] = [
   "done",
   "failed",
   "escalated",
+  "rejected",
 ];
 
 const STATUS_LABELS: Record<ScreeningStatus, string> = {
@@ -60,6 +61,7 @@ const STATUS_LABELS: Record<ScreeningStatus, string> = {
   done: "Done",
   failed: "Failed",
   escalated: "Escalated",
+  rejected: "Rejected",
 };
 
 /**
@@ -72,15 +74,21 @@ export function statusLabel(status: string): string {
 
 /**
  * Which badge colour a status reads as, reusing the clinical status tokens:
- * `done` is the only success, `failed` is the only outright failure, and
- * everything else is either in flight or waiting on a human — neither of which
- * is an error, so they stay neutral rather than shouting.
+ * `done` is the only success, `failed` and `rejected` are the two ways a run ends
+ * without a cohort, and everything else is either in flight or waiting on a
+ * human — neither of which is an error, so they stay neutral rather than
+ * shouting.
+ *
+ * `rejected` (#91) reads as `fail` rather than `warn` even though it is a
+ * deliberate decision: `warn` is this table's "someone still has to act on this"
+ * colour, and a rejected run is finished. The label is what says the two apart.
  */
 export function statusVariant(status: string): "pass" | "fail" | "warn" | "secondary" {
   switch (status) {
     case "done":
       return "pass";
     case "failed":
+    case "rejected":
       return "fail";
     case "awaiting_approval":
     case "escalated":

@@ -1,4 +1,4 @@
-import { History, PencilLine, UserCheck } from "lucide-react";
+import { Ban, History, PencilLine, UserCheck } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
@@ -10,8 +10,12 @@ import type { RunTimeline as RunTimelineData, TimelineEntry, TimelineSummary } f
  * Critic pushing work back and `edited` is a reviewer correcting it — neither is
  * a failure, and only `failed` is terminal-bad. Mirrors the report's
  * `_OUTCOME_TAGS` (backend/app/services/report.py).
+ *
+ * The agent is part of the reading, not decoration: `rejected` from the Critic is
+ * one more round of the retry loop, while `rejected` from a human ends the run
+ * (#91) — the same word for a push-back and for a stop, told apart by who said it.
  */
-function outcomeVariant(status: string): "pass" | "fail" | "warn" | "secondary" {
+function outcomeVariant(agent: string, status: string): "pass" | "fail" | "warn" | "secondary" {
   switch (status) {
     case "completed":
     case "approved":
@@ -19,6 +23,7 @@ function outcomeVariant(status: string): "pass" | "fail" | "warn" | "secondary" 
     case "failed":
       return "fail";
     case "rejected":
+      return agent === "human" ? "fail" : "warn";
     case "escalated":
     case "edited":
       return "warn";
@@ -61,6 +66,9 @@ function summaryFacts(summary?: TimelineSummary): string[] {
   // Read from the durable approval trail rather than from an entry (#50), so a
   // checkpoint whose approval event is missing still attributes the matching.
   if (summary.approved_by) facts.push(`Authorized by ${summary.approved_by}`);
+  // The gate's other decision (#91), from the same durable trail. Mutually
+  // exclusive with the line above — a run is approved or rejected, never both.
+  if (summary.rejected_by) facts.push(`Rejected by ${summary.rejected_by}`);
   return facts;
 }
 
@@ -69,7 +77,11 @@ function plural(count: number): string {
 }
 
 function ActorLine({ entry }: { entry: TimelineEntry }) {
-  const Icon = entry.status === "edited" ? PencilLine : UserCheck;
+  // A tick for an approval, a pencil for an edit, and a stop for a rejection
+  // (#91) — a checkmark beside the name of the person who refused the run would
+  // read as the opposite of what they did.
+  const Icon =
+    entry.status === "edited" ? PencilLine : entry.status === "rejected" ? Ban : UserCheck;
   return (
     <p className="text-muted-foreground flex items-center gap-1.5 text-xs">
       <Icon className="size-3.5 shrink-0" aria-hidden="true" />
@@ -126,7 +138,7 @@ export function RunTimeline({ timeline }: { timeline?: RunTimelineData }) {
             reads "3 of 8" and gets the same sequence the rail draws. */}
         <ol>
           {entries.map((entry, index) => {
-            const variant = outcomeVariant(entry.status);
+            const variant = outcomeVariant(entry.agent, entry.status);
             const last = index === entries.length - 1;
             return (
               <li

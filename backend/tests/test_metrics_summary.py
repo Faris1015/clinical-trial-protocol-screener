@@ -93,8 +93,34 @@ def test_the_funnel_reads_worst_last(isolated):
     assert [row["outcome"] for row in summarize_metrics()["funnel"]["outcomes"]] == [
         "done",
         "escalated",
+        "rejected",
         "failed",
     ]
+
+
+def test_a_reviewer_rejection_is_its_own_bar_not_a_failure(isolated):
+    """The funnel has to distinguish "we chose not to screen this" from "we could
+    not" (#91) — folding a reviewer's decision into `failed` would read as an
+    instance breaking once per refused protocol."""
+    isolated.screenings.labels(outcome="done").inc()
+    isolated.screenings.labels(outcome="rejected").inc()
+    isolated.screenings.labels(outcome="rejected").inc()
+
+    rows = _outcomes(summarize_metrics())
+    assert rows["rejected"]["count"] == 2
+    assert rows["rejected"]["share"] == 66.7
+    assert rows["rejected"]["label"] == "Rejected by reviewer"
+    assert rows["failed"]["count"] == 0
+
+
+def test_record_rejection_counts_the_outcome_the_graph_never_emits(isolated, monkeypatch):
+    """No node runs when a reviewer stops a screening, so `record_node_metrics`
+    can't see it — `record_rejection` is what keeps the run in the funnel at all."""
+    monkeypatch.setattr(metrics_mod, "screenings_total", isolated.screenings)
+
+    metrics_mod.record_rejection()
+
+    assert _outcomes(summarize_metrics())["rejected"]["count"] == 1
 
 
 def test_every_outcome_the_recorder_counts_has_a_row(isolated):

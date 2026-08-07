@@ -51,7 +51,11 @@ export type ProtocolPayload = {
 
 export type AgentEvent = {
   agent: string;
-  /** Node outcomes, plus the human-gate ones: `approved` (#50), `edited` (#53). */
+  /**
+   * Node outcomes, plus the human-gate ones: `approved` (#50), `edited` (#53).
+   * `rejected` is shared — the Critic pushing an extraction back, or a reviewer
+   * stopping the run (#91) — and `agent` is what tells the two apart.
+   */
   status: "started" | "completed" | "rejected" | "escalated" | "failed" | "approved" | "edited";
   detail: string;
   timestamp: string;
@@ -97,6 +101,11 @@ export type TimelineSummary = {
   approved_by: string;
   approved_by_role: string;
   approved_at: string;
+  /** The gate's other decision (#91) — empty for every run that wasn't rejected. */
+  rejected_by: string;
+  rejected_by_role: string;
+  rejected_at: string;
+  rejected_reason: string;
 };
 
 export type RunTimeline = {
@@ -169,6 +178,15 @@ export type StateUpdate = {
   approved_by_role?: string | null;
   approved_at?: string | null;
   /**
+   * The gate's other outcome (#91): who stopped the run, when, and why. A run
+   * carries these or the `approved_*` trio, never both — and `rejected_reason` is
+   * never blank when the others are set, since the API requires it.
+   */
+  rejected_by?: string | null;
+  rejected_by_role?: string | null;
+  rejected_at?: string | null;
+  rejected_reason?: string | null;
+  /**
    * Edit-and-rerun (#53). `criteria_revision` is 0 for the parser's own
    * extraction and increments per reviewer revision — it is the token a PATCH has
    * to echo back, so a stale editor can't overwrite someone else's corrections.
@@ -198,7 +216,9 @@ export type ScreeningStatus =
   | "matching"
   | "done"
   | "failed"
-  | "escalated";
+  | "escalated"
+  /** Terminal, and a decision rather than a breakdown (#91) — see `rejected_by`. */
+  | "rejected";
 
 /** One row from `GET /api/screenings` — metadata only, no protocol text. */
 export type Screening = {

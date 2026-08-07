@@ -3,9 +3,10 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { AlertTriangle, ArrowLeft, CheckCircle2, Play, RotateCcw, Trash2 } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Ban, CheckCircle2, Play, RotateCcw, Trash2 } from "lucide-react";
 import { ComplianceFindings } from "@/components/ComplianceFindings";
 import { CriteriaDiff } from "@/components/review/criteria-diff";
+import { RejectScreening } from "@/components/review/reject-screening";
 import { CriteriaEditorSkeleton } from "@/components/skeletons";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -351,6 +352,15 @@ export function CriteriaEditor() {
   const findings = state.values.compliance_findings ?? [];
   const blocking = findings.filter((f) => f.severity === "reject");
   const busy = phase === "rerunning";
+  // Already stopped at the gate (#91). Read from the durable trail rather than
+  // from the status, so a rejected run says who and why even if the store row is
+  // behind. It is terminal — the API refuses further edits — so the actions below
+  // are replaced by the decision rather than left to 409.
+  const rejectedBy = state.values.rejected_by;
+  // Where rejecting is still a legal decision, mirroring the API's own rule:
+  // parked at the approval gate, or escalated after the Critic gave up.
+  const rejectable =
+    !rejectedBy && (state.pending.includes("matcher") || state.values.current_step === "escalated");
 
   return (
     <div className="space-y-4" data-region="criteria-editor" data-phase={phaseLabel}>
@@ -373,6 +383,31 @@ export function CriteriaEditor() {
       </Card>
 
       {error && alert(error)}
+
+      {/* The decision, if it has already been made (#91). Above the criteria, not
+          below them: a reader who opens a rejected run needs to know it was
+          stopped — and on whose word — before they start reading an extraction
+          nobody will ever score patients against. */}
+      {rejectedBy && (
+        <Card
+          className="border-destructive/40 bg-destructive/10"
+          role="status"
+          data-region="rejection-provenance"
+        >
+          <CardContent className="flex items-start gap-2.5 text-sm">
+            <Ban className="text-destructive mt-0.5 size-4 shrink-0" aria-hidden="true" />
+            <span>
+              <span className="font-medium">Rejected by {rejectedBy}</span>
+              {state.values.rejected_by_role ? ` (${state.values.rejected_by_role})` : ""}
+              {state.values.rejected_at ? ` on ${formatTimestamp(state.values.rejected_at)}` : ""}.
+              No patient data was matched, and these criteria can no longer be edited.
+              {state.values.rejected_reason && (
+                <span className="block pt-1">{state.values.rejected_reason}</span>
+              )}
+            </span>
+          </CardContent>
+        </Card>
+      )}
 
       {outcome && (
         <Card
@@ -666,35 +701,66 @@ export function CriteriaEditor() {
             </CardContent>
           </Card>
 
-          <Card className="border-primary/40 bg-primary/10" data-region="rerun-actions">
-            <CardContent className="flex flex-col gap-3 text-sm sm:flex-row sm:items-center">
-              <span className="flex-1">
-                Re-running sends these criteria back through the compliance Critic. It does not
-                touch patient data — the run returns to the approval gate for a named approval
-                first.
-              </span>
-              <Button
-                variant="outline"
-                className="shrink-0"
-                disabled={busy}
-                onClick={() =>
-                  setDraft(
-                    state.values.parsed_criteria
-                      ? structuredClone(state.values.parsed_criteria)
-                      : null
-                  )
-                }
-              >
-                <RotateCcw aria-hidden="true" />
-                Discard my changes
-              </Button>
-              <Button size="lg" className="shrink-0" disabled={busy} onClick={rerun}>
-                <Play aria-hidden="true" />
-                {busy ? "Re-running…" : "Save & re-run"}
-              </Button>
-            </CardContent>
-          </Card>
+          {/* Both exits are gone once the run has been rejected: the API refuses
+              an edit to a rejected run, and offering a button that can only 409 is
+              worse than saying the decision is final (which the card above does). */}
+          {!rejectedBy && (
+            <Card className="border-primary/40 bg-primary/10" data-region="rerun-actions">
+              <CardContent className="flex flex-col gap-3 text-sm sm:flex-row sm:items-center">
+                <span className="flex-1">
+                  Re-running sends these criteria back through the compliance Critic. It does not
+                  touch patient data — the run returns to the approval gate for a named approval
+                  first.
+                </span>
+                <Button
+                  variant="outline"
+                  className="shrink-0"
+                  disabled={busy}
+                  onClick={() =>
+                    setDraft(
+                      state.values.parsed_criteria
+                        ? structuredClone(state.values.parsed_criteria)
+                        : null
+                    )
+                  }
+                >
+                  <RotateCcw aria-hidden="true" />
+                  Discard my changes
+                </Button>
+                <Button size="lg" className="shrink-0" disabled={busy} onClick={rerun}>
+                  <Play aria-hidden="true" />
+                  {busy ? "Re-running…" : "Save & re-run"}
+                </Button>
+              </CardContent>
+            </Card>
+          )}
         </>
+      )}
+
+      {/* The third exit (#91), and the only one that is not about fixing the
+          extraction: some protocols cannot be screened however the criteria are
+          worded. Its own card, below the re-run actions, because it is the answer
+          a reviewer reaches only after deciding the others won't do — and it is
+          offered whether or not there is an extraction to edit, since a run with
+          nothing parseable in it is exactly one worth stopping. */}
+      {rejectable && (
+        <Card data-region="reject-actions">
+          <CardContent className="flex flex-col gap-3 text-sm sm:flex-row sm:flex-wrap sm:items-center">
+            <span className="flex-1">
+              If this protocol cannot be screened at all — the wrong document, an eligibility
+              section that isn&apos;t one, criteria this cohort has no data for — stop the run here
+              rather than leaving it parked. Your name and reason are recorded against it.
+            </span>
+            <RejectScreening
+              threadId={threadId}
+              disabled={busy}
+              // Re-read the checkpoint rather than patching local state: the
+              // rejection banner, the phase badge and the timeline all render from
+              // the server's copy, and one fetch keeps them from disagreeing.
+              onRejected={() => setReloadToken((token) => token + 1)}
+            />
+          </CardContent>
+        </Card>
       )}
 
       {/* The before/after the issue asks for, read back from the checkpoint after

@@ -53,17 +53,23 @@ from app.services.metrics import (
 )
 
 # Funnel order: the outcomes a run can end on, worst-last, so the page reads
-# "most runs finished, some escalated, a few failed". Any terminal outcome added
-# to `TERMINAL_OUTCOMES` but not named here is still shown — appended rather than
-# dropped, because a silently missing bar would make the funnel's total look wrong.
-_OUTCOME_ORDER = ("done", "escalated", "failed")
+# "most runs finished, some escalated, a few were rejected, a few failed". Any
+# terminal outcome added to `TERMINAL_OUTCOMES` but not named here is still shown
+# — appended rather than dropped, because a silently missing bar would make the
+# funnel's total look wrong.
+#
+# `rejected` (#91) sits before `failed` and not among it on purpose: a reviewer
+# deciding a protocol is not screenable is the gate working, and folding that into
+# the failure bar would read as an instance breaking once per refused protocol.
+_OUTCOME_ORDER = ("done", "escalated", "rejected", "failed")
 
 # What each outcome is called on screen. `done` is deliberately not "Done": this
 # is a funnel of finished work, and "Completed" is what distinguishes it from the
-# two outcomes that also finished.
+# three outcomes that also finished.
 _OUTCOME_LABELS = {
     "done": "Completed",
     "escalated": "Escalated",
+    "rejected": "Rejected by reviewer",
     "failed": "Failed",
 }
 

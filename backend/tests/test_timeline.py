@@ -226,6 +226,67 @@ def test_the_approver_is_read_from_the_durable_trail_not_the_event_text():
     assert approval["actor"] == "boss@test.local"
 
 
+def test_a_rejection_names_the_reviewer_who_stopped_the_run():
+    """The gate's other decision (#91), attributed from the same durable trail the
+    approval is — so a checkpoint whose event text was reworded still says who."""
+    rejection = _event(
+        "human",
+        "rejected",
+        "Screening rejected by gate@test.local (lead) — wrong document",
+        "2026-07-30T14:02:00+00:00",
+    )
+    entries = _entries(
+        events=[*FULL_LOG[:5], rejection],
+        approved_by=None,
+        approved_by_role=None,
+        approved_at=None,
+        rejected_by="gate@test.local",
+        rejected_by_role="lead",
+        rejected_at="2026-07-30T14:02:00+00:00",
+        rejected_reason="wrong document",
+        current_step="rejected",
+    )
+
+    step = entries[-1]
+    assert (step["actor"], step["actor_role"]) == ("gate@test.local", "lead")
+    assert step["outcome"] == "Rejected"
+
+
+def test_a_critic_rejection_is_never_attributed_to_a_person():
+    """`rejected` is the Critic's push-back as well as a reviewer's stop, so the
+    correlation keys on the agent — a reviewer's name on a machine's verdict would
+    misread the entire audit trail."""
+    critic_step = next(
+        entry for entry in _entries(rejected_by="gate@test.local") if entry["agent"] == "critic"
+    )
+
+    assert critic_step["status"] == "rejected"
+    assert critic_step["actor"] == ""
+
+
+def test_the_summary_carries_the_rejection_beside_the_approval():
+    summary = _summary(
+        rejected_by="gate@test.local",
+        rejected_by_role="lead",
+        rejected_at="2026-07-30T14:02:00+00:00",
+        rejected_reason="Not screenable with this cohort.",
+    )
+
+    assert summary["rejected_by"] == "gate@test.local"
+    assert summary["rejected_by_role"] == "lead"
+    assert summary["rejected_at"] == "2026-07-30T14:02:00+00:00"
+    assert summary["rejected_reason"] == "Not screenable with this cohort."
+
+
+def test_a_run_that_was_never_rejected_reports_empty_rejection_fields():
+    """Guarded like every other field here: a checkpoint written before #91 has no
+    `rejected_*` keys at all, and reading one must not raise on a finished run."""
+    summary = _summary()
+
+    assert summary["rejected_by"] == ""
+    assert summary["rejected_reason"] == ""
+
+
 def test_a_reviewer_edit_pairs_with_the_revision_it_produced():
     edit = next(entry for entry in _entries() if entry["status"] == "edited")
 
@@ -493,5 +554,9 @@ def test_a_run_that_never_streamed_serves_an_empty_timeline(client, monkeypatch)
             "approved_by": "",
             "approved_by_role": "",
             "approved_at": "",
+            "rejected_by": "",
+            "rejected_by_role": "",
+            "rejected_at": "",
+            "rejected_reason": "",
         },
     }

@@ -82,6 +82,10 @@ data gets touched.
   written into the checkpoint *as the Parser* — so the Critic re-runs over it and
   the run re-parks for approval. Edits can't bypass compliance, and matching still
   needs a named approver. Every revision keeps its before/after diff in state.
+- **The human can also say no.** Rejection is a first-class, audited decision
+  symmetric with approval: a required reason plus `rejected_by`/`rejected_at` land
+  in the checkpoint before the graph terminates, so a protocol nobody can screen
+  ends as a named decision rather than a run parked at the gate forever.
 - **Every result is dual-layer.** The Critic's findings and the Matcher's
   per-patient verdicts each carry a plain-language `explanation` next to the
   technical wording, plus a one-line `summary` per result ("Alice matches — meets
@@ -260,7 +264,7 @@ curl -b cookies.txt 'http://localhost:8000/api/screenings?q=nsclc'   # filename 
 
 `limit` defaults to 25 and caps at 100; `status` accepts the phases a screening
 can be in (`routing`, `parsing`, `critiquing`, `awaiting_approval`, `matching`,
-`done`, `failed`, `escalated`) and anything else is a 422. Each row carries the
+`done`, `failed`, `escalated`, `rejected`) and anything else is a 422. Each row carries the
 uploaded filename plus the run's `criteria_count` and `match_count`, so the
 **Past Runs** page renders the index without loading a checkpoint per screening.
 A run's detail view deep-links to `/runs/view/?id=<thread_id>` and rehydrates
@@ -372,6 +376,36 @@ detail view both render. `base_revision` is the optimistic-concurrency token: tw
 reviewers on the same parked run means the second save gets a 409 rather than
 silently discarding the first's corrections. A finished run is not editable (409)
 — its cohort was already scored against the criteria it had.
+
+### Reject at the gate
+
+Some protocols cannot be screened however the criteria are worded — the wrong
+document, an eligibility section that isn't one, thresholds this cohort has no
+data for. Before, a reviewer who reached that conclusion could only walk away,
+leaving the run parked in `awaiting_approval` forever and counted as in flight.
+Rejection is the gate's third exit, and it is audited exactly like approval:
+
+```bash
+curl -b cookies.txt -X POST \
+  http://localhost:8000/api/screenings/<thread_id>/reject \
+  -H 'Content-Type: application/json' \
+  -d '{"reason": "Device protocol — no eligibility criteria this cohort can be screened on."}'
+```
+
+The reason is **required** (422 without one): a terminal state with no
+explanation is a dead end nobody can audit. `rejected_by`, `rejected_by_role`,
+`rejected_at` and `rejected_reason` are written into the checkpoint *before* the
+graph terminates — the same ordering `approved_by` uses — along with a
+`human`/`rejected` entry in the event log, so the run timeline and the exported
+report both show the decision beside the steps that led to it.
+
+Only a run parked at the gate or escalated can be rejected; anything else is a
+409, and a rejected run accepts no further approval, rejection, or edit. Unlike
+approve and edit-and-rerun this returns JSON rather than an SSE stream and holds
+no concurrency slot — it resumes nothing, so the matcher never runs and no
+patient data is touched. `rejected` is its own terminal outcome in the metrics
+funnel, distinct from `failed`: "we chose not to screen this" and "we could not"
+are different answers.
 
 ### Notify on gate / escalation
 
