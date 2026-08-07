@@ -470,6 +470,9 @@ PROTECTED_REQUESTS = [
     ("GET", "/api/screenings"),
     ("GET", "/api/screenings/any-id/stream"),
     ("POST", "/api/screenings/any-id/approve"),
+    # The gate's other decision (#91) carries the same authority as approval, so
+    # it is guarded identically — an anonymous caller must not be able to end a run.
+    ("POST", "/api/screenings/any-id/reject"),
     ("PATCH", "/api/screenings/any-id/criteria"),
     ("GET", "/api/screenings/any-id/state"),
     ("GET", "/api/admin/users"),

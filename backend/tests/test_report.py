@@ -440,6 +440,86 @@ def test_an_escalated_run_reports_its_findings_and_explains_the_missing_cohort()
     assert "Compliance findings" in html
 
 
+def _rejected_html(reason: str = "Wrong document — this is a device protocol.") -> str:
+    """A run a reviewer stopped at the gate (#91), rendered."""
+    return report.render_report(
+        payload(
+            screening={
+                "thread_id": "abc",
+                "source_filename": "p.pdf",
+                "status": "rejected",
+                "created_at": "2026-07-30T13:58:00+00:00",
+                "criteria_count": 4,
+                "match_count": 0,
+            },
+            values={
+                "matched_patients": [],
+                "match_summary": "",
+                "approved_by": None,
+                "approved_by_role": None,
+                "approved_at": None,
+                "current_step": "rejected",
+                "rejected_by": "gate@test.local",
+                "rejected_by_role": "lead",
+                "rejected_at": "2026-07-30T14:02:00+00:00",
+                "rejected_reason": reason,
+                "events": [
+                    EVENTS[0],
+                    {
+                        "agent": "human",
+                        "status": "rejected",
+                        "detail": f"Screening rejected by gate@test.local (lead) — {reason}",
+                        "timestamp": "2026-07-30T14:02:00+00:00",
+                    },
+                ],
+            },
+        ),
+        generated_at=GENERATED_AT,
+    )
+
+
+def test_a_rejected_run_names_the_reviewer_and_prints_their_reason():
+    """The report of a rejected run has no cohort to hand over — what it has is
+    the reason, printed verbatim, which is the only thing that makes the document
+    worth reading (#91)."""
+    html = _rejected_html()
+
+    assert "Rejected at the approval gate" in html
+    assert "gate@test.local" in html
+    assert "(lead)" in html
+    assert "Wrong document — this is a device protocol." in html
+    # And it is not mistaken for an approval, which would claim patient data was
+    # authorized by someone who refused it.
+    assert "Authorization" not in html
+    assert "Cohort" not in html
+
+
+def test_a_rejected_run_explains_the_missing_cohort_in_its_phase_note():
+    html = _rejected_html()
+
+    assert "Rejected" in html
+    assert "rejected this screening at the approval gate" in html
+
+
+def test_a_rejected_step_is_tagged_as_terminal_when_a_human_took_it():
+    """`rejected` is also the Critic's push-back, which is a retry rather than a
+    stop — so the execution log has to colour the two differently."""
+    html = _rejected_html()
+
+    assert 'class="tag tag-fail">Rejected<' in html
+
+
+def test_a_run_that_was_never_rejected_has_no_rejection_section():
+    assert "Rejected at the approval gate" not in render()
+
+
+def test_a_rejection_reason_cannot_smuggle_markup_into_the_document():
+    html = _rejected_html(reason=INJECTION)
+
+    assert "<script>" not in html
+    assert "&lt;script&gt;" in html
+
+
 def test_a_checkpointless_payload_renders_rather_than_raising():
     """`has_reportable_content` gates the route, but the renderer must not be the
     thing that decides — a half-written checkpoint is a document with fewer

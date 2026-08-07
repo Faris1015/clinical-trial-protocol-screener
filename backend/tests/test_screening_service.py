@@ -19,9 +19,10 @@ from app.exceptions import (
     ScreeningNotApprovableError,
     ScreeningNotEditableError,
     ScreeningNotFoundError,
+    ScreeningNotRejectableError,
 )
 from app.persistence import InMemoryScreeningStore, ScreeningRecord
-from app.services import notifications, screening, sse
+from app.services import metrics, notifications, screening, sse
 from tests.auth_helpers import REVIEWER
 
 
@@ -510,6 +511,150 @@ async def test_approve_domain_error_streams_error_frame_and_marks_failed():
     assert frames[-1]["node"] == sse.ERROR
     assert "patients.json is corrupt" in frames[-1]["message"]
     assert (await _first_row(store)).status == "failed"
+
+
+# --- reject (#91) ---------------------------------------------------------
+
+
+async def _reject(
+    store: InMemoryScreeningStore,
+    graph: screening.ScreeningGraph,
+    thread_id: str,
+    reason: str = "Not an oncology protocol — wrong document.",
+) -> dict:
+    return await screening.reject_screening(store, graph, thread_id, REVIEWER, reason)
+
+
+async def test_reject_at_the_gate_records_the_decision_and_terminates_the_run():
+    """The audit trail the issue asks for (#91), written the way approval is: who,
+    when, and — unlike approval — why. `as_node="matcher"` is what moves the
+    cursor past the interrupt, so the thread stops being pending without the
+    matcher ever running."""
+    store = InMemoryScreeningStore()
+    thread_id = await screening.create_screening(store, "p.md", b"x")
+    graph = ResumeGraph(updates=[], after=FakeSnapshot(), values={"parsed_criteria": _criteria()})
+
+    result = await _reject(store, graph, thread_id)
+
+    assert graph.recorded is not None
+    assert graph.recorded["rejected_by"] == REVIEWER.email
+    assert graph.recorded["rejected_by_role"] == REVIEWER.role
+    assert graph.recorded["rejected_at"]
+    assert graph.recorded["rejected_reason"] == "Not an oncology protocol — wrong document."
+    assert graph.recorded["current_step"] == "rejected"
+    assert graph.recorded_as_node == "matcher"
+    assert result["status"] == "rejected"
+    assert result["rejected_by"] == REVIEWER.email
+
+
+async def test_reject_joins_the_event_log_rather_than_replacing_it():
+    """`events` carries an append reducer, so the rejection has to arrive as a
+    list of one — and it is logged under `human`, which is what tells it apart
+    from the Critic's own `rejected` push-backs."""
+    store = InMemoryScreeningStore()
+    thread_id = await screening.create_screening(store, "p.md", b"x")
+    graph = ResumeGraph(updates=[], after=FakeSnapshot())
+
+    await _reject(store, graph, thread_id, "Eligibility section is a placeholder.")
+
+    assert graph.recorded is not None
+    (audit_event,) = graph.recorded["events"]
+    assert audit_event["agent"] == "human"
+    assert audit_event["status"] == "rejected"
+    assert REVIEWER.email in audit_event["detail"]
+    assert "Eligibility section is a placeholder." in audit_event["detail"]
+
+
+async def test_reject_denormalizes_the_store_row_to_rejected():
+    """The bug this fixes: a walked-away-from run sat in `awaiting_approval`
+    forever and was counted as in flight. The row has to say `rejected` — and keep
+    the criteria count the run had earned."""
+    store = InMemoryScreeningStore()
+    thread_id = await screening.create_screening(store, "p.md", b"x")
+    graph = ResumeGraph(updates=[], after=FakeSnapshot(), values={"parsed_criteria": _criteria()})
+
+    await _reject(store, graph, thread_id)
+
+    row = await _first_row(store)
+    assert row.status == "rejected"
+    assert row.criteria_count == 1
+    # The matcher never ran, so there is no cohort to count.
+    assert row.match_count == 0
+
+
+async def test_reject_of_an_escalated_run_needs_no_cursor_move():
+    """An escalated run has already reached END, so the values merge into the
+    checkpoint where it stopped — posing as the matcher there would rewrite a node
+    that never ran."""
+    store = InMemoryScreeningStore()
+    thread_id = await screening.create_screening(store, "p.md", b"x")
+    graph = ResumeGraph(
+        updates=[], after=FakeSnapshot(), gate=(), values={"current_step": "escalated"}
+    )
+
+    await _reject(store, graph, thread_id)
+
+    assert graph.recorded_as_node is None
+    assert (await _first_row(store)).status == "rejected"
+
+
+@pytest.mark.parametrize("current_step", ["done", "failed", "parsing"])
+async def test_reject_of_a_run_that_is_not_at_a_decision_point_is_409(current_step):
+    """Rejecting a finished run would overwrite the cohort someone approved;
+    rejecting a failed one would relabel a breakdown as a decision. Neither is a
+    thing a reviewer is being asked about."""
+    store = InMemoryScreeningStore()
+    thread_id = await screening.create_screening(store, "p.md", b"x")
+    graph = ResumeGraph(
+        updates=[], after=FakeSnapshot(), gate=(), values={"current_step": current_step}
+    )
+    with pytest.raises(ScreeningNotRejectableError):
+        await _reject(store, graph, thread_id)
+    # Nothing recorded: the pre-check runs before the write, exactly as approval's
+    # does, so a refused rejection leaves no trace claiming someone stopped the run.
+    assert graph.recorded is None
+
+
+async def test_reject_of_a_run_parked_before_the_critic_is_refused():
+    """Pending, but not at this gate: an edit-and-rerun (#53) whose client vanished
+    is parked at the Critic. Rejecting there would pose as the matcher for a run
+    that never reached it — and the graph would still have a Critic pass to make."""
+    store = InMemoryScreeningStore()
+    thread_id = await screening.create_screening(store, "p.md", b"x")
+    graph = ResumeGraph(updates=[], after=FakeSnapshot(), gate=("critic",))
+    with pytest.raises(ScreeningNotRejectableError):
+        await _reject(store, graph, thread_id)
+    assert graph.recorded is None
+
+
+async def test_reject_of_an_unknown_thread_is_404():
+    store = InMemoryScreeningStore()
+    with pytest.raises(ScreeningNotFoundError):
+        await _reject(store, ResumeGraph(updates=[], after=FakeSnapshot()), "nope")
+
+
+async def test_reject_counts_its_own_terminal_outcome():
+    """No node runs when a reviewer stops a screening, so nothing would otherwise
+    increment the funnel — and the run would vanish from it entirely (#91)."""
+    store = InMemoryScreeningStore()
+    thread_id = await screening.create_screening(store, "p.md", b"x")
+    graph = ResumeGraph(updates=[], after=FakeSnapshot())
+    before = _outcome_count("rejected")
+
+    await _reject(store, graph, thread_id)
+
+    assert _outcome_count("rejected") == before + 1
+
+
+def _outcome_count(outcome: str) -> float:
+    """The current `screenings_total{outcome=...}` value, read off the live
+    collector the exposition endpoint serializes."""
+    return sum(
+        sample.value
+        for family in metrics.screenings_total.collect()
+        for sample in family.samples
+        if sample.name == "screenings_total" and sample.labels.get("outcome") == outcome
+    )
 
 
 # --- edit and re-run (#53) -----------------------------------------------

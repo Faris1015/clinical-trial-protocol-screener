@@ -50,6 +50,19 @@ class ScreeningNotApprovableError(ScreenerError):
     http_status = 409
 
 
+class ScreeningNotRejectableError(ScreenerError):
+    """A rejection was submitted for a run that isn't at a decision point (#91).
+
+    Rejectable means parked at the approval gate or escalated after the Critic
+    gave up — the two states where a human owns the run and the only two from
+    which stopping it is a decision rather than a rewrite of history. A finished
+    run already produced a cohort, and a failed one already stopped; calling
+    either "rejected" would overwrite what actually happened.
+    """
+
+    http_status = 409
+
+
 class ScreeningNotEditableError(ScreenerError):
     """Criteria edits were submitted for a run that isn't at a reviewable stop (#53).
 

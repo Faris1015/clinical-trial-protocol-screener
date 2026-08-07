@@ -92,6 +92,13 @@ MAX_BATCH_FILES = 10
 # refuses to persist a megabyte of junk.
 MAX_CRITERIA_EDIT_BYTES = 256 * 1024
 
+# Ceiling on a rejection reason (#91). Same reasoning as the edit cap on a much
+# smaller payload: this is one sentence of free text written into a checkpoint and
+# rendered in every view of the run, so it is bounded rather than trusted. Long
+# enough for a paragraph of clinical justification, short enough that no reviewer
+# can turn the audit trail into a document store.
+MAX_REJECTION_REASON_CHARS = 2000
+
 # Resolve settings at import time so a misconfigured deployment fails at
 # startup (e.g. LLM_PROVIDER=anthropic without ANTHROPIC_API_KEY), not
 # mid-screening. configure_logging() re-applies settings-driven config (it also
@@ -596,6 +603,49 @@ async def approve_screening(
         idle_timeout_seconds=settings.sse_matcher_idle_timeout_seconds,
     )
     return StreamingResponse(heartbeated, media_type="text/event-stream")
+
+
+class RejectionRequest(BaseModel):
+    """A reviewer's decision to stop a screening, and why (#91).
+
+    The reason is required and stripped of surrounding whitespace, so a rejection
+    can never be recorded as a blank string: this is the one field that tells
+    whoever reads the run later *why* a protocol was refused, and a terminal state
+    with no explanation is exactly the dead end this endpoint exists to prevent.
+    """
+
+    reason: Annotated[
+        str,
+        StringConstraints(
+            strip_whitespace=True, min_length=1, max_length=MAX_REJECTION_REASON_CHARS
+        ),
+        Field(description="Why this protocol is not screenable. Recorded in the audit trail."),
+    ]
+
+
+@app.post("/api/screenings/{thread_id}/reject")
+@limiter.limit(lambda: settings.rate_limit_create)
+async def reject_screening(
+    request: Request,
+    thread_id: str,
+    rejection: RejectionRequest,
+    principal: Annotated[Principal, Depends(require_reviewer)],
+) -> dict:
+    """Reject a screening at the human gate — the decision, on the record (#91).
+
+    Guarded by `require_reviewer` exactly as approval is: the two answers to the
+    same question carry the same authority, and who gave either one is the audit
+    trail's whole point.
+
+    Unlike approve and edit-and-rerun, this returns JSON rather than a stream and
+    takes no concurrency slot. Those two resume the graph — minutes of LLM work
+    whose progress has to reach the client — while a rejection runs nothing: it
+    writes the decision, terminates the run, and is done. Rate limited with the
+    write bucket all the same, since it does persist.
+    """
+    return await screening.reject_screening(
+        _store(), _graph(), thread_id, principal, rejection.reason
+    )
 
 
 class CriteriaEditRequest(BaseModel):

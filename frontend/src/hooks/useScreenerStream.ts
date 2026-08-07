@@ -4,7 +4,13 @@ import { useCallback, useEffect, useState } from "react";
 import type { StateUpdate, StreamMessage } from "@/types";
 
 export type NodeState = { status: string; update: StateUpdate };
-export type Phase = "idle" | "running" | "awaiting_approval" | "done" | "failed";
+/**
+ * Where the run is, as this view tracks it. Every phase but `rejected` is reached
+ * by a frame: rejection (#91) runs nothing and streams nothing, so it is set by
+ * the caller once the API accepts the decision — the same way the caller flips to
+ * `running` when it posts an approval.
+ */
+export type Phase = "idle" | "running" | "awaiting_approval" | "done" | "failed" | "rejected";
 
 /**
  * Consumes the backend SSE streams. Each `stream_mode="updates"` event maps 1:1

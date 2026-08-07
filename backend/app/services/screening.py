@@ -30,6 +30,7 @@ from app.exceptions import (
     ScreeningNotApprovableError,
     ScreeningNotEditableError,
     ScreeningNotFoundError,
+    ScreeningNotRejectableError,
     ScreeningNotReportableError,
     UnsupportedMediaTypeError,
 )
@@ -40,6 +41,7 @@ from app.services import (
     cohort,
     comparison,
     criteria_edits,
+    metrics,
     notifications,
     provenance,
     report,
@@ -77,6 +79,7 @@ __all__ = [
     "get_screening_report",
     "get_screening_state",
     "list_screenings",
+    "reject_screening",
     "resume_with_edited_criteria",
     "stream_screening",
 ]
@@ -537,9 +540,124 @@ async def approve_screening(
     )
 
 
+async def reject_screening(
+    store: ScreeningStore,
+    graph: ScreeningGraph,
+    thread_id: str,
+    reviewer: Principal,
+    reason: str,
+) -> dict:
+    """Stop a screening at the human gate, on the record (#91).
+
+    The gate's other answer, and the one it was missing: approval says "this
+    extraction is good enough to score patients against", and this says "this
+    protocol is not screenable — stop". Before it existed, a reviewer who reached
+    that conclusion could only walk away, leaving the run parked in
+    `awaiting_approval` forever and counted as in flight by the funnel.
+
+    Symmetric with approval in the ways that matter. The identity and the reason
+    are written into the checkpoint *before* the graph terminates, so the decision
+    is durable even if everything after it fails; the reason is required, because
+    a terminal state with no explanation is a dead end an auditor cannot read; and
+    the same `human` event log carries it, so the run timeline shows the rejection
+    beside the steps that led to it.
+
+    Asymmetric in one way, deliberately: this does not stream. Approval resumes
+    the matcher, which is minutes of LLM work; a rejection runs nothing at all, so
+    it is a plain JSON response and holds no concurrency slot.
+
+    **Which runs can be rejected.** Parked at the gate, or escalated after the
+    Critic gave up — the two states where a human owns the run. Everything else is
+    a 409: a finished run already produced a cohort someone approved, a failed one
+    already stopped for a reason of its own, and a run still executing has not
+    asked anyone anything yet. A run parked *before* the Critic (an edit-and-rerun
+    whose client vanished, #53) is refused for the same reason approval refuses
+    it — the gate it is waiting at is not this one.
+
+    The checkpoint write is what terminates the graph. `as_node="matcher"` moves
+    the cursor past the interrupt as though the matcher had run and produced these
+    values, so `next` empties and the thread stops being pending — the matcher
+    itself never executes, and no patient data is touched. An escalated run has
+    already reached END, so it needs no cursor move and gets a plain merge.
+
+    The checkpoint is written before the store row, and that order is deliberate:
+    the checkpoint is the record, the row is denormalized from it. A store outage
+    in between costs a stale status column on the runs index — recoverable, and
+    visibly wrong — rather than a row claiming a decision the audit trail never
+    received.
+    """
+    config = await _require_thread(store, thread_id)
+    bind_contextvars(thread_id=thread_id)
+    snapshot = await graph.aget_state(config)
+    at_gate = "matcher" in snapshot.next
+    escalated = not snapshot.next and snapshot.values.get("current_step") == "escalated"
+    if not (at_gate or escalated):
+        raise ScreeningNotRejectableError(
+            "Only a screening parked at the approval gate or escalated for human review can be "
+            "rejected."
+        )
+
+    rejected_at = datetime.now(UTC).isoformat()
+    await graph.aupdate_state(
+        config,
+        {
+            "rejected_by": reviewer.email,
+            "rejected_by_role": reviewer.role,
+            "rejected_at": rejected_at,
+            "rejected_reason": reason,
+            "current_step": "rejected",
+            "events": [
+                event(
+                    "human",
+                    "rejected",
+                    f"Screening rejected by {reviewer.email} ({reviewer.role}) — {reason}",
+                )
+            ],
+        },
+        as_node="matcher" if at_gate else None,
+    )
+    # Written explicitly rather than denormalized from a re-read snapshot: the
+    # status of a rejected run is a decision that was just made, not an
+    # observation about where the graph stopped, and `_status_from_snapshot`
+    # would quietly report "awaiting_approval" again if the cursor move ever
+    # regressed — hiding the exact bug this feature exists to fix. The counts come
+    # from the pre-rejection snapshot, so the runs index keeps showing what the
+    # run had extracted (`match_count` is 0; the matcher never ran).
+    await store.set_status(
+        thread_id,
+        "rejected",
+        criteria_count=_criteria_count(snapshot.values),
+        match_count=_match_count(snapshot.values),
+    )
+    # Counted only now — after the checkpoint and the store agree — so the funnel
+    # can never report a rejection that isn't on the record.
+    metrics.record_rejection()
+    # Server-side counterpart to the in-state event, in the same correlated stream
+    # as the approval it replaces. The reason itself is in the checkpoint and the
+    # event log; only its size is logged, following the same rule the upload path
+    # uses — free text typed by a human is not something to copy into logs.
+    log.info(
+        "screening.rejected",
+        rejected_by=reviewer.email,
+        reviewer_role=reviewer.role,
+        reason_chars=len(reason),
+        from_gate=at_gate,
+    )
+    return {
+        "thread_id": thread_id,
+        "status": "rejected",
+        "rejected_by": reviewer.email,
+        "rejected_by_role": reviewer.role,
+        "rejected_at": rejected_at,
+        "rejected_reason": reason,
+    }
+
+
 # Where a run can still be corrected by hand: parked at the gate, escalated after
-# the Critic loop gave up, or failed. Notably absent is "done" — see
-# ScreeningNotEditableError.
+# the Critic loop gave up, or failed. Notably absent are "done" — see
+# ScreeningNotEditableError — and "rejected", which is a reviewer's own decision
+# to stop (#91): re-opening it by editing would erase the decision rather than
+# reverse it, and re-uploading the protocol is the honest way back.
 _EDITABLE_STEPS = frozenset({"awaiting_approval", "escalated", "failed"})
 
 

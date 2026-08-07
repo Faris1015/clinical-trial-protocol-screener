@@ -22,13 +22,21 @@ ScreeningStatus = Literal[
     "done",
     "failed",
     "escalated",
+    # Terminal, and a *decision* rather than a breakdown (#91): a reviewer
+    # judged the protocol unscreenable and stopped the run at the gate. Distinct
+    # from "failed", which is the pipeline breaking — the funnel counts them
+    # separately because "we chose not to screen this" and "we could not" are
+    # different answers to the same question.
+    "rejected",
 ]
 
 
 class AgentEvent(TypedDict):
     agent: str  # "router" | "parser" | "critic" | "matcher" | "human"
     # "started" | "completed" | "rejected" | "escalated" | "failed", plus the
-    # human-gate outcomes: "approved" (#50) and "edited" (#53).
+    # human-gate outcomes: "approved" (#50), "edited" (#53) and "rejected" (#91).
+    # `rejected` is shared with the Critic's push-back — the `agent` is what says
+    # which of the two a log entry is.
     status: str
     detail: str
     timestamp: str
@@ -93,6 +101,16 @@ class ScreenerState(TypedDict):
     approved_by_role: str | None
     approved_at: str | None
 
+    # The other exit from the gate (#91), written the same way and for the same
+    # reason: a reviewer who judges a protocol unscreenable stops the run, and
+    # who said so — and why — is persisted *before* the graph terminates. The
+    # reason is required, so a rejected run is never a bare dead end. PHI-safe by
+    # the same construction: it is about the protocol, never about a patient.
+    rejected_by: str | None
+    rejected_by_role: str | None
+    rejected_at: str | None
+    rejected_reason: str | None
+
     # Edit-and-rerun at the gate (#53). `criteria_revision` is 0 for the parser's
     # own extraction and increments once per reviewer revision — it is the
     # optimistic-concurrency token that stops a second reviewer's stale edit from
@@ -143,6 +161,10 @@ def initial_state(raw_protocol_text: str, source_filename: str) -> ScreenerState
         approved_by=None,
         approved_by_role=None,
         approved_at=None,
+        rejected_by=None,
+        rejected_by_role=None,
+        rejected_at=None,
+        rejected_reason=None,
         criteria_revision=0,
         criteria_edits=[],
         matched_patients=[],

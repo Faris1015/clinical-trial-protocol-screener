@@ -32,7 +32,12 @@ COUNTERS_SINCE = datetime.now(UTC)
 # Terminal `current_step` values a screening run can end on. Counted once per
 # run in `record_node_metrics` — the parse/critic loop's intermediate steps
 # ("parsing", "critiquing", "awaiting_approval") are deliberately excluded.
-TERMINAL_OUTCOMES = frozenset({"done", "failed", "escalated"})
+#
+# "rejected" (#91) is the one outcome no node produces: a reviewer stops the run
+# from outside the graph, so it is counted by `record_rejection` instead. It
+# belongs in this set all the same — this is what the funnel enumerates, and an
+# outcome missing from it would make the funnel's total disagree with the runs.
+TERMINAL_OUTCOMES = frozenset({"done", "failed", "escalated", "rejected"})
 
 # The subset of terminal outcomes where the parse/critic loop actually resolved,
 # so `state["parse_attempts"]` is a meaningful loop-depth count. A "failed" run
@@ -107,3 +112,24 @@ def record_node_metrics(node: str, state: ScreenerState, result: dict, duration_
         screenings_total.labels(outcome=outcome).inc()
         if outcome in _LOOP_RESOLVED_OUTCOMES:
             parse_attempts.observe(state.get("parse_attempts", 0))
+
+
+def record_rejection() -> None:
+    """Count a run a reviewer stopped at the human gate (#91).
+
+    The counterpart to `record_node_metrics` for the one terminal outcome that
+    happens outside the graph: no node runs when a screening is rejected, so
+    nothing would otherwise increment the funnel. Called once per rejection, from
+    the same service call that writes the decision into the checkpoint — and only
+    after that write succeeds, so a counted rejection is always a durable one.
+
+    `parse_attempts` is deliberately not observed: like a failure, a rejection
+    says nothing about how deep the parse/critic loop ran, and recording the
+    count at the moment a human intervened would skew the distribution.
+
+    A run rejected *after* escalating lands in both bars, exactly as a run edited
+    and re-run to completion already lands in `escalated` and `done`: this counter
+    records the terminal states a run passed through, and a resumable graph lets
+    one run pass through more than one.
+    """
+    screenings_total.labels(outcome="rejected").inc()

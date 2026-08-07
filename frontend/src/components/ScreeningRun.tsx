@@ -3,13 +3,14 @@
 import { useState } from "react";
 import Link from "next/link";
 import { AnimatePresence } from "motion/react";
-import { AlertTriangle, CheckCircle2, PencilLine } from "lucide-react";
+import { AlertTriangle, Ban, CheckCircle2, PencilLine } from "lucide-react";
 import { useScreenerStream, type NodeState } from "@/hooks/useScreenerStream";
 import { AgentCard } from "@/components/AgentCard";
 import { Reveal } from "@/components/motion";
 import { CohortSkeleton, CriteriaSkeleton } from "@/components/skeletons";
 import { CriteriaProvenance } from "@/components/provenance/criteria-provenance";
 import { PatientMatchTable } from "@/components/PatientMatchTable";
+import { RejectScreening } from "@/components/review/reject-screening";
 import { ReportDownload } from "@/components/report-download";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -66,6 +67,10 @@ export function ScreeningRun({ threadId }: { threadId: string | null }) {
   const [matches, setMatches] = useState<PatientEvaluation[]>([]);
   const [matchSummary, setMatchSummary] = useState<string | null>(null);
   const [approvedBy, setApprovedBy] = useState<string | null>(null);
+  // The reason this run was stopped at the gate (#91), echoed locally like
+  // `approvedBy`: the durable record is `rejected_reason` in graph state, written
+  // by the API before it answers, and the run detail view reads it back.
+  const [rejectedReason, setRejectedReason] = useState<string | null>(null);
   // True from the moment the approval is accepted until the matcher's stream
   // ends, which is what the cohort skeleton stands in for (#49). Tracked
   // separately from `phase`, which is back to "running" for the matcher exactly
@@ -212,16 +217,58 @@ export function ScreeningRun({ threadId }: { threadId: string | null }) {
         {phase === "awaiting_approval" && (
           <Reveal key="banner-approval">
             <Card data-region="banner-approval" className="border-primary/40 bg-primary/10">
-              <CardContent className="flex flex-col gap-3 text-sm sm:flex-row sm:items-center">
+              {/* Wraps, unlike the other banners: the reject form (#91) opens
+                  inline as a full-width block, and without a wrap it would try to
+                  share a row with the approve button. */}
+              <CardContent className="flex flex-col gap-3 text-sm sm:flex-row sm:flex-wrap sm:items-center">
                 <CheckCircle2 className="text-primary size-4 shrink-0" aria-hidden="true" />
                 <span className="flex-1">
                   Compliance checks passed. Review the criteria above, then approve patient matching
-                  — or correct them first if the extraction is wrong.
+                  — or correct them first if the extraction is wrong. If the protocol cannot be
+                  screened at all, reject it and say why.
                 </span>
                 {editorLink}
+                {/* The gate's three exits, in the order a reviewer weighs them:
+                    correct the extraction, refuse the protocol, or authorize
+                    matching. Reject sits beside approve rather than behind the
+                    editor link (#91) — a run nobody can screen should not have to
+                    be edited before it can be stopped. */}
+                {threadId && (
+                  <RejectScreening
+                    threadId={threadId}
+                    onRejected={(reason) => {
+                      setRejectedReason(reason);
+                      setPhase("rejected");
+                    }}
+                  />
+                )}
                 <Button onClick={approve} size="lg" className="shrink-0">
                   Approve → run matching
                 </Button>
+              </CardContent>
+            </Card>
+          </Reveal>
+        )}
+      </AnimatePresence>
+
+      {/* The decision, stated where the gate used to be (#91). Terminal: there is
+          no cohort coming and nothing left to act on here, so this replaces the
+          banner rather than sitting under it. */}
+      <AnimatePresence>
+        {phase === "rejected" && (
+          <Reveal key="banner-rejected">
+            <Card
+              data-region="banner-rejected"
+              role="status"
+              className="border-destructive/40 bg-destructive/10"
+            >
+              <CardContent className="flex flex-col gap-2 text-sm">
+                <span className="flex items-center gap-2.5 font-medium">
+                  <Ban className="text-destructive size-4 shrink-0" aria-hidden="true" />
+                  Screening rejected{principal?.email ? ` by ${principal.email}` : ""}. No patient
+                  data was matched.
+                </span>
+                {rejectedReason && <span className="pl-6.5">{rejectedReason}</span>}
               </CardContent>
             </Card>
           </Reveal>
