@@ -95,6 +95,11 @@ data gets touched.
   dropped its provenance would not be auditable. The plain layer is rendered from
   the same deterministic comparison as the statuses, never a second LLM opinion,
   so it cannot contradict them.
+- **The cohort explains itself.** Because the Matcher's verdicts are per-criterion
+  and deterministic, "what screened this cohort out" is a pure reduction over the
+  checkpoint rather than a new pipeline: criteria ranked by exclusions, with the
+  overlap between them reported so relaxing the top one cannot promise a delta the
+  cohort will not pay.
 - **The gate has a name attached.** Clearing it requires an authenticated
   reviewer, and the approver's identity is written into the checkpoint
   (`approved_by`, `approved_by_role`, `approved_at`, plus an event-log entry)
@@ -477,6 +482,43 @@ curl -b cookies.txt http://localhost:8000/api/screenings/<thread_id>/state
   resolved server-side, so the exported report below prints the same trail rather
   than a second implementation of it.
 
+### Per-criterion cohort attrition
+
+The cohort table answers *who* is eligible. The question a coordinator actually
+asks is *what is killing my cohort* — and until now the app had no screen for it.
+**What screened this cohort out**, on a run's detail page, ranks every criterion by
+how many patients it excluded:
+
+```bash
+curl -b cookies.txt http://localhost:8000/api/screenings/<thread_id>/state
+# → {"values", "pending", "screening", "timeline",
+#    "attrition": {"totals": {"patients": 100, "eligible": 12, "excluded": 79, ...},
+#                  "criteria": [{"label": "egfr >= 60 mL/min/1.73m2", "excluded": 41,
+#                                "unique": 22, "shared": 19, "recoverable": 20,
+#                                "unresolved": 3, "share": 41.0}, ...],
+#                  "overlaps": [{"a_label": ..., "b_label": ..., "patients": 19}]}}
+```
+
+- **Free, and deterministic.** The Matcher already writes a per-criterion verdict
+  for every patient into `matched_patients`, so `app/services/attrition.py` is a
+  pure reduction over data the run has already paid for — no LLM call, no extra
+  read, and the same numbers for a run checkpointed months ago.
+- **No false deltas.** "eGFR ≥ 60 excludes 41" invites the reader to believe
+  relaxing it returns 41 patients, when 19 of them also fail ECOG. Every row
+  therefore splits its exclusions into `unique` and `shared`, reports
+  `recoverable` — how many patients relaxing it would actually make *eligible*,
+  which is fewer again when one of them still has a criterion nobody could
+  evaluate — and the top criteria carry their pairwise overlap ("19 patients fail
+  both"). This is the data model the what-if simulator drives.
+- **One rendering of one run.** The eligible / needs-review / ineligible counts
+  come from `app/services/cohort.py`, the same module the runs index, the report
+  and the comparison read, so the tally here cannot contradict the table under it.
+  Patients no criterion was applied to at all are named rather than left as a gap
+  the rows silently fail to fill.
+- **Every criterion, ranked.** Including the ones that excluded nobody: "age ≥ 18
+  excluded 0" is a fact about the protocol, and ties break on the unresolved count
+  then the label, so two exports of one run order the criteria identically.
+
 ### Download a screening report
 
 A screening is only useful if it can leave the app. **Download report** — on a
@@ -484,7 +526,8 @@ run's detail page, and under the cohort on a finished live run — exports the w
 run as one self-contained HTML document: the extracted criteria beside the
 verbatim protocol sentence each came from, any reviewer revisions, the Critic's
 findings in *both* the plain and the technical layer, who authorized patient
-matching, the full cohort with per-patient verdicts, and the event timeline above.
+matching, the cohort attrition breakdown above, the full cohort with per-patient
+verdicts, and the event timeline.
 
 ```bash
 curl -b cookies.txt -OJ http://localhost:8000/api/screenings/<thread_id>/report
@@ -873,6 +916,8 @@ backend/
       criteria_edits.py        # Before/after diff of a reviewer's criteria revision
       comparison.py            # Two runs paired side by side: criteria + cohort verdicts
       cohort.py                # Which bucket a patient lands in — one rule, every reader
+      attrition.py             # Per-criterion cohort attrition: what screened patients out
+      timeline.py              # The event log as an audit trail: retries, gate, attribution
       provenance.py            # criterion source_text → character span in the protocol
       report.py                # Self-contained, printable HTML screening report
       rules.py                 # The compliance rules database, rendered for reading

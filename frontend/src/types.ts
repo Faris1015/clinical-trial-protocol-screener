@@ -114,6 +114,69 @@ export type RunTimeline = {
 };
 
 /**
+ * What one criterion did to the cohort (#94) — mirrors
+ * `backend/app/services/attrition.py`.
+ *
+ * `excluded`, `unresolved` and `passed` are patient counts that partition the
+ * cohort the criterion was applied to. `unique` is the part of `excluded` no other
+ * criterion also failed and `shared` the rest; `recoverable` is how many patients
+ * would actually reach the *eligible* bucket if this criterion were dropped, which
+ * is smaller than `unique` whenever one of them still has something a human has to
+ * resolve. Rendering `excluded` alone would promise a delta the cohort can't pay.
+ *
+ * `share` is `excluded` as a percentage of the cohort, rounded by the API so the
+ * figure and the bar beside it are one value rather than two roundings of it.
+ */
+export type CriterionAttrition = {
+  key: string;
+  /** The same one-line label the report and the edit history name it with. */
+  label: string;
+  kind: "inclusion" | "exclusion";
+  source_text: string;
+  excluded: number;
+  unresolved: number;
+  passed: number;
+  unique: number;
+  shared: number;
+  recoverable: number;
+  share: number;
+};
+
+/** How many patients two criteria both exclude — one entry per pair (#94). */
+export type CriterionOverlap = {
+  a_key: string;
+  b_key: string;
+  a_label: string;
+  b_label: string;
+  patients: number;
+};
+
+/**
+ * `GET /api/screenings/{id}/state`'s `attrition` block (#94).
+ *
+ * The three bucket figures are `services/cohort.py`'s own counts, so this panel
+ * cannot disagree with the cohort table under it. `excluded` and `unresolved` are
+ * patient counts that overlap each other (a patient can fail one criterion and be
+ * indeterminate on another), and `unscored` is patients no criterion was applied
+ * to at all — named so the rows still reconcile with the buckets.
+ */
+export type CohortAttrition = {
+  totals: {
+    patients: number;
+    eligible: number;
+    review: number;
+    ineligible: number;
+    excluded: number;
+    unresolved: number;
+    unscored: number;
+  };
+  /** Ranked, most exclusions first; includes criteria that excluded nobody. */
+  criteria: CriterionAttrition[];
+  /** Only pairs that actually share patients, largest first. */
+  overlaps: CriterionOverlap[];
+};
+
+/**
  * One field-level difference between two revisions of the criteria (#53).
  *
  * `before`/`after` are labels rendered by the backend rather than raw criteria:
@@ -486,6 +549,13 @@ export type ScreeningState = {
    * instead of failing on a missing key.
    */
   timeline?: RunTimeline;
+  /**
+   * Per-criterion cohort attrition (#94), derived by the API from
+   * `values.matched_patients`. Optional for the same reason the timeline is: a
+   * payload from an older build renders the rest of the page rather than failing
+   * on a missing key.
+   */
+  attrition?: CohortAttrition;
   /**
    * The same metadata row the runs index shows. Present even when the run has
    * no checkpoint yet (uploaded but never streamed), which is exactly when

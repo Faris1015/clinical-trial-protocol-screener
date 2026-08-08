@@ -38,6 +38,7 @@ from app.graph.builder import build_graph
 from app.graph.state import ScreeningStatus, event, initial_state
 from app.logging_config import bind_contextvars, get_logger
 from app.services import (
+    attrition,
     cohort,
     comparison,
     criteria_edits,
@@ -782,6 +783,11 @@ async def get_screening_state(store: ScreeningStore, graph: ScreeningGraph, thre
     this payload rather than behind its own route: everything it reads is already
     in hand, the derivation deserves tests, and the report exported from this
     same payload has to tell the same story the screen does.
+
+    `attrition` is the same arrangement for the cohort (#94): which criteria
+    screened patients out, ranked, with the overlap between the top ones. It reads
+    only `values["matched_patients"]`, so it costs nothing beyond the checkpoint
+    already loaded and is empty for a run that never reached the Matcher.
     """
     config = await _require_thread(store, thread_id)
     bind_contextvars(thread_id=thread_id)
@@ -792,6 +798,7 @@ async def get_screening_state(store: ScreeningStore, graph: ScreeningGraph, thre
         "values": values,
         "pending": list(snapshot.next),
         "timeline": timeline.build_timeline(values),
+        "attrition": attrition.build_attrition(values),
         # `_require_thread` just passed, so the row is there; guard anyway rather
         # than assert, since the two reads aren't in one transaction.
         "screening": {

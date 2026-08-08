@@ -2,9 +2,9 @@
 
 This is the artifact a reviewer hands off: extracted criteria beside the verbatim
 protocol sentences they came from, the reviewer revisions applied to them, the
-Critic's findings in both layers, who authorized patient matching, the cohort, and
-the execution log — for one run, dated, branded, and readable with nothing but a
-browser.
+Critic's findings in both layers, who authorized patient matching, the cohort,
+which criteria screened it out (#94), and the execution log — for one run, dated,
+branded, and readable with nothing but a browser.
 
 Four decisions worth knowing before editing this module:
 
@@ -45,7 +45,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
-from app.services import cohort, timeline
+from app.services import attrition, cohort, timeline
 from app.services.criteria_edits import criterion_label
 from app.services.uploads import sanitize_filename
 
@@ -530,6 +530,98 @@ def _cohort_section(values: Mapping[str, Any]) -> str:
     )
 
 
+def _plural(count: int, noun: str) -> str:
+    """`1 patient`, `3 patients` — the same rule the app's `formatCount` applies."""
+    return f"{count} {noun}{'' if count == 1 else 's'}"
+
+
+def _percent(share: float) -> str:
+    """`50%`, `37.5%` — a share as the app prints it, not as Python repr does.
+
+    The API rounds shares to one decimal and the browser's number→string drops the
+    zeros rounding leaves, so the panel shows "50%". `str(50.0)` would print "50.0%"
+    here, and this table and that panel are supposed to be two renderings of one
+    derivation. Same rule as `criteria_edits._number` applies to a threshold.
+    """
+    trimmed = int(share) if float(share).is_integer() else share
+    return f"{trimmed}%"
+
+
+def _attrition_section(values: Mapping[str, Any]) -> str:
+    """Which criteria screened the cohort out, ranked (#94).
+
+    The cohort table below answers *who*; this answers *what*, which is the half a
+    coordinator can act on — a criterion excluding 40% of the panel is either the
+    protocol working as intended or a threshold worth taking back to the sponsor,
+    and neither is visible in a list of per-patient verdicts. It comes first for
+    that reason: the table under it is one row per patient, and a summary printed
+    after a hundred rows is a summary nobody reads.
+
+    Both overlap columns are printed rather than the exclusion count alone: 41
+    exclusions of which 19 are shared with the next criterion down is not a
+    41-patient recovery, and a document a site hands to a sponsor is the last place
+    to imply otherwise. `services/attrition.py` owns the arithmetic, so this table
+    and the app's own panel are two renderings of one derivation.
+    """
+    breakdown = attrition.build_attrition(values)
+    totals = breakdown["totals"]
+    rows = [
+        f"<tr><td>{_esc(row['label'])}"
+        f'<div class="detail">{_esc(row["kind"])} · {_esc(row["source_text"]) or "—"}</div></td>'
+        f"<td>{_esc(row['excluded'])}"
+        f'<div class="detail">{_esc(_percent(row["share"]))}</div></td>'
+        f"<td>{_esc(row['unique'])}"
+        f'<div class="detail">{_esc(row["shared"])} shared</div></td>'
+        f"<td>{_esc(row['recoverable'])}</td>"
+        f"<td>{_esc(row['unresolved'])}</td></tr>"
+        for row in breakdown["criteria"]
+    ]
+    table = _table(
+        ("Criterion", "Excluded", "Unique to it", "Eligible if relaxed", "Could not evaluate"),
+        rows,
+    )
+    if not table:
+        return ""
+
+    lead = (
+        f"<p>Of {_plural(totals['patients'], 'patient')} screened, "
+        f"{_plural(totals['excluded'], 'patient')} failed at least one criterion and "
+        f"{_plural(totals['unresolved'], 'patient')} had at least one that could not be "
+        "evaluated. Criteria are ranked by exclusions.</p>"
+    )
+    if totals["unscored"]:
+        # Named rather than left to be inferred from rows that do not add up: these
+        # patients are in the ineligible bucket with no criterion behind them.
+        lead += (
+            f'<p class="note">{_plural(totals["unscored"], "patient")} had no criteria applied '
+            "at all, so no row below accounts for them.</p>"
+        )
+
+    overlaps = breakdown["overlaps"]
+    body = lead + table
+    if overlaps:
+        overlap_rows = [
+            f"<tr><td>{_esc(overlap['a_label'])} + {_esc(overlap['b_label'])}</td>"
+            f"<td>{_esc(overlap['patients'])}</td></tr>"
+            for overlap in overlaps
+        ]
+        # The heading states how far the comparison actually reached rather than
+        # quoting the cap: a run with three excluding criteria compared all three,
+        # and a document promising "the top 5" of three is wrong in the one
+        # direction that matters — it implies pairs the table does not carry.
+        excluding = sum(1 for row in breakdown["criteria"] if row["excluded"])
+        compared = min(attrition.OVERLAP_DEPTH, excluding)
+        heading = (
+            f"Overlap between the {compared} most restrictive criteria"
+            if compared < excluding
+            else "Overlap between the criteria that excluded anyone"
+        )
+        body += f"<h3>{_esc(heading)}</h3>" + _table(
+            ("Criteria", "Patients failing both"), overlap_rows
+        )
+    return _section("Cohort attrition", body, region="report-attrition")
+
+
 # How each step's outcome reads as a tag. `rejected`/`escalated` are the Critic
 # pushing work back and `edited` is a reviewer correcting it — neither is a
 # failure, and only `failed` is terminal-bad. Mirrors the run detail view's
@@ -678,6 +770,9 @@ def render_report(payload: Mapping[str, Any], *, generated_at: datetime | None =
             _findings_section(values),
             _authorization_section(values),
             _rejection_section(values),
+            # Attrition first: it is the summary of the cohort table, which runs to
+            # one row per patient and would bury it on a printed page.
+            _attrition_section(values),
             _cohort_section(values),
             _events_section(values),
         )

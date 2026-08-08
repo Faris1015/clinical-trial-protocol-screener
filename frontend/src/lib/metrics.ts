@@ -3,7 +3,9 @@
  *
  * The page renders three panels of the same shape — a labelled count, its share,
  * and a bar — so the formatting and the colour mapping live here rather than
- * being repeated (and drifting) three times.
+ * being repeated (and drifting) three times. `formatCount` outgrew that page and
+ * is now the app's one count-with-noun helper (the cohort attrition panel, #94,
+ * reads it too): "2 patients" and "1 run" must pluralize by one rule.
  */
 
 import type { FunnelOutcome } from "@/types";
