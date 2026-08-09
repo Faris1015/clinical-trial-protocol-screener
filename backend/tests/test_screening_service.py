@@ -783,15 +783,63 @@ async def test_edit_of_an_escalated_run_is_allowed():
     assert frames[-1] == {"node": sse.INTERRUPT}
 
 
-async def test_edit_of_a_finished_run_raises_and_writes_nothing():
+async def test_edit_of_a_finished_run_is_allowed_and_discards_its_cohort():
+    """Promoting a what-if (#95) means editing a run that has already scored.
+
+    A finished run was frozen until then. It is editable now — the simulator's
+    whole output is a threshold worth re-running — but the cohort it scored under
+    the old criteria must not survive into a run that no longer has them: the run
+    detail view would show revision 1's verdicts beneath revision 2's criteria, and
+    the runs index would keep counting matches nobody approved.
+    """
     store = InMemoryScreeningStore()
     thread_id = await screening.create_screening(store, "p.md", b"x")
     graph = ResumeGraph(
         updates=[],
-        after=FakeSnapshot(),
+        after=FakeSnapshot(values={"current_step": "awaiting_approval"}, pending=("matcher",)),
         gate=(),
-        values=_parked(step="done"),
+        values={
+            **_parked(step="done"),
+            "matched_patients": [{"patient_id": "PT-1", "eligible": True, "needs_review": False}],
+            "match_summary": "Screened 1 patient: 1 matching this protocol.",
+        },
     )
+    frames = await _rerun(store, graph, thread_id, _criteria(value=65))
+
+    assert graph.recorded_as_node == "parser"
+    assert graph.recorded is not None
+    assert graph.recorded["matched_patients"] == []
+    assert graph.recorded["match_summary"] is None
+    assert graph.recorded["criteria_revision"] == 1
+    # Both events, in order: what the reviewer did, then what it cost.
+    details = [e["detail"] for e in graph.recorded["events"]]
+    assert "Criteria revised by" in details[0]
+    assert "Discarded the previous cohort of 1 scored patients" in details[1]
+    # And it re-enters at the Critic like any other edit — no cohort until someone
+    # approves the gate again.
+    assert frames[-1] == {"node": sse.INTERRUPT}
+
+
+async def test_edit_at_the_gate_does_not_mention_a_cohort_it_never_had():
+    """The common path is untouched: a run parked before the Matcher has nothing
+    to discard, so it gets no cohort keys and no second event."""
+    store = InMemoryScreeningStore()
+    thread_id = await screening.create_screening(store, "p.md", b"x")
+    graph = ResumeGraph(updates=[], after=FakeSnapshot(), values=_parked())
+    await _rerun(store, graph, thread_id, _criteria(value=65))
+
+    assert graph.recorded is not None
+    assert "matched_patients" not in graph.recorded
+    assert "match_summary" not in graph.recorded
+    assert len(graph.recorded["events"]) == 1
+
+
+async def test_edit_of_a_rejected_run_still_raises():
+    """The one terminal state editing must not reopen (#91): a rejection is a
+    decision, and editing past it would erase it rather than reverse it."""
+    store = InMemoryScreeningStore()
+    thread_id = await screening.create_screening(store, "p.md", b"x")
+    graph = ResumeGraph(updates=[], after=FakeSnapshot(), gate=(), values=_parked(step="rejected"))
     with pytest.raises(ScreeningNotEditableError):
         await screening.resume_with_edited_criteria(
             store, graph, thread_id, criteria=_criteria(65), base_revision=0, editor=REVIEWER

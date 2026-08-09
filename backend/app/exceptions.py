@@ -66,13 +66,42 @@ class ScreeningNotRejectableError(ScreenerError):
 class ScreeningNotEditableError(ScreenerError):
     """Criteria edits were submitted for a run that isn't at a reviewable stop (#53).
 
-    Editable means parked at the approval gate, escalated, or failed *with an
-    extraction to correct*. A finished run is not: its cohort was already scored
-    against the criteria it had, so re-running it under different criteria would
-    quietly rewrite history rather than produce a new, attributable run.
+    Editable means parked at the approval gate, escalated, failed or finished —
+    *with an extraction to correct*. A finished run was excluded until #95, when
+    promoting a what-if simulation made re-running a scored run the point rather
+    than an accident; it is attributable rather than a silent rewrite because the
+    edit carries a revision, a diff and an editor, and the cohort it invalidates is
+    discarded rather than left standing under new criteria.
+
+    Still refused for a run that never parsed anything, and for one a reviewer
+    rejected (#91) — editing that would erase a decision rather than reverse it.
     """
 
     http_status = 409
+
+
+class ScreeningNotSimulatableError(ScreenerError):
+    """A what-if was requested for a run with no cohort to re-score (#95).
+
+    Simulation moves a threshold across the verdicts a run already produced, so it
+    needs both an extraction and a scored cohort. A run still at the gate has the
+    first and not the second; answering it with an all-zero table would read as
+    "relaxing this changes nothing" rather than "this has not been screened yet".
+    """
+
+    http_status = 409
+
+
+class InvalidSimulationError(ScreenerError):
+    """A what-if named a criterion this run cannot simulate (#95).
+
+    An unknown key, one named twice, or a categorical criterion — whose relaxation
+    would mean re-matching a term against every patient record, an LLM pass rather
+    than a what-if. Refused rather than skipped: a simulation that silently dropped
+    an override would present the unchanged cohort as the simulated one.
+    """
+
+    http_status = 422
 
 
 class CriteriaRevisionConflictError(ScreenerError):

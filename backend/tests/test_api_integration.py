@@ -327,9 +327,13 @@ async def test_edit_that_still_fails_compliance_escalates_and_stays_editable(mon
             assert retry.status_code == 200
 
 
-async def test_edit_on_a_finished_run_is_conflict(monkeypatch):
-    """A completed run is not editable: its cohort was already scored against the
-    criteria it had, so re-running it under new ones would rewrite history."""
+async def test_edit_on_a_finished_run_reopens_it_without_its_cohort(monkeypatch):
+    """A finished run is editable since #95 — that is what promoting a what-if is.
+
+    End to end, through the real graph: the edit re-runs the Critic, the run parks
+    at the gate for a fresh named approval, and the cohort scored under the old
+    criteria is gone rather than left standing beneath the new ones.
+    """
     monkeypatch.setattr(parser_mod, "get_llm", lambda: FakeChatModel([good_criteria()]))
     monkeypatch.setattr(critic_mod, "run_llm_semantic_review", lambda _state: [])
     monkeypatch.setattr(matcher_mod, "load_patients", lambda: FAKE_PATIENTS)
@@ -347,6 +351,48 @@ async def test_edit_on_a_finished_run_is_conflict(monkeypatch):
                 assert [line async for line in resp.aiter_lines()]
             async with client.stream("POST", f"/api/screenings/{thread_id}/approve") as approve:
                 assert [line async for line in approve.aiter_lines()]
+            scored = (await client.get(f"/api/screenings/{thread_id}/state")).json()
+            assert scored["values"]["matched_patients"]
+
+            async with client.stream(
+                "PATCH",
+                f"/api/screenings/{thread_id}/criteria",
+                json={"base_revision": 0, "criteria": _edited(good_criteria())},
+            ) as response:
+                assert response.status_code == 200
+                assert [line async for line in response.aiter_lines()]
+
+            state = (await client.get(f"/api/screenings/{thread_id}/state")).json()
+            assert state["pending"] == ["matcher"]
+            assert state["values"]["criteria_revision"] == 1
+            assert state["values"]["matched_patients"] == []
+            assert state["screening"]["match_count"] == 0
+            # And with no cohort there is no attrition to render either — the panel
+            # disappears rather than describing a run that no longer has one.
+            assert state["attrition"]["criteria"] == []
+
+
+async def test_edit_on_a_rejected_run_is_still_conflict(monkeypatch):
+    """The terminal state editing must not reopen (#91)."""
+    monkeypatch.setattr(parser_mod, "get_llm", lambda: FakeChatModel([good_criteria()]))
+    monkeypatch.setattr(critic_mod, "run_llm_semantic_review", lambda _state: [])
+
+    async with main.lifespan(main.app):
+        transport = ASGITransport(app=main.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            sign_in(client)
+            upload = await client.post(
+                "/api/screenings",
+                files={"file": ("protocol.md", PROTOCOL_TEXT.encode(), "text/markdown")},
+            )
+            thread_id = upload.json()["thread_id"]
+            async with client.stream("GET", f"/api/screenings/{thread_id}/stream") as resp:
+                assert [line async for line in resp.aiter_lines()]
+            rejected = await client.post(
+                f"/api/screenings/{thread_id}/reject",
+                json={"reason": "Wrong document."},
+            )
+            assert rejected.status_code == 200
 
             response = await client.patch(
                 f"/api/screenings/{thread_id}/criteria",

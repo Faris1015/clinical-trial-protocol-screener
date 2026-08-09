@@ -47,6 +47,7 @@ from itertools import combinations
 from typing import Any, NamedTuple, TypedDict
 
 from app.services import cohort
+from app.services.checkpoint import mapping, number, rows
 from app.services.criteria_edits import criterion_label
 
 # How many of the ranked criteria get pairwise overlap reported. Every pair of the
@@ -59,6 +60,35 @@ OVERLAP_DEPTH = 5
 # Worst-wins ordering when one key resolves to several statuses for one patient
 # (a duplicated criterion in the extraction). Higher is worse.
 _SEVERITY = {"pass": 0, "unknown": 1, "fail": 2}
+
+
+class CriterionThreshold(TypedDict):
+    """The numeric bound a row carries, and the span the cohort occupies under it.
+
+    Present only on a quantitative criterion, and only when its bound is actually a
+    number — a row without one is a row the what-if simulator (#95) cannot move,
+    and saying so in the payload is what lets the panel offer a control on exactly
+    the criteria that have one.
+
+    Carried in machine form beside the rendered `label` on purpose: the label is
+    the one wording a criterion is shown in everywhere (`criteria_edits`), and a
+    client that had to parse "egfr >= 60 mL/min/1.73m2" back into an operator and a
+    number would be reimplementing that rule in the one place it must not drift.
+
+    `observed_min`/`observed_max` are the lowest and highest values the cohort
+    actually recorded for this attribute — the span a threshold means anything
+    across. A slider bounded by them has the trivial answers at its two ends
+    (nobody excluded, everybody excluded) and every real one in between, which no
+    invented range can promise. Both are None for a cohort scored before the
+    Matcher recorded the values it compared.
+    """
+
+    operator: str
+    value: float
+    value_high: float | None
+    unit: str
+    observed_min: float | None
+    observed_max: float | None
 
 
 class CriterionAttrition(TypedDict):
@@ -83,6 +113,7 @@ class CriterionAttrition(TypedDict):
     label: str
     kind: str
     source_text: str
+    threshold: CriterionThreshold | None
     excluded: int
     unresolved: int
     passed: int
@@ -146,24 +177,6 @@ class CohortAttrition(TypedDict):
     overlaps: list[CriterionOverlap]
 
 
-def _mapping(item: Any) -> Mapping[str, Any]:
-    """One entry of the checkpoint, defensively.
-
-    Every input here comes from a checkpoint that may have been written by an
-    older build of the pipeline or by a run that failed partway, so a wrongly
-    typed entry degrades to an empty section rather than raising on a page load.
-    """
-    return item if isinstance(item, Mapping) else {}
-
-
-def _items(values: Mapping[str, Any], key: str) -> list[Mapping[str, Any]]:
-    """A list-valued field, guarded the same way — a string is not a list of rows."""
-    value = values.get(key)
-    if not isinstance(value, Sequence) or isinstance(value, str | bytes):
-        return []
-    return [_mapping(item) for item in value]
-
-
 def _status(result: Mapping[str, Any]) -> str:
     """The result's status, normalized to one of the three the Matcher writes.
 
@@ -175,8 +188,8 @@ def _status(result: Mapping[str, Any]) -> str:
     return status if status in _SEVERITY else "unknown"
 
 
-def _key(kind: str, label: str) -> str:
-    """A criterion's identity across patients.
+def criterion_key(kind: str, criterion: Mapping[str, Any]) -> str:
+    """A criterion's identity across patients — and across views.
 
     Kind plus rendered label, not list position: position is stable within one
     run but says nothing to a reader, and the label is the same string the report
@@ -185,8 +198,29 @@ def _key(kind: str, label: str) -> str:
 
     Two extracted criteria that render identically therefore merge into one row.
     That is the intended reading: they are the same requirement, quoted twice.
+
+    Public because it is also the handle the what-if simulator (#95) takes an
+    override on: the key a reviewer drags is the key of the row they dragged it
+    from, so the two cannot address different criteria.
     """
-    return f"{kind}:{label}"
+    return f"{kind}:{criterion_label(criterion)}"
+
+
+def _threshold(
+    criterion: Mapping[str, Any], span: tuple[float | None, float | None]
+) -> CriterionThreshold | None:
+    """The bound a what-if could move on this criterion, if it has one."""
+    value = number(criterion.get("value"))
+    if "attribute" not in criterion or value is None:
+        return None
+    return CriterionThreshold(
+        operator=str(criterion.get("operator") or ""),
+        value=value,
+        value_high=number(criterion.get("value_high")),
+        unit=str(criterion.get("unit") or ""),
+        observed_min=span[0],
+        observed_max=span[1],
+    )
 
 
 class _Applied(NamedTuple):
@@ -196,6 +230,11 @@ class _Applied(NamedTuple):
     kind: str
     label: str
     source_text: str
+    criterion: Mapping[str, Any]
+    # The value the Matcher compared against for this patient (#95), when it
+    # recorded one. Numeric criteria only, and absent for a cohort scored before
+    # it was recorded — see `CriterionThreshold`.
+    observed: float | None
 
 
 def _patient_criteria(evaluation: Mapping[str, Any]) -> dict[str, _Applied]:
@@ -206,8 +245,8 @@ def _patient_criteria(evaluation: Mapping[str, Any]) -> dict[str, _Applied]:
     count the same patient twice in its own `excluded` figure.
     """
     applied: dict[str, _Applied] = {}
-    for result in _items(evaluation, "criterion_results"):
-        criterion = _mapping(result.get("criterion"))
+    for result in rows(evaluation, "criterion_results"):
+        criterion = mapping(result.get("criterion"))
         if not criterion:
             # A result row carrying no criterion — a null in a hand-edited
             # checkpoint. There is nothing to attribute it to, and inventing a row
@@ -215,12 +254,14 @@ def _patient_criteria(evaluation: Mapping[str, Any]) -> dict[str, _Applied]:
             continue
         kind = str(result.get("kind") or "")
         label = criterion_label(criterion)
-        key = _key(kind, label)
+        key = criterion_key(kind, criterion)
         entry = _Applied(
             status=_status(result),
             kind=kind,
             label=label,
             source_text=str(criterion.get("source_text") or ""),
+            criterion=criterion,
+            observed=number(result.get("observed")),
         )
         previous = applied.get(key)
         if previous is None or _SEVERITY[entry.status] > _SEVERITY[previous.status]:
@@ -231,18 +272,29 @@ def _patient_criteria(evaluation: Mapping[str, Any]) -> dict[str, _Applied]:
 class _Tally:
     """Mutable accumulator for one criterion, before it becomes a TypedDict."""
 
-    def __init__(self, kind: str, label: str, source_text: str) -> None:
-        self.kind = kind
-        self.label = label
-        # The first provenance seen for this key. Merged duplicates keep one
-        # sentence rather than concatenating two, and a criterion carrying no
-        # provenance shows none instead of the string "None".
-        self.source_text = source_text
+    def __init__(self, entry: _Applied) -> None:
+        self.kind = entry.kind
+        self.label = entry.label
+        # The first provenance — and the first criterion — seen for this key.
+        # Merged duplicates keep one sentence rather than concatenating two, and a
+        # criterion carrying no provenance shows none instead of the string "None".
+        self.source_text = entry.source_text
+        self.criterion = entry.criterion
         self.excluded = 0
         self.unresolved = 0
         self.passed = 0
         self.unique = 0
         self.recoverable = 0
+        # The span of values the cohort recorded for this criterion (#95). Both
+        # None until a patient carries one, which is the pre-#95 checkpoint case.
+        self.observed_min: float | None = None
+        self.observed_max: float | None = None
+
+    def observe(self, value: float | None) -> None:
+        if value is None:
+            return
+        self.observed_min = value if self.observed_min is None else min(self.observed_min, value)
+        self.observed_max = value if self.observed_max is None else max(self.observed_max, value)
 
 
 def build_attrition(values: Mapping[str, Any]) -> CohortAttrition:
@@ -257,7 +309,7 @@ def build_attrition(values: Mapping[str, Any]) -> CohortAttrition:
     a table of zeros, but the shape is still complete so neither has to
     special-case a null.
     """
-    evaluations = _items(values, "matched_patients")
+    evaluations = rows(values, "matched_patients")
     buckets = cohort.bucket_counts(evaluations)
 
     tallies: dict[str, _Tally] = {}
@@ -286,7 +338,8 @@ def build_attrition(values: Mapping[str, Any]) -> CohortAttrition:
 
         for key, entry in applied.items():
             status = entry.status
-            tally = tallies.setdefault(key, _Tally(entry.kind, entry.label, entry.source_text))
+            tally = tallies.setdefault(key, _Tally(entry))
+            tally.observe(entry.observed)
             if status == "fail":
                 tally.excluded += 1
                 excluded_by.setdefault(key, set()).add(index)
@@ -313,6 +366,7 @@ def build_attrition(values: Mapping[str, Any]) -> CohortAttrition:
                 label=tally.label,
                 kind=tally.kind,
                 source_text=tally.source_text,
+                threshold=_threshold(tally.criterion, (tally.observed_min, tally.observed_max)),
                 excluded=tally.excluded,
                 unresolved=tally.unresolved,
                 passed=tally.passed,

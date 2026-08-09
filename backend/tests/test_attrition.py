@@ -303,6 +303,70 @@ def test_a_criterion_extracted_twice_counts_each_patient_once():
     assert row["source_text"] == EGFR["source_text"]
 
 
+# --- The bound a row carries (#95) ------------------------------------------
+
+
+def test_a_numeric_row_carries_its_bound_in_machine_form():
+    """So a client can offer a control on it without parsing the label back apart."""
+    threshold = _by_key(attrition.build_attrition({"matched_patients": COHORT}))[EGFR_KEY][
+        "threshold"
+    ]
+    assert threshold == {
+        "operator": ">=",
+        "value": 60.0,
+        "value_high": None,
+        "unit": "mL/min/1.73m2",
+        # This fixture predates the Matcher recording the values it compared, which
+        # is exactly the case a client has to render as "not simulatable here".
+        "observed_min": None,
+        "observed_max": None,
+    }
+
+
+def test_a_categorical_row_carries_no_bound_to_move():
+    rows = _by_key(attrition.build_attrition({"matched_patients": COHORT}))
+    assert rows[NSCLC_KEY]["threshold"] is None
+
+
+def test_the_observed_span_is_the_range_the_cohort_actually_occupies():
+    """The two ends of a slider that means something: below the minimum nobody is
+    excluded, above the maximum everybody is."""
+    measured = [
+        {
+            "patient_id": f"PT-{index}",
+            "eligible": False,
+            "needs_review": False,
+            "criterion_results": [
+                {"criterion": EGFR, "kind": "inclusion", "status": "fail", "observed": value}
+            ],
+        }
+        for index, value in enumerate([42.0, 91.5, 58.0])
+    ]
+    threshold = attrition.build_attrition({"matched_patients": measured})["criteria"][0][
+        "threshold"
+    ]
+    assert threshold is not None
+    assert (threshold["observed_min"], threshold["observed_max"]) == (42.0, 91.5)
+
+
+def test_a_bound_that_is_not_a_number_leaves_the_row_unmovable():
+    """A hand-edited checkpoint, not a real extraction — but a row claiming a
+    threshold of `None` would put an uncontrollable control on the panel."""
+    broken = [
+        {
+            "patient_id": "PT-1",
+            "eligible": False,
+            "needs_review": False,
+            "criterion_results": [
+                {"criterion": dict(EGFR, value=None), "kind": "inclusion", "status": "unknown"}
+            ],
+        }
+    ]
+    assert (
+        attrition.build_attrition({"matched_patients": broken})["criteria"][0]["threshold"] is None
+    )
+
+
 # --- Reconciliation with the cohort buckets ---------------------------------
 
 
@@ -433,7 +497,7 @@ def test_report_prints_the_overlap_between_the_top_criteria():
 
 
 def test_the_overlap_heading_states_how_far_the_comparison_reached():
-    """"the top 5 criteria" on a run with three of them promises absent pairs."""
+    """ "the top 5 criteria" on a run with three of them promises absent pairs."""
     html = _report_html(matched_patients=COHORT)
     # Three criteria excluded anyone here, so all three were compared.
     assert "Overlap between the criteria that excluded anyone" in html

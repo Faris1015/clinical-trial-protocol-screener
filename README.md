@@ -519,6 +519,57 @@ curl -b cookies.txt http://localhost:8000/api/screenings/<thread_id>/state
   excluded 0" is a fact about the protocol, and ties break on the unresolved count
   then the label, so two exports of one run order the criteria identically.
 
+### What-if threshold simulation
+
+The attrition panel says eGFR ≥ 60 costs 41 patients. The question that provokes
+is *and if it were 50?* **What if the thresholds moved?**, directly under it, drags
+a bound and re-scores the cohort live — current and simulated bucket counts side
+by side, with the delta per bucket:
+
+```bash
+curl -b cookies.txt -X POST http://localhost:8000/api/screenings/<thread_id>/simulate \
+  -H 'Content-Type: application/json' \
+  -d '{"overrides": [{"key": "inclusion:egfr >= 60 mL/min/1.73m2",
+                      "operator": ">=", "value": 50, "value_high": null}]}'
+# → {"delta": {"eligible": 14, "review": 0, "ineligible": -14},
+#    "current":   {"totals": {"eligible": 12, ...}, "criteria": [...]},
+#    "simulated": {"totals": {"eligible": 26, ...}, "criteria": [...]},
+#    "overrides": [{"before": "egfr >= 60 mL/min/1.73m2",
+#                   "after":  "egfr >= 50 mL/min/1.73m2",
+#                   "findings": [], "unavailable": 0}],
+#    "criteria": {...}, "criteria_revision": 0}
+```
+
+- **Zero LLM calls, and nothing written.** Quantitative checks are pure Python, and
+  the Matcher records the value behind every numeric verdict (`observed`), so a
+  what-if re-applies one comparison to numbers already in the checkpoint. The
+  categorical half is not re-evaluated at all — its term mappings stand as the run
+  resolved them. Both guarantees are asserted by tests, because "it's free" is the
+  whole premise: the service never calls `aupdate_state`, and the endpoint takes
+  the *read* rate-limit bucket.
+- **Only numeric bounds, and only the number.** Relaxing a categorical term would
+  mean re-matching it against every patient record — an LLM pass over the cohort,
+  which is the thing this exists not to do — so such an override is refused with
+  that reason rather than silently ignored. The operator is shown, not offered:
+  changing `>=` to `<=` is an edit to what a criterion means, not a question about
+  its bound.
+- **Bounded by the cohort's own numbers.** The slider spans the lowest and highest
+  values these patients actually recorded, so its two ends are the trivial answers
+  and every position between them changes something. An invented range would
+  promise neither.
+- **Flagged before you talk yourself into it.** Each simulated value goes through
+  the same deterministic Critic rules that would block it on promotion, so a
+  platelet bound of 100,000 trips `PLT-001` inline rather than after the fact.
+- **Promotion is the existing edit path.** Accepting a what-if is `PATCH
+  /criteria` with the payload the simulation returned — same revision check, same
+  Critic re-run, same audit entry, and the run returns to the approval gate for a
+  named approval before any new cohort exists. There is deliberately no second
+  write path: a threshold that reached the criteria without passing the Critic
+  would be exactly the hole the gate exists to close. A finished run became
+  editable for this (it was not before [#53](../../issues/53)); the cohort it
+  scored under the old bounds is discarded rather than left standing under new
+  ones, and the timeline says how many verdicts went.
+
 ### Download a screening report
 
 A screening is only useful if it can leave the app. **Download report** — on a
@@ -917,6 +968,8 @@ backend/
       comparison.py            # Two runs paired side by side: criteria + cohort verdicts
       cohort.py                # Which bucket a patient lands in — one rule, every reader
       attrition.py             # Per-criterion cohort attrition: what screened patients out
+      simulation.py            # What-if: re-score the cohort under moved thresholds
+      checkpoint.py            # Reading a checkpoint defensively — the shared guards
       timeline.py              # The event log as an audit trail: retries, gate, attribution
       provenance.py            # criterion source_text → character span in the protocol
       report.py                # Self-contained, printable HTML screening report

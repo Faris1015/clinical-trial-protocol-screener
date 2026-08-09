@@ -22,8 +22,9 @@ with the statuses beneath it.
 
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from operator import eq, ge, gt, le, lt
+from typing import Any
 
 from langchain_core.exceptions import OutputParserException
 from langgraph.config import get_stream_writer
@@ -93,8 +94,19 @@ def _fast_present(criterion_value: str, term: str) -> bool:
     return False
 
 
-def _check_quantitative(patient: dict, criterion: dict) -> str:
-    value = patient["labs"].get(criterion["attribute"])
+def compare_quantitative(value: float | None, criterion: dict) -> str:
+    """Apply one numeric criterion to one already-read lab value.
+
+    Takes the value rather than the patient record so the what-if simulator (#95)
+    can apply a *moved* threshold to the value the run recorded, with no patient
+    record in hand. The comparison is the one rule both go through: a simulated
+    cohort that
+    bucketed patients by a second copy of this logic would eventually disagree
+    with the run it is simulating, which is the one thing a what-if panel must
+    never do.
+
+    A missing value is "unknown" — never a silent pass or fail.
+    """
     if value is None:
         return "unknown"
     if criterion["operator"] == "between":
@@ -102,6 +114,16 @@ def _check_quantitative(patient: dict, criterion: dict) -> str:
     else:
         ok = OPS[criterion["operator"]](value, criterion["value"])
     return "pass" if ok else "fail"
+
+
+def flip_exclusion(status: str) -> str:
+    """An exclusion's inclusion-side verdict, flipped to the screening verdict.
+
+    A patient who *matches* an exclusion criterion fails screening, so "pass"
+    (the bound holds) becomes "fail". "unknown" passes straight through: an
+    undecidable criterion is undecidable on either side.
+    """
+    return {"pass": "fail", "fail": "pass"}.get(status, status)
 
 
 def _categorical_presence(patient: dict, criterion: dict, verdicts: dict) -> tuple[str, str | None]:
@@ -197,10 +219,15 @@ def _threshold_phrase(criterion: dict) -> str:
     return f"{word} {_with_unit(criterion['value'], criterion['unit'])}"
 
 
-def _explain_quantitative(patient: dict, criterion: dict, kind: str, status: str) -> str:
+def _explain_quantitative(value: float | None, criterion: dict, kind: str, status: str) -> str:
+    """The plain-language line for one numeric verdict.
+
+    Takes the observed value rather than the patient record so the simulator (#95)
+    can re-render an explanation for a moved threshold from the value the run
+    recorded — the same reason `compare_quantitative` takes one.
+    """
     label = _attribute_label(criterion["attribute"])
     threshold = _threshold_phrase(criterion)
-    value = patient["labs"].get(criterion["attribute"])
     if value is None:
         return f"No {label} value is on file, so this could not be checked."
     reading = f"The patient's {label} is {_with_unit(value, criterion['unit'])}"
@@ -344,17 +371,47 @@ def summarize_cohort(evaluations: list[dict]) -> str:
     )
 
 
+def verdict(results: Sequence[Mapping[str, Any]]) -> tuple[bool, bool]:
+    """`(eligible, needs_review)` from a patient's criterion results.
+
+    The rule, once: eligibility is unanimity among the criteria that could be
+    decided, and any criterion that could *not* be decided sends the patient to a
+    human regardless. A patient with nothing decidable is not eligible — `bool(known)`
+    is what keeps a cohort of all-unknown verdicts from reading as a perfect match.
+
+    Public because the what-if simulator (#95) re-derives both flags after moving a
+    threshold, and a simulated cohort bucketed by a second copy of this rule would
+    eventually disagree with the run it is simulating.
+    """
+    known = [r for r in results if r["status"] != "unknown"]
+    eligible = bool(known) and all(r["status"] == "pass" for r in known)
+    return eligible, any(r["status"] == "unknown" for r in results)
+
+
 def evaluate_patient(patient: dict, criteria: dict, verdicts: dict | None = None) -> dict:
+    """Score one patient against one extraction.
+
+    Quantitative results carry `observed` — the lab value the comparison was made
+    against, or None when the record had none. It is what makes a verdict
+    re-derivable from the checkpoint alone: the what-if simulator (#95) moves a
+    threshold and re-applies it to `observed` rather than re-reading the EHR, so a
+    simulation touches no patient data beyond what this run already evaluated, and
+    a run checkpointed months ago simulates from its own numbers. Nothing new is
+    exposed by recording it — the explanation beside it already prints the value in
+    words ("The patient's eGFR is 42 mL/min/1.73m2").
+    """
     verdicts = verdicts or {}
     results = []
     for c in criteria["inclusion_quantitative"]:
-        status = _check_quantitative(patient, c)
+        observed = patient["labs"].get(c["attribute"])
+        status = compare_quantitative(observed, c)
         results.append(
             {
                 "criterion": c,
                 "kind": "inclusion",
                 "status": status,
-                "explanation": _explain_quantitative(patient, c, "inclusion", status),
+                "observed": observed,
+                "explanation": _explain_quantitative(observed, c, "inclusion", status),
             }
         )
     for c in criteria["inclusion_categorical"]:
@@ -370,14 +427,15 @@ def evaluate_patient(patient: dict, criteria: dict, verdicts: dict | None = None
         )
     # A patient MATCHING an exclusion criterion fails screening
     for c in criteria["exclusion_quantitative"]:
-        status = _check_quantitative(patient, c)
-        flipped = {"pass": "fail", "fail": "pass"}.get(status, status)
+        observed = patient["labs"].get(c["attribute"])
+        flipped = flip_exclusion(compare_quantitative(observed, c))
         results.append(
             {
                 "criterion": c,
                 "kind": "exclusion",
                 "status": flipped,
-                "explanation": _explain_quantitative(patient, c, "exclusion", flipped),
+                "observed": observed,
+                "explanation": _explain_quantitative(observed, c, "exclusion", flipped),
             }
         )
     # Presence of an excluded term fails the patient. We match on presence and
@@ -400,9 +458,7 @@ def evaluate_patient(patient: dict, criteria: dict, verdicts: dict | None = None
             }
         )
 
-    known = [r for r in results if r["status"] != "unknown"]
-    eligible = bool(known) and all(r["status"] == "pass" for r in known)
-    needs_review = any(r["status"] == "unknown" for r in results)
+    eligible, needs_review = verdict(results)
     return {
         "patient_id": patient["id"],
         "name": patient.get("name"),
