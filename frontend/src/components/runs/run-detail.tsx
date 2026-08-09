@@ -9,6 +9,7 @@ import { ComplianceFindings } from "@/components/ComplianceFindings";
 import { CriteriaProvenance } from "@/components/provenance/criteria-provenance";
 import { CriteriaDiff } from "@/components/review/criteria-diff";
 import { PatientMatchTable } from "@/components/PatientMatchTable";
+import { CohortAttritionPanel } from "@/components/runs/cohort-attrition";
 import { ReportDownload } from "@/components/report-download";
 import { RunTimeline } from "@/components/runs/run-timeline";
 import { Reveal } from "@/components/motion";
@@ -261,6 +262,12 @@ export function RunDetail() {
           </CardContent>
         </Card>
       )}
+
+      {/* Which criteria cost the cohort (#94), above the per-patient table it
+          summarizes. Derived server-side from the same `matched_patients` the table
+          renders, so the two cannot disagree — and it is the screen a coordinator
+          reads before scrolling a hundred verdicts. */}
+      <CohortAttritionPanel attrition={state.attrition} />
 
       <PatientMatchTable patients={matches} summary={values.match_summary} />
 
