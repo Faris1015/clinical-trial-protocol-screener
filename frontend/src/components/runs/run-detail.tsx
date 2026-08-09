@@ -10,6 +10,7 @@ import { CriteriaProvenance } from "@/components/provenance/criteria-provenance"
 import { CriteriaDiff } from "@/components/review/criteria-diff";
 import { PatientMatchTable } from "@/components/PatientMatchTable";
 import { CohortAttritionPanel } from "@/components/runs/cohort-attrition";
+import { CohortSimulator } from "@/components/runs/cohort-simulator";
 import { ReportDownload } from "@/components/report-download";
 import { RunTimeline } from "@/components/runs/run-timeline";
 import { Reveal } from "@/components/motion";
@@ -50,6 +51,10 @@ export function RunDetail() {
   const threadId = useSearchParams().get("id");
   const [state, setState] = useState<ScreeningState | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Bumped after a promoted simulation (#95) re-runs the pipeline. A token rather
+  // than a callable loader so there is exactly one fetch path — and so the fetch
+  // stays inside the effect, where the out-of-order guard lives.
+  const [reloadToken, setReloadToken] = useState(0);
 
   useEffect(() => {
     if (!threadId) return;
@@ -71,7 +76,7 @@ export function RunDetail() {
     return () => {
       active = false;
     };
-  }, [threadId]);
+  }, [threadId, reloadToken]);
 
   const backLink = (
     <Link
@@ -268,6 +273,22 @@ export function RunDetail() {
           renders, so the two cannot disagree — and it is the screen a coordinator
           reads before scrolling a hundred verdicts. */}
       <CohortAttritionPanel attrition={state.attrition} />
+
+      {/* And what would happen if one of those criteria moved (#95). Below the
+          attrition panel because it only makes sense as a follow-up to it: the
+          panel says eGFR ≥ 60 costs 41 patients, this says what ≥ 50 would cost.
+          It is read-only until a reviewer promotes a threshold, which is the
+          ordinary criteria edit — hence the reload, so the page shows the re-run
+          rather than the run it just replaced. */}
+      <CohortSimulator
+        threadId={threadId}
+        attrition={state.attrition}
+        revision={values.criteria_revision ?? 0}
+        // A rejected run is terminal: the API refuses an edit to one (#91), and
+        // offering a button that can only 409 is worse than not offering it.
+        promotable={!values.rejected_by}
+        onPromoted={() => setReloadToken((token) => token + 1)}
+      />
 
       <PatientMatchTable patients={matches} summary={values.match_summary} />
 

@@ -20,7 +20,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Query, Request, UploadFile
@@ -56,7 +56,7 @@ from app.health import app_version, readiness
 from app.logging_config import bind_contextvars, clear_contextvars, configure_logging, get_logger
 from app.persistence import Persistence, ScreeningStore, open_persistence
 from app.schemas.criteria import CriteriaSchema
-from app.services import metrics_summary, rules, screening, sse
+from app.services import metrics_summary, rules, screening, simulation, sse
 from app.services.concurrency import ConcurrencyLimiter, release_after
 from app.services.uploads import read_upload_capped, validate_content_type
 
@@ -98,6 +98,12 @@ MAX_CRITERIA_EDIT_BYTES = 256 * 1024
 # enough for a paragraph of clinical justification, short enough that no reviewer
 # can turn the audit trail into a document store.
 MAX_REJECTION_REASON_CHARS = 2000
+
+# How many thresholds one what-if may move (#95). A protocol's eligibility section
+# rarely carries more than a handful of numeric criteria, and the simulation is
+# linear in overrides × patients — so this is comfortably above any real request
+# and still refuses a client that tries to turn one POST into a sweep.
+MAX_SIMULATION_OVERRIDES = 20
 
 # Resolve settings at import time so a misconfigured deployment fails at
 # startup (e.g. LLM_PROVIDER=anthropic without ANTHROPIC_API_KEY), not
@@ -708,6 +714,85 @@ async def edit_criteria(
         idle_timeout_seconds=settings.sse_idle_timeout_seconds,
     )
     return StreamingResponse(heartbeated, media_type="text/event-stream")
+
+
+class CriterionOverrideRequest(BaseModel):
+    """One criterion's threshold as a what-if would have it (#95).
+
+    Only the comparison moves. The attribute and the unit are what a criterion is
+    *about*, and changing either is an edit to the extraction rather than a
+    question about its bound — which is why this is not a `QuantitativeCriterion`:
+    accepting one would let a simulation quietly re-point a criterion at a
+    different lab and report the result as the same criterion relaxed.
+
+    The bounds are plain floats, and finiteness is checked in the service rather
+    than here — `services/simulation._resolve` documents why declaring
+    `allow_inf_nan=False` turns a NaN body into a 500 instead of a 422.
+    """
+
+    key: str = Field(
+        min_length=1,
+        max_length=500,
+        description="The criterion's attrition key, as shown on the cohort panel.",
+    )
+    operator: Literal[">=", "<=", ">", "<", "==", "between"]
+    value: float
+    value_high: float | None = None
+
+
+class SimulationRequest(BaseModel):
+    """The set of thresholds to move for one what-if.
+
+    Bounded at both ends. At least one override, because simulating nothing is a
+    request for the cohort the caller already has; at most `MAX_SIMULATION_OVERRIDES`,
+    because the work is linear in overrides × patients and a protocol has nowhere
+    near that many numeric criteria — a larger list is a client bug, not a reviewer.
+    """
+
+    overrides: list[CriterionOverrideRequest] = Field(
+        min_length=1, max_length=MAX_SIMULATION_OVERRIDES
+    )
+
+
+@app.post("/api/screenings/{thread_id}/simulate")
+@limiter.limit(lambda: settings.rate_limit_read)
+async def simulate_screening(
+    request: Request,
+    thread_id: str,
+    body: SimulationRequest,
+    principal: Annotated[Principal, Depends(require_reviewer)],
+) -> dict:
+    """What the cohort would look like under different thresholds (#95).
+
+    A POST because the overrides are a structured body, not because anything is
+    written: this reads the checkpoint and returns a projection, and the service
+    never calls `aupdate_state` on this path. Hence the *read* rate-limit bucket
+    and no concurrency slot — there is no graph run to bound, no LLM call to make
+    (see `services/simulation.py`), and a reviewer dragging a threshold expects the
+    numbers to keep up.
+
+    Reviewer-guarded like every other `/api` route. The rung matters less here than
+    it does on `/approve`: a simulation reaches no further into patient data than
+    `GET /state` already does, and it is read-only for every role, so the guard is
+    about who may read the run rather than about who may change it.
+    """
+    return await screening.simulate_screening(
+        _store(),
+        _graph(),
+        thread_id,
+        [
+            # Named rather than `model_dump()`ed: the service's input is a closed
+            # four-field contract, so a field added to the request model has to be
+            # threaded through deliberately instead of arriving as a surprise key.
+            simulation.Override(
+                key=override.key,
+                operator=override.operator,
+                value=override.value,
+                value_high=override.value_high,
+            )
+            for override in body.overrides
+        ],
+    )
 
 
 @app.get("/api/screenings/{thread_id}/state")

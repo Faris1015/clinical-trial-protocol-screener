@@ -46,6 +46,7 @@ from app.services import (
     notifications,
     provenance,
     report,
+    simulation,
     sse,
     timeline,
 )
@@ -82,6 +83,7 @@ __all__ = [
     "list_screenings",
     "reject_screening",
     "resume_with_edited_criteria",
+    "simulate_screening",
     "stream_screening",
 ]
 
@@ -655,11 +657,55 @@ async def reject_screening(
 
 
 # Where a run can still be corrected by hand: parked at the gate, escalated after
-# the Critic loop gave up, or failed. Notably absent are "done" — see
-# ScreeningNotEditableError — and "rejected", which is a reviewer's own decision
-# to stop (#91): re-opening it by editing would erase the decision rather than
-# reverse it, and re-uploading the protocol is the honest way back.
-_EDITABLE_STEPS = frozenset({"awaiting_approval", "escalated", "failed"})
+# the Critic loop gave up, failed — or finished.
+#
+# "done" was excluded until #95 on the grounds that re-running a scored run
+# rewrites its history. The what-if simulator is what changed the reasoning: the
+# whole point of showing a coordinator that eGFR ≥ 50 would recover 14 patients is
+# that they can then act on it, and the run holding that answer is by definition
+# one that has already scored a cohort. It is not a silent rewrite either — the
+# edit is stamped with a revision, a diff and an editor (#53), the Critic re-runs
+# over it, and no new cohort exists until a named reviewer approves the gate
+# again. What the old rule was really protecting is that a run must never show a
+# cohort scored against criteria it no longer has, and `_stale_cohort` below
+# enforces exactly that instead.
+#
+# Still absent is "rejected", which is a reviewer's own decision to stop (#91):
+# re-opening it by editing would erase the decision rather than reverse it, and
+# re-uploading the protocol is the honest way back.
+_EDITABLE_STEPS = frozenset({"awaiting_approval", "escalated", "failed", "done"})
+
+
+def _stale_cohort(values: dict[str, Any]) -> dict[str, Any]:
+    """The state update that retires a cohort the edited criteria invalidate.
+
+    A run that has already scored patients keeps `matched_patients` in its
+    checkpoint through a re-run, and the re-run parks at the gate before the
+    Matcher — so without this the run detail view would show revision 2's criteria
+    above revision 1's verdicts, and the runs index would count matches nobody
+    approved these criteria for. Empty for a run that never matched, so the common
+    edit-at-the-gate path is untouched.
+
+    Discarding is the honest option rather than the lossy one: the cohort was an
+    answer to a question the reviewer has just changed, and the previous
+    checkpoint still holds it for anyone replaying the thread. The event says how
+    many verdicts went, so the timeline records the cost of the decision.
+    """
+    previous = values.get("matched_patients") or []
+    if not previous:
+        return {}
+    return {
+        "matched_patients": [],
+        "match_summary": None,
+        "events": [
+            event(
+                "human",
+                "edited",
+                f"Discarded the previous cohort of {len(previous)} scored patients — it was "
+                "matched against the criteria this revision replaces",
+            )
+        ],
+    }
 
 
 async def resume_with_edited_criteria(
@@ -704,8 +750,8 @@ async def resume_with_edited_criteria(
     at_a_stop = bool(snapshot.next) or values.get("current_step") in _EDITABLE_STEPS
     if previous is None or not at_a_stop:
         raise ScreeningNotEditableError(
-            "This screening has no extraction awaiting review — criteria can only be edited "
-            "while a run is at the approval gate, escalated, or failed."
+            "This screening has no extraction to correct — criteria can be edited while a run is "
+            "at the approval gate, escalated, failed, or finished, but not after it was rejected."
         )
 
     current_revision = int(values.get("criteria_revision") or 0)
@@ -719,9 +765,14 @@ async def resume_with_edited_criteria(
     changes = criteria_edits.diff_criteria(previous, criteria)
     revision = current_revision + 1
     summary = criteria_edits.summarize(changes)
+    # Empty unless this run had already scored a cohort — the case #95's promoted
+    # what-if introduced. Spread first so the explicit keys below always win, and
+    # its event appended after the edit's so the timeline reads cause then cost.
+    stale = _stale_cohort(values)
     await graph.aupdate_state(
         config,
         {
+            **stale,
             "parsed_criteria": criteria,
             "criteria_revision": revision,
             # Appended, not replaced: `criteria_edits` and `events` both carry the
@@ -740,7 +791,8 @@ async def resume_with_edited_criteria(
                     "edited",
                     f"Criteria revised by {editor.email} ({editor.role}) — {summary} "
                     f"(revision {revision}); re-running compliance review",
-                )
+                ),
+                *stale.get("events", []),
             ],
         },
         as_node="parser",
@@ -812,6 +864,47 @@ async def get_screening_state(store: ScreeningStore, graph: ScreeningGraph, thre
         if record
         else None,
     }
+
+
+async def simulate_screening(
+    store: ScreeningStore,
+    graph: ScreeningGraph,
+    thread_id: str,
+    overrides: Sequence[simulation.Override],
+) -> dict:
+    """Re-score this run's cohort under moved thresholds — and change nothing (#95).
+
+    The read-only twin of `resume_with_edited_criteria`. That one writes a
+    reviewer's corrected criteria into the checkpoint and re-runs the pipeline;
+    this one asks what the cohort *would* look like and hands back the answer,
+    leaving the run exactly where it was. The only graph call it makes is
+    `aget_state` — there is no `aupdate_state` on this path, which is what makes
+    the "without mutating the checkpoint" guarantee structural rather than a
+    promise (`services/simulation.py` documents why it also costs no LLM call).
+
+    It is guarded like every other route, at the reviewer rung — the floor of the
+    role ladder, and the same rung `/state` sits at. Nothing here is an authority a
+    reader of the run does not already have: a simulation reads the verdicts the
+    run produced and reaches no further into patient data than the page that
+    displays them.
+
+    The response carries the extraction with the overrides applied, so promoting a
+    simulation is the existing `PATCH /criteria` call with that payload — the same
+    revision check, the same Critic re-run, the same audit entry. No second write
+    path exists for a promoted what-if, deliberately: a threshold that reached the
+    criteria without passing the Critic would be exactly the hole the gate exists
+    to close.
+    """
+    config = await _require_thread(store, thread_id)
+    bind_contextvars(thread_id=thread_id)
+    snapshot = await graph.aget_state(config)
+    result = simulation.simulate(jsonable_encoder(snapshot.values), overrides)
+    log.info(
+        "screening.simulated",
+        overrides=len(result["overrides"]),
+        eligible_delta=result["delta"]["eligible"],
+    )
+    return dict(result)
 
 
 async def compare_screenings(

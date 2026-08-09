@@ -474,6 +474,9 @@ PROTECTED_REQUESTS = [
     # it is guarded identically — an anonymous caller must not be able to end a run.
     ("POST", "/api/screenings/any-id/reject"),
     ("PATCH", "/api/screenings/any-id/criteria"),
+    # Read-only (#95), but it reads a run's cohort — the same authority /state
+    # carries, and no less guarded for costing nothing to serve.
+    ("POST", "/api/screenings/any-id/simulate"),
     ("GET", "/api/screenings/any-id/state"),
     ("GET", "/api/admin/users"),
 ]

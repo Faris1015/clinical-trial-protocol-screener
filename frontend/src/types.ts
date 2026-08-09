@@ -127,12 +127,37 @@ export type RunTimeline = {
  * `share` is `excluded` as a percentage of the cohort, rounded by the API so the
  * figure and the bar beside it are one value rather than two roundings of it.
  */
+/**
+ * The numeric bound a criterion carries, in machine form (#95).
+ *
+ * Sent beside the rendered `label` rather than in place of it: the label is the
+ * one wording a criterion is shown in everywhere, and parsing "egfr >= 60
+ * mL/min/1.73m2" back apart in the browser would be a second implementation of a
+ * rule that lives in `services/criteria_edits.py`.
+ *
+ * `observed_min`/`observed_max` are the lowest and highest values this cohort
+ * actually recorded for the attribute, so a slider bounded by them has the two
+ * trivial answers at its ends and every real one in between. Both null for a run
+ * screened before the Matcher recorded the values it compared — which is what
+ * tells the panel to offer a number box rather than a slider it cannot bound.
+ */
+export type CriterionThreshold = {
+  operator: QuantitativeCriterion["operator"];
+  value: number;
+  value_high: number | null;
+  unit: string;
+  observed_min: number | null;
+  observed_max: number | null;
+};
+
 export type CriterionAttrition = {
   key: string;
   /** The same one-line label the report and the edit history name it with. */
   label: string;
   kind: "inclusion" | "exclusion";
   source_text: string;
+  /** Null for a categorical criterion — there is no bound to move (#95). */
+  threshold?: CriterionThreshold | null;
   excluded: number;
   unresolved: number;
   passed: number;
@@ -174,6 +199,56 @@ export type CohortAttrition = {
   criteria: CriterionAttrition[];
   /** Only pairs that actually share patients, largest first. */
   overlaps: CriterionOverlap[];
+};
+
+/** One threshold as a what-if would have it — the `simulate` request body (#95). */
+export type CriterionOverride = {
+  /** The criterion's attrition key, so a what-if can only address a row on screen. */
+  key: string;
+  operator: QuantitativeCriterion["operator"];
+  value: number;
+  value_high: number | null;
+};
+
+/**
+ * One override echoed back with what the API made of it (#95).
+ *
+ * `key` addresses the row in `current`, `simulated_key` the same criterion in
+ * `simulated` — they differ because a criterion's identity is its rendered label,
+ * so moving its threshold renames it. `findings` is the deterministic Critic's
+ * verdict on the *new* value, and `unavailable` how many patients this run scored
+ * without recording the value it compared, who therefore could not be re-checked.
+ */
+export type SimulatedOverride = {
+  key: string;
+  simulated_key: string;
+  kind: "inclusion" | "exclusion";
+  attribute: string;
+  unit: string;
+  before: string;
+  after: string;
+  findings: ComplianceFinding[];
+  unavailable: number;
+};
+
+/**
+ * `POST /api/screenings/{id}/simulate` — the cohort under moved thresholds (#95).
+ *
+ * `current` is the same `attrition` block `/state` serves, so the two columns a
+ * reviewer compares are one derivation rather than two. `criteria` is the whole
+ * extraction with the overrides applied: promoting a what-if is `PATCH
+ * /criteria` with this payload and `criteria_revision` as `base_revision`, which
+ * is why there is no separate promote endpoint — a threshold that reached the
+ * criteria without passing the Critic would be the hole the gate exists to close.
+ */
+export type Simulation = {
+  overrides: SimulatedOverride[];
+  current: CohortAttrition;
+  simulated: CohortAttrition;
+  /** `simulated - current` per bucket; negative when a threshold was tightened. */
+  delta: { eligible: number; review: number; ineligible: number };
+  criteria: CriteriaSchema;
+  criteria_revision: number;
 };
 
 /**
