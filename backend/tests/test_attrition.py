@@ -433,7 +433,7 @@ def test_report_prints_the_overlap_between_the_top_criteria():
 
 
 def test_the_overlap_heading_states_how_far_the_comparison_reached():
-    """"the top 5 criteria" on a run with three of them promises absent pairs."""
+    """ "the top 5 criteria" on a run with three of them promises absent pairs."""
     html = _report_html(matched_patients=COHORT)
     # Three criteria excluded anyone here, so all three were compared.
     assert "Overlap between the criteria that excluded anyone" in html
