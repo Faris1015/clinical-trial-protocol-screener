@@ -362,6 +362,24 @@ Critic escalated. **Review Queue** lists every screening waiting on a person
 `/review/edit/?id=<thread_id>`, where every field sits beside the verbatim
 protocol sentence it came from.
 
+The `unparseable` bucket is a two-way door, which is the one loop the
+architecture opens on purpose. **Reclassify** promotes a sentence the Parser gave
+up on into a real `QuantitativeCriterion` or `CategoricalCriterion`, pre-filled
+with the sentence as its `source_text`; the arrow beside a typed criterion sends
+a mis-parsed one the other way, back to being that sentence. (The arrow is
+disabled on a criterion with no recorded sentence — there is nothing verbatim to
+send back, so deleting is the only honest action.) Because both
+directions preserve provenance, the diff records each as a single
+`reclassified` change naming both buckets rather than an unexplained delete plus
+an unexplained add — and a promoted criterion is indistinguishable from a parsed
+one to the Matcher, since the reviewer submits the same `CriteriaSchema` the
+Parser produces and Pydantic validates it just as strictly.
+
+Demoting is not the same as deleting. A mis-parsed criterion is a real
+eligibility requirement wearing the wrong numbers, so sending it back keeps the
+sentence on the record as unscreenable; deleting drops the requirement from the
+protocol entirely.
+
 ```bash
 # Submit the corrected extraction with the revision it was based on. Streams the
 # Critic's re-review over SSE, exactly like /approve.

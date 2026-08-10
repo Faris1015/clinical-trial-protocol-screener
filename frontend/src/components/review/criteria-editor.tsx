@@ -3,7 +3,16 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { AlertTriangle, ArrowLeft, Ban, CheckCircle2, Play, RotateCcw, Trash2 } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowLeft,
+  Ban,
+  CheckCircle2,
+  CornerUpLeft,
+  Play,
+  RotateCcw,
+  Trash2,
+} from "lucide-react";
 import { ComplianceFindings } from "@/components/ComplianceFindings";
 import { CriteriaDiff } from "@/components/review/criteria-diff";
 import { RejectScreening } from "@/components/review/reject-screening";
@@ -18,6 +27,7 @@ import {
   OPERATORS,
   blankCategorical,
   blankQuantitative,
+  demotionText,
 } from "@/lib/criteria";
 import { FIELD } from "@/lib/field";
 import { formatTimestamp, runHref, statusLabel, statusVariant } from "@/lib/runs";
@@ -197,6 +207,41 @@ export function CriteriaEditor() {
     });
   }
 
+  /**
+   * The other direction (#92): a criterion the Parser typed but got wrong goes
+   * back to being the sentence it came from.
+   *
+   * Not the same thing as deleting it. A mis-parsed criterion — "adequate hepatic
+   * function" read as an eGFR threshold — is a real eligibility requirement wearing
+   * the wrong numbers, and deleting it drops the requirement from the protocol
+   * entirely. Demoting keeps the sentence on the record: the exported report and
+   * the provenance viewer both render `unparseable`, so a reader sees that the
+   * protocol asked for something this run could not screen.
+   *
+   * One sharp edge, inherited from edit-and-rerun rather than introduced here.
+   * The Critic's `must_be_quantitative` rules key off `unparseable`, so demoting
+   * a sentence whose topic the protocol also states in prose can legitimately
+   * re-reject the run — and a rejected re-run below the retry cap routes back to
+   * the *Parser*, which replaces `parsed_criteria` wholesale and takes the
+   * demotion with it. Any edit that trips a `reject` rule loses itself the same
+   * way (deleting a criterion the protocol demands, moving a threshold out of its
+   * plausible range); demotion is only the most likely to. Fixing that means
+   * teaching the graph not to re-parse after a human edit, which is #53's
+   * routing, not this affordance's.
+   */
+  function demote(bucket: QuantBucket | CatBucket, index: number) {
+    setDraft((prev) => {
+      if (!prev) return prev;
+      const sentence = demotionText(prev[bucket][index]);
+      if (sentence === null) return prev;
+      return {
+        ...prev,
+        [bucket]: prev[bucket].filter((_, i) => i !== index),
+        unparseable: [...prev.unparseable, sentence],
+      };
+    });
+  }
+
   async function rerun() {
     if (!draft || !threadId) return;
     const problem = firstProblem(draft);
@@ -361,6 +406,36 @@ export function CriteriaEditor() {
   // parked at the approval gate, or escalated after the Critic gave up.
   const rejectable =
     !rejectedBy && (state.pending.includes("matcher") || state.values.current_step === "escalated");
+
+  /**
+   * The "this was mis-parsed" exit, rendered beside Delete on every typed
+   * criterion (#92). Shared by both form shapes so the two rows offer the same
+   * action in the same place — a reviewer scanning a page of criteria should not
+   * have to learn where the button moved to.
+   */
+  const demoteButton = (
+    bucket: QuantBucket | CatBucket,
+    index: number,
+    criterion: QuantitativeCriterion | CategoricalCriterion
+  ) => {
+    const sentence = demotionText(criterion);
+    return (
+      <Button
+        variant="ghost"
+        size="icon"
+        aria-label="Send this criterion back to unparseable"
+        title={
+          sentence
+            ? "The Parser got this one wrong — put its sentence back in Unparseable"
+            : "No source sentence recorded, so there is nothing to send back."
+        }
+        disabled={busy || sentence === null}
+        onClick={() => demote(bucket, index)}
+      >
+        <CornerUpLeft aria-hidden="true" />
+      </Button>
+    );
+  };
 
   return (
     <div className="space-y-4" data-region="criteria-editor" data-phase={phaseLabel}>
@@ -554,6 +629,7 @@ export function CriteriaEditor() {
                         disabled={busy}
                         onChange={(e) => patchQuant(bucket, index, { unit: e.target.value })}
                       />
+                      {demoteButton(bucket, index, criterion)}
                       <Button
                         variant="ghost"
                         size="icon"
@@ -631,6 +707,7 @@ export function CriteriaEditor() {
                           must NOT have
                         </label>
                       )}
+                      {demoteButton(bucket, index, criterion)}
                       <Button
                         variant="ghost"
                         size="icon"
@@ -654,9 +731,10 @@ export function CriteriaEditor() {
             <CardHeader>
               <CardTitle className="text-base">Unparseable</CardTitle>
               <p className="text-muted-foreground text-sm">
-                Sentences the Parser refused to turn into criteria rather than invent a number for.
-                Reclassify one into a real criterion, or delete it if it isn&apos;t eligibility
-                criteria at all.
+                Sentences the Parser refused to turn into criteria rather than invent a number for,
+                plus any you sent back down from the sections above. Reclassify one into a real
+                criterion, or delete it if it isn&apos;t eligibility criteria at all — a sentence
+                left here is recorded as unscreenable rather than scored.
               </p>
             </CardHeader>
             <CardContent className="space-y-3">
