@@ -124,3 +124,24 @@ export function blankQuantitative(source: string): QuantitativeCriterion {
 export function blankCategorical(source: string): CategoricalCriterion {
   return { category: "diagnosis", value: "", negated: false, source_text: source };
 }
+
+/**
+ * The verbatim sentence a typed criterion would go back to if a reviewer sends it
+ * into `unparseable` (#92), or `null` when there is nothing to send back.
+ *
+ * The round trip is provenance-shaped in both directions: promoting carries the
+ * sentence *into* `source_text`, so demoting has to carry that same text back out
+ * for the backend's diff to pair the two halves into one "reclassified" entry.
+ * A criterion with no recorded sentence has nothing to demote *to* — an empty
+ * string in `unparseable` is a blank row a later reviewer can neither act on nor
+ * trace — so the editor offers deletion there instead.
+ */
+export function demotionText(
+  criterion: QuantitativeCriterion | CategoricalCriterion
+): string | null {
+  // Defended like the editor's own provenance blockquote rather than trusted to
+  // the type: this reads a checkpoint written by an older revision of the schema,
+  // and an absent `source_text` should disable one button, not throw on render.
+  const source = criterion.source_text ?? "";
+  return source.trim() ? source : null;
+}

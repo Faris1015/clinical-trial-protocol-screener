@@ -9,6 +9,7 @@ unexplained delete plus an unexplained add.
 
 from __future__ import annotations
 
+from app.graph.nodes.critic import load_rules, run_deterministic_checks
 from app.services.criteria_edits import diff_criteria, edit_record, summarize
 from tests.auth_helpers import REVIEWER
 
@@ -92,6 +93,84 @@ def test_reclassified_unparseable_pairs_into_one_change():
     assert change["bucket"] == "inclusion_quantitative"
     assert change["before"] == sentence
     assert change["after"] == "anc >= 1.5 10^9/L"
+
+
+def test_demoting_a_mis_parsed_criterion_pairs_into_one_change():
+    """The promotion run backwards (#92): a criterion the Parser typed but got
+    wrong goes back to being its sentence.
+
+    Same pairing rule, so the reviewer who undoes a bad promotion — or catches a
+    hallucinated threshold on a sentence that was never numeric — gets one
+    reclassification naming both ends, not a delete whose replacement in
+    `unparseable` looks unrelated to it."""
+    sentence = "Adequate hepatic function."
+    before = _criteria(
+        inclusion_quantitative=[_quant(60, sentence, attribute="egfr", unit="mL/min/1.73m2")]
+    )
+    after = _criteria(unparseable=[sentence])
+    (change,) = diff_criteria(before, after)
+    assert change["kind"] == "reclassified"
+    assert change["from_bucket"] == "inclusion_quantitative"
+    assert change["bucket"] == "unparseable"
+    assert change["before"] == "egfr >= 60 mL/min/1.73m2"
+    assert change["after"] == sentence
+
+
+def test_demoting_an_organ_function_criterion_re_arms_the_critic():
+    """The consequence of a demotion, pinned so it stays deliberate (#92).
+
+    `must_be_quantitative` fires on exactly the state a demotion creates — the
+    protocol states the requirement in prose, the extraction now has it only in
+    `unparseable`, and no numeric threshold covers the attribute. So sending a
+    mis-parsed organ-function criterion back is *supposed* to re-reject the run:
+    the extraction really cannot screen something the protocol asks for, and
+    hiding that would make the demotion a way to launder an unscreenable protocol
+    past the guardrail. The reviewer's exit is #91's reject, not a quiet demotion.
+    """
+    text = "Patients must have adequate hepatic function and adequate organ function."
+    sentence = "Patients must have adequate hepatic function."
+    rules = load_rules()
+
+    def blocking(criteria: dict) -> set[str]:
+        findings = run_deterministic_checks(criteria, text, rules)
+        return {f["rule_id"] for f in findings if f["severity"] == "reject"}
+
+    typed = _criteria(
+        inclusion_quantitative=[_quant(1.2, sentence, attribute="creatinine", unit="mg/dL")]
+    )
+    assert blocking(typed) == set()
+    # Deleting it outright does not trip the rule — nothing lands in `unparseable`
+    # — which is the asymmetry that makes demotion the more honest of the two.
+    assert blocking(_criteria()) == set()
+    assert blocking(_criteria(unparseable=[sentence])) == {"HEPATIC-001"}
+
+
+def test_a_promotion_and_a_demotion_in_one_revision_do_not_cross_pair():
+    """Both directions in the same edit — the realistic revision, since a reviewer
+    who notices the Parser mis-typed one sentence usually rescues another in the
+    same pass.
+
+    The reclassification pass matches a removal to an addition on provenance
+    alone, so with one criterion leaving `unparseable` and another arriving in it
+    the two must pair with their own sentences and not with each other."""
+    rescued = "Absolute neutrophil count at least 1.5 x 10^9/L."
+    mis_parsed = "Adequate hepatic function."
+    before = _criteria(
+        unparseable=[rescued],
+        inclusion_quantitative=[_quant(60, mis_parsed, attribute="egfr", unit="mL/min/1.73m2")],
+    )
+    after = _criteria(
+        unparseable=[mis_parsed],
+        inclusion_quantitative=[_quant(1.5, rescued, attribute="anc", unit="10^9/L")],
+    )
+
+    changes = diff_criteria(before, after)
+    assert [c["kind"] for c in changes] == ["reclassified", "reclassified"]
+    by_destination = {c["bucket"]: c for c in changes}
+    assert by_destination["inclusion_quantitative"]["before"] == rescued
+    assert by_destination["inclusion_quantitative"]["after"] == "anc >= 1.5 10^9/L"
+    assert by_destination["unparseable"]["before"] == "egfr >= 60 mL/min/1.73m2"
+    assert by_destination["unparseable"]["after"] == mis_parsed
 
 
 def test_moving_a_criterion_between_buckets_is_a_reclassification():
