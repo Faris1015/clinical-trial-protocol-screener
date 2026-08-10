@@ -35,6 +35,19 @@ CATEGORICAL_BUCKETS = ("inclusion_categorical", "exclusion_categorical")
 UNPARSEABLE_BUCKET = "unparseable"
 DIFFED_BUCKETS = (*QUANTITATIVE_BUCKETS, *CATEGORICAL_BUCKETS, UNPARSEABLE_BUCKET)
 
+# Which side of the eligibility list each structured bucket is, in the word the
+# Matcher writes into a `criterion_results` entry's `kind`. It lives beside the
+# labels because the pair `(kind, label)` *is* a criterion's identity across
+# views (`attrition.criterion_key`) — the what-if simulator (#95) and the
+# coverage score (#93) both key criteria off this mapping, and a third copy of it
+# would eventually name one criterion two ways.
+BUCKET_KINDS = {
+    "inclusion_quantitative": "inclusion",
+    "inclusion_categorical": "inclusion",
+    "exclusion_quantitative": "exclusion",
+    "exclusion_categorical": "exclusion",
+}
+
 
 def _number(value: Any) -> str:
     """A threshold as a clinician writes it: `18`, not the schema's `18.0`.

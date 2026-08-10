@@ -155,10 +155,20 @@ async def test_sqlite_set_status_preserves_counts(tmp_path):
     p = await open_persistence(_sqlite_settings(tmp_path))
     try:
         await p.store.create("t1", "a.pdf", "x")
-        await p.store.set_status("t1", "awaiting_approval", criteria_count=5, match_count=0)
+        await p.store.set_status(
+            "t1",
+            "awaiting_approval",
+            criteria_count=5,
+            match_count=0,
+            coverage_checkable=4,
+            coverage_criteria=6,
+        )
         await p.store.set_status("t1", "failed")
         row = (await p.store.list(limit=10, offset=0)).items[0]
         assert (row.status, row.criteria_count) == ("failed", 5)
+        # Coverage (#93) is preserved by the same COALESCE: a run that failed after
+        # the gate still has the screenability its extraction earned.
+        assert (row.coverage_checkable, row.coverage_criteria) == (4, 6)
     finally:
         await p.aclose()
 
@@ -186,8 +196,10 @@ async def test_sqlite_setup_adds_columns_to_a_pre_existing_table(tmp_path):
     try:
         row = (await p.store.list(limit=10, offset=0)).items[0]
         assert row.thread_id == "old"
-        # Backfilled to the column default rather than exploding.
+        # Backfilled to the column default rather than exploding — including the
+        # coverage pair added later (#93), which reads as "never scored".
         assert (row.criteria_count, row.match_count) == (0, 0)
+        assert (row.coverage_checkable, row.coverage_criteria) == (0, 0)
         # And setup() is still idempotent on the now-migrated file.
         await p.store.setup()
     finally:
@@ -364,7 +376,10 @@ def test_list_screenings_returns_metadata_without_protocol_text(client):
         "created_at",
         "criteria_count",
         "match_count",
+        # The screenability score (#93), rebuilt from the row's own columns.
+        "coverage",
     }
+    assert set(row["coverage"]) == {"checkable", "criteria", "score"}
     assert row["source_filename"] == "trial.md"
     assert secret not in response.text
 

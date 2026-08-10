@@ -303,7 +303,9 @@ def test_a_reviewer_can_read_the_summary(client):
     response = client.get("/api/metrics/summary")
     assert response.status_code == 200
     body = response.json()
-    assert set(body) == {"since", "exported", "funnel", "rejections", "attempts"}
+    # `coverage` (#93) is the one block not read off a collector — it is pooled from
+    # recent checkpoints, and tests/test_coverage.py covers it.
+    assert set(body) == {"since", "exported", "funnel", "rejections", "attempts", "coverage"}
 
 
 # --- reconciliation with /metrics --------------------------------------------

@@ -54,16 +54,13 @@ from app.exceptions import InvalidSimulationError, ScreeningNotSimulatableError
 from app.graph.nodes import critic, matcher
 from app.services import attrition, cohort
 from app.services.checkpoint import mapping, number, rows
+from app.services.criteria_edits import BUCKET_KINDS as _BUCKET_KINDS
 from app.services.criteria_edits import quantitative_label
 
-# Which bucket of the extraction a criterion of each kind lives in, and which of
-# those hold the numeric criteria an override can move.
-_BUCKET_KINDS = {
-    "inclusion_quantitative": "inclusion",
-    "inclusion_categorical": "inclusion",
-    "exclusion_quantitative": "exclusion",
-    "exclusion_categorical": "exclusion",
-}
+# Which bucket of the extraction holds the numeric criteria an override can move.
+# The bucket→kind mapping beside it is `criteria_edits.BUCKET_KINDS`, imported
+# rather than restated: the key an override addresses a criterion by is built from
+# it, and so is the key the attrition row it was dragged from carries.
 QUANTITATIVE_BUCKETS = ("inclusion_quantitative", "exclusion_quantitative")
 
 

@@ -437,6 +437,13 @@ export function CriteriaEditor() {
         </Card>
       )}
 
+      {/* No coverage panel here, deliberately (#93). Every field below is a *draft*
+          the reviewer is editing, and the score is the server's figure for the
+          revision that was loaded — so a reviewer who promotes three `unparseable`
+          sentences would be reading "5 of 8" above the block they just emptied. The
+          score belongs where the extraction is fixed: the approval gate and the run
+          detail view. It updates here on the next load, after the re-run. */}
+
       {/* Why this run is here. The Critic's blocking findings are the reviewer's
           work list, so they belong above the fields, not buried under them —
           in plain language by default (#52), since fixing them is the job of

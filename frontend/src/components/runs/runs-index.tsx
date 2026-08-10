@@ -24,6 +24,7 @@ import {
 } from "@/components/ui/table";
 import { apiFetch, problemDetail } from "@/lib/api";
 import { FIELD } from "@/lib/field";
+import { formatShare } from "@/lib/metrics";
 import {
   RUN_STATUSES,
   compareHref,
@@ -32,7 +33,8 @@ import {
   statusLabel,
   statusVariant,
 } from "@/lib/runs";
-import type { Screening, ScreeningPage, ScreeningStatus } from "@/types";
+import { cn } from "@/lib/utils";
+import type { CoverageSummary, Screening, ScreeningPage, ScreeningStatus } from "@/types";
 
 const PAGE_SIZE = 25;
 
@@ -278,7 +280,24 @@ export function RunsIndex() {
                     </TableHead>
                     <TableHead>Protocol</TableHead>
                     <TableHead>Status</TableHead>
-                    <TableHead className="text-right">Criteria</TableHead>
+                    {/* "Structured", not "Criteria", since #93 put a second
+                        criteria column beside it: this one counts what the parser
+                        turned into criteria, while Checkable's total also includes
+                        the sentences it could not. Two columns headed as if they
+                        counted the same thing would read as a contradiction —
+                        "Criteria 6" next to "5 of 8". */}
+                    <TableHead className="text-right" title="Criteria the parser structured">
+                      Structured
+                    </TableHead>
+                    {/* Screenability (#93): two runs with the same criteria count
+                        are not comparable if one of them could only check half of
+                        them, and this column is the only place that shows up. */}
+                    <TableHead
+                      className="text-right"
+                      title="Criteria this run could actually check, of every criterion the protocol yielded"
+                    >
+                      Checkable
+                    </TableHead>
                     <TableHead className="text-right">Matches</TableHead>
                     <TableHead>Started</TableHead>
                   </TableRow>
@@ -332,6 +351,7 @@ export function RunsIndex() {
                         <TableCell className="text-right tabular-nums">
                           {run.criteria_count}
                         </TableCell>
+                        <CoverageCell coverage={run.coverage} />
                         <TableCell className="text-right tabular-nums">{run.match_count}</TableCell>
                         <TableCell className="text-muted-foreground whitespace-nowrap">
                           {formatTimestamp(run.created_at)}
@@ -377,6 +397,43 @@ export function RunsIndex() {
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * One row's screenability (#93): how many of the criteria the protocol yielded
+ * this run could actually check, and that as a share.
+ *
+ * Both figures come off the row itself — the API denormalizes them into the store
+ * when a run reaches a terminal frame and resolves the percentage server-side, so
+ * this cell divides nothing and cannot disagree with the panel on the run's own
+ * page. A run with no extraction (uploaded but never streamed, or still parsing)
+ * has nothing to be a share of and shows an em dash rather than "0%", which would
+ * read as a failed screening.
+ */
+function CoverageCell({ coverage }: { coverage?: CoverageSummary }) {
+  if (!coverage || coverage.criteria === 0) {
+    return (
+      <TableCell className="text-muted-foreground text-right">
+        <span aria-hidden="true">—</span>
+        <span className="sr-only">Not scored</span>
+      </TableCell>
+    );
+  }
+  const partial = coverage.checkable < coverage.criteria;
+  return (
+    <TableCell
+      className="text-right tabular-nums"
+      title={`${coverage.checkable} of ${coverage.criteria} criteria could be checked`}
+    >
+      {/* The fraction, not the percentage alone: "14 of 20" is what a coordinator
+          acts on, and 70% of a two-criterion protocol is a different fact from 70%
+          of forty. The share follows it as the scannable column. */}
+      <span className={cn(partial && "text-status-warn")}>
+        {coverage.checkable} of {coverage.criteria}
+      </span>
+      <span className="text-muted-foreground block text-xs">{formatShare(coverage.score)}</span>
+    </TableCell>
   );
 }
 

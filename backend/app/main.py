@@ -56,7 +56,7 @@ from app.health import app_version, readiness
 from app.logging_config import bind_contextvars, clear_contextvars, configure_logging, get_logger
 from app.persistence import Persistence, ScreeningStore, open_persistence
 from app.schemas.criteria import CriteriaSchema
-from app.services import metrics_summary, rules, screening, simulation, sse
+from app.services import rules, screening, simulation, sse
 from app.services.concurrency import ConcurrencyLimiter, release_after
 from app.services.uploads import read_upload_capped, validate_content_type
 
@@ -888,20 +888,26 @@ async def metrics_overview(
     request: Request,
     principal: Annotated[Principal, Depends(require_reviewer)],
 ) -> dict:
-    """The domain metrics as an in-app summary — funnel, rejections, depth (#58).
+    """The domain metrics as an in-app summary — funnel, rejections, depth (#58),
+    and how much of the protocols this instance saw it could actually check (#93).
 
-    Distinct from `/metrics` in audience, not in data: this reads the same
-    collectors that endpoint serializes (see services/metrics_summary.py), so the
-    two cannot disagree. Under `/api` and reviewer-guarded because it is part of
-    the app, while `/metrics` stays unauthenticated for the scraper and out of the
-    OpenAPI schema.
+    Distinct from `/metrics` in audience, not in data: the first three read the
+    same collectors that endpoint serializes (see services/metrics_summary.py), so
+    the two cannot disagree. Coverage is the one figure here a Prometheus counter
+    could not carry — ranking the phrasings the vocabulary cannot parse means
+    reading the sentences, so it is a bounded walk over recent checkpoints (see
+    services/screening.get_metrics_summary). Under `/api` and reviewer-guarded
+    because it is part of the app, while `/metrics` stays unauthenticated for the
+    scraper and out of the OpenAPI schema.
 
     Reviewer-guarded rather than admin: these are aggregates over the pipeline's
     own behaviour, with no patient data and no per-run detail, and the reviewers
     being asked to act on escalations are the people who should see how often they
-    happen.
+    happen. Coverage adds protocol text — the `unparseable` phrasings — which is
+    the same class of data `/api/rules` and every criteria view already serve to
+    this rung.
     """
-    return metrics_summary.summarize_metrics()
+    return await screening.get_metrics_summary(_store(), _graph())
 
 
 def mount_frontend(app: FastAPI, dist: Path | None) -> bool:

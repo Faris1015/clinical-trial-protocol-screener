@@ -45,7 +45,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
-from app.services import attrition, cohort, timeline
+from app.services import attrition, cohort, coverage, timeline
 from app.services.criteria_edits import criterion_label
 from app.services.uploads import sanitize_filename
 
@@ -331,6 +331,75 @@ def _masthead(payload: Mapping[str, Any], generated_at: datetime) -> str:
 def _phase_note(payload: Mapping[str, Any]) -> str:
     note = _PHASE_NOTES.get(_phase(payload))
     return f'<p class="note" data-region="phase-note">{_esc(note)}</p>' if note else ""
+
+
+# Why a criterion went unchecked, in a reader's terms rather than the payload's
+# (#93). The two are different work — one needs a wider `EhrAttribute` vocabulary,
+# the other patient data the record does not carry — and a site reading this
+# document is the party who has to do whichever it is by hand.
+_GAP_LABELS = {
+    coverage.UNPARSEABLE: "Never structured",
+    coverage.UNRESOLVED: "Could not be evaluated",
+}
+
+
+def _coverage_section(values: Mapping[str, Any]) -> str:
+    """How much of this protocol the run could actually check (#93).
+
+    First of the content sections, and deliberately ahead of the criteria table:
+    the tables below are what the run *did* check, and a reader who works through
+    them without knowing that six sentences never became criteria at all has been
+    told a flattering half of the story. `services/coverage.py` owns the
+    arithmetic, so this figure and the app's own panel are one derivation.
+
+    A run with no extraction gets no section — there is nothing to be a share of.
+    A run with full coverage still gets one: "all 20 criteria were checkable" is
+    the fact a handoff document should state rather than leave to be inferred from
+    a missing section.
+    """
+    score = coverage.build_coverage(values)
+    if not score["criteria"]:
+        return ""
+
+    checked = "could be checked" if score["scored"] else "were structured for checking"
+    noun = "criterion" if score["criteria"] == 1 else "criteria"
+    lead = (
+        f"<p><strong>{_esc(score['checkable'])} of {_esc(score['criteria'])} {noun}</strong> "
+        f"{checked} — {_esc(_percent(score['score']))} of this protocol's eligibility "
+        "section.</p>"
+    )
+    if not score["scored"]:
+        # The gate's own caveat, printed for a run exported before matching: the
+        # parse layer is all that can be known yet, and a document implying the
+        # Matcher had settled these criteria would be claiming a check nobody ran.
+        lead += (
+            '<p class="note">No cohort has been scored yet, so this counts only what the '
+            "extraction structured. Criteria the Matcher cannot resolve against patient records "
+            "are not yet reflected.</p>"
+        )
+
+    rows = [
+        f"<tr><td>{_esc(_GAP_LABELS.get(gap['reason'], gap['reason']))}</td>"
+        f"<td>{_esc(gap['text'])}"
+        f'<div class="detail">{_esc(gap["kind"])}</div></td>'
+        f"<td>{_esc(gap['patients']) if gap['patients'] else '—'}</td></tr>"
+        for gap in score["gaps"]
+    ]
+    table = _table(("Reason", "Criterion or protocol text", "Patients affected"), rows)
+    if not table:
+        # Conditioned on `scored` like the lead above is: a run parked at the gate
+        # with nothing unparseable has a clean *parse*, and claiming the Matcher
+        # evaluated it two lines after saying no cohort exists would make the
+        # document contradict itself.
+        clean = (
+            "Every criterion in this extraction was structured and evaluated."
+            if score["scored"]
+            else "Every criterion in this extraction was structured; none has been evaluated yet."
+        )
+        body = lead + f'<p class="note">{clean}</p>'
+    else:
+        body = lead + f"<h3>What could not be checked</h3>{table}"
+    return _section("Screenability", body, region="report-coverage")
 
 
 def _criteria_section(values: Mapping[str, Any]) -> str:
@@ -765,6 +834,10 @@ def render_report(payload: Mapping[str, Any], *, generated_at: datetime | None =
         (
             _masthead(payload, stamped),
             _phase_note(payload),
+            # Screenability before the criteria it is a share of: the tables below
+            # are what this run could check, and the reader has to know what it
+            # could not before working through them (#93).
+            _coverage_section(values),
             _criteria_section(values),
             _edits_section(values),
             _findings_section(values),

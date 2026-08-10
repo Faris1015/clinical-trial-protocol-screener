@@ -54,6 +54,15 @@ class ScreeningRecord:
     here for the same reason ``status`` does: the runs index (#51) renders them
     for every row, and reading them from the checkpoints would mean loading one
     per screening on every page view.
+
+    ``coverage_checkable``/``coverage_criteria`` are the screenability score (#93)
+    denormalized the same way, and by the same writer — how many of the criteria
+    the extraction produced this run could actually check, over how many there
+    were. Stored as the pair rather than as a percentage so the API recombines
+    them through ``services.coverage.score_of``: the formula stays in one place,
+    and a row can still say *"14 of 20"* rather than only *"70%"*. Both are 0 for
+    a run whose parse never landed, which is how the index tells "nothing to
+    score" from "nothing was checkable".
     """
 
     thread_id: str
@@ -62,6 +71,8 @@ class ScreeningRecord:
     created_at: str
     criteria_count: int = 0
     match_count: int = 0
+    coverage_checkable: int = 0
+    coverage_criteria: int = 0
 
 
 @dataclass(frozen=True)
@@ -163,6 +174,8 @@ class ScreeningStore(ABC):
         *,
         criteria_count: int | None = None,
         match_count: int | None = None,
+        coverage_checkable: int | None = None,
+        coverage_criteria: int | None = None,
     ) -> None:
         """Update the denormalized run summary.
 
@@ -206,6 +219,8 @@ class InMemoryScreeningStore(ScreeningStore):
             "created_at": _now(),
             "criteria_count": 0,
             "match_count": 0,
+            "coverage_checkable": 0,
+            "coverage_criteria": 0,
         }
 
     async def exists(self, thread_id: str) -> bool:
@@ -217,10 +232,13 @@ class InMemoryScreeningStore(ScreeningStore):
             return None
         return ScreeningInput(row["raw_protocol_text"], row["source_filename"])
 
-    async def get_record(self, thread_id: str) -> ScreeningRecord | None:
-        row = self._rows.get(thread_id)
-        if row is None:
-            return None
+    @staticmethod
+    def _as_record(row: dict) -> ScreeningRecord:
+        """One dict row as a record — the in-memory twin of ``_record``.
+
+        Shared by ``get_record`` and ``list`` so a column added to the dataclass
+        cannot reach one of them and not the other.
+        """
         return ScreeningRecord(
             row["thread_id"],
             row["source_filename"],
@@ -228,7 +246,13 @@ class InMemoryScreeningStore(ScreeningStore):
             row["created_at"],
             row["criteria_count"],
             row["match_count"],
+            row["coverage_checkable"],
+            row["coverage_criteria"],
         )
+
+    async def get_record(self, thread_id: str) -> ScreeningRecord | None:
+        row = self._rows.get(thread_id)
+        return self._as_record(row) if row else None
 
     async def set_status(
         self,
@@ -237,15 +261,25 @@ class InMemoryScreeningStore(ScreeningStore):
         *,
         criteria_count: int | None = None,
         match_count: int | None = None,
+        coverage_checkable: int | None = None,
+        coverage_criteria: int | None = None,
     ) -> None:
         row = self._rows.get(thread_id)
         if row is None:
             return
         row["status"] = status
-        if criteria_count is not None:
-            row["criteria_count"] = criteria_count
-        if match_count is not None:
-            row["match_count"] = match_count
+        # Mirrors the SQL stores' COALESCE: a None leaves the stored count alone,
+        # so an error path can record "failed" without erasing what a finished
+        # phase established.
+        updates = {
+            "criteria_count": criteria_count,
+            "match_count": match_count,
+            "coverage_checkable": coverage_checkable,
+            "coverage_criteria": coverage_criteria,
+        }
+        for column, value in updates.items():
+            if value is not None:
+                row[column] = value
 
     async def list(
         self,
@@ -267,20 +301,7 @@ class InMemoryScreeningStore(ScreeningStore):
                 if needle in r["source_filename"].lower() or needle in r["thread_id"].lower()
             ]
         page = rows[offset : offset + limit]
-        return ScreeningPage(
-            items=[
-                ScreeningRecord(
-                    r["thread_id"],
-                    r["source_filename"],
-                    r["status"],
-                    r["created_at"],
-                    r["criteria_count"],
-                    r["match_count"],
-                )
-                for r in page
-            ],
-            total=len(rows),
-        )
+        return ScreeningPage(items=[self._as_record(r) for r in page], total=len(rows))
 
 
 _CREATE_TABLE = """
@@ -288,20 +309,26 @@ CREATE TABLE IF NOT EXISTS screenings (
     thread_id         TEXT PRIMARY KEY,
     source_filename   TEXT NOT NULL,
     raw_protocol_text TEXT NOT NULL,
-    status            TEXT NOT NULL,
-    created_at        TEXT NOT NULL,
-    criteria_count    INTEGER NOT NULL DEFAULT 0,
-    match_count       INTEGER NOT NULL DEFAULT 0
+    status              TEXT NOT NULL,
+    created_at          TEXT NOT NULL,
+    criteria_count      INTEGER NOT NULL DEFAULT 0,
+    match_count         INTEGER NOT NULL DEFAULT 0,
+    coverage_checkable  INTEGER NOT NULL DEFAULT 0,
+    coverage_criteria   INTEGER NOT NULL DEFAULT 0
 )
 """
 
-# Columns added after the table first shipped (#51). CREATE TABLE IF NOT EXISTS
-# is a no-op on a database created by an earlier version, so every store's
-# setup() also has to add anything missing — otherwise upgrading a deployment
-# with an existing sqlite file or postgres database breaks every query below.
+# Columns added after the table first shipped (#51, then #93). CREATE TABLE IF
+# NOT EXISTS is a no-op on a database created by an earlier version, so every
+# store's setup() also has to add anything missing — otherwise upgrading a
+# deployment with an existing sqlite file or postgres database breaks every query
+# below. A row that predates a column reads as 0 for it, which is the same "not
+# scored yet" the columns mean on a fresh row.
 _ADDED_COLUMNS = (
     ("criteria_count", "INTEGER NOT NULL DEFAULT 0"),
     ("match_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("coverage_checkable", "INTEGER NOT NULL DEFAULT 0"),
+    ("coverage_criteria", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 # Every list query orders by created_at DESC. Without this the table is only
@@ -313,7 +340,10 @@ _CREATE_INDEX = (
     "CREATE INDEX IF NOT EXISTS idx_screenings_created_at ON screenings(created_at DESC)"
 )
 
-_LIST_COLUMNS = "thread_id, source_filename, status, created_at, criteria_count, match_count"
+_LIST_COLUMNS = (
+    "thread_id, source_filename, status, created_at, criteria_count, match_count, "
+    "coverage_checkable, coverage_criteria"
+)
 
 
 def _record(row: Sequence[Any]) -> ScreeningRecord:
@@ -322,7 +352,7 @@ def _record(row: Sequence[Any]) -> ScreeningRecord:
     Typed as a Sequence rather than a tuple so it accepts both drivers' row
     objects (aiosqlite's `Row`, psycopg's tuple) without a cast at each call.
     """
-    return ScreeningRecord(row[0], row[1], row[2], row[3], row[4], row[5])
+    return ScreeningRecord(row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7])
 
 
 class SqliteScreeningStore(ScreeningStore):
@@ -383,15 +413,19 @@ class SqliteScreeningStore(ScreeningStore):
         *,
         criteria_count: int | None = None,
         match_count: int | None = None,
+        coverage_checkable: int | None = None,
+        coverage_criteria: int | None = None,
     ) -> None:
         # COALESCE keeps a NULL argument from clobbering a stored count, so this
         # stays a single statement for both "status only" and "status + counts".
         await self._conn.execute(
             "UPDATE screenings SET status = ?, "
             "criteria_count = COALESCE(?, criteria_count), "
-            "match_count = COALESCE(?, match_count) "
+            "match_count = COALESCE(?, match_count), "
+            "coverage_checkable = COALESCE(?, coverage_checkable), "
+            "coverage_criteria = COALESCE(?, coverage_criteria) "
             "WHERE thread_id = ?",
-            (status, criteria_count, match_count, thread_id),
+            (status, criteria_count, match_count, coverage_checkable, coverage_criteria, thread_id),
         )
         await self._conn.commit()
 
@@ -472,13 +506,17 @@ class PostgresScreeningStore(ScreeningStore):
         *,
         criteria_count: int | None = None,
         match_count: int | None = None,
+        coverage_checkable: int | None = None,
+        coverage_criteria: int | None = None,
     ) -> None:
         await self._conn.execute(
             "UPDATE screenings SET status = %s, "
             "criteria_count = COALESCE(%s, criteria_count), "
-            "match_count = COALESCE(%s, match_count) "
+            "match_count = COALESCE(%s, match_count), "
+            "coverage_checkable = COALESCE(%s, coverage_checkable), "
+            "coverage_criteria = COALESCE(%s, coverage_criteria) "
             "WHERE thread_id = %s",
-            (status, criteria_count, match_count, thread_id),
+            (status, criteria_count, match_count, coverage_checkable, coverage_criteria, thread_id),
         )
         await self._conn.commit()
 

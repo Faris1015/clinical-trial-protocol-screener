@@ -201,6 +201,70 @@ export type CohortAttrition = {
   overlaps: CriterionOverlap[];
 };
 
+/**
+ * Why one criterion went unchecked (#93). `unparseable` is a protocol sentence the
+ * Parser would not invent structure for — a vocabulary gap; `unresolved` is a
+ * structured criterion the Matcher could not settle against any patient record — a
+ * data gap. They are fixed by different work, so the panel names them apart.
+ */
+export type CoverageReason = "unparseable" | "unresolved";
+
+/**
+ * One thing a run could not check.
+ *
+ * `text` is the verbatim protocol sentence for an `unparseable` gap and the
+ * criterion's usual one-line label for an `unresolved` one, so a reader can find
+ * the row it refers to in the criteria table. `patients` is how many patients the
+ * Matcher returned `unknown` for, and 0 for a sentence that never reached it.
+ */
+export type CoverageGap = {
+  reason: CoverageReason | string;
+  text: string;
+  kind: "inclusion" | "exclusion" | "";
+  patients: number;
+};
+
+/**
+ * The screenability score in the three figures a table cell needs (#93) — what
+ * the runs index serves per row, rebuilt from that row's denormalized columns.
+ *
+ * `score` is `checkable` over `criteria` as a percentage, resolved by the API
+ * (`services/coverage.score_of`) rather than divided here: the index cell and the
+ * run's own panel have to be one formula read twice. `criteria === 0` means the run
+ * has no extraction to score, not that it scored zero.
+ */
+export type CoverageSummary = {
+  checkable: number;
+  criteria: number;
+  score: number;
+};
+
+/**
+ * `GET /api/screenings/{id}/state`'s `coverage` block (#93) — how much of this
+ * protocol the run could actually check, and what it could not.
+ *
+ * `criteria` is every criterion the extraction produced (`structured` +
+ * `unparseable`), which is the number a reviewer counts in the criteria table.
+ * `resolved`/`unresolved` split `structured` once a cohort exists; before that both
+ * are 0, `scored` is false and `match_score` is null — a run parked at the gate has
+ * not failed to resolve anything, and the panel says its figure is provisional
+ * rather than implying the Matcher had a go.
+ */
+export type Coverage = CoverageSummary & {
+  structured: number;
+  unparseable: number;
+  resolved: number;
+  unresolved: number;
+  /** Whether the Matcher ran; false makes the second layer provisional. */
+  scored: boolean;
+  /** `structured` over `criteria` — what the parse could cover. */
+  parse_score: number;
+  /** `resolved` over `structured`, or null before a cohort exists. */
+  match_score: number | null;
+  /** Sentences that never became criteria first, then the unsettled criteria. */
+  gaps: CoverageGap[];
+};
+
 /** One threshold as a what-if would have it — the `simulate` request body (#95). */
 export type CriterionOverride = {
   /** The criterion's attrition key, so a what-if can only address a row on screen. */
@@ -368,6 +432,12 @@ export type Screening = {
   criteria_count: number;
   /** Patients the run matched — the eligible bucket, not the whole cohort. */
   match_count: number;
+  /**
+   * How much of the protocol this run could check (#93), denormalized into the
+   * row so the index needs no checkpoint per screening. Optional so a payload
+   * from an older build renders the rest of the table.
+   */
+  coverage?: CoverageSummary;
 };
 
 /**
@@ -483,12 +553,58 @@ export type RejectionRule = MetricShare & {
 };
 
 /**
- * `GET /api/metrics/summary` — the domain metrics as an in-app summary (#58).
+ * One `unparseable` phrasing, ranked across runs (#93) — the vocabulary backlog.
  *
- * Read off the same collectors `/metrics` serializes, so the page and a scrape
- * cannot disagree. The counters live in the serving process's memory and reset
- * with it, which is why `since` travels: these are the runs this instance has
- * seen, not an all-time total.
+ * `runs` is how many runs' extractions contained it, `count` how many times it
+ * appeared in total, and `share` that count as a percentage of every unparseable
+ * sentence in the window. Grouped case- and whitespace-insensitively by the API,
+ * so two uploads of one protocol rank as one phrasing.
+ */
+export type CoveragePhrase = MetricShare & {
+  text: string;
+  runs: number;
+};
+
+/**
+ * Coverage pooled across runs (#93), on the metrics summary.
+ *
+ * Unlike every other panel there, this one is not read off a Prometheus counter —
+ * ranking the phrasings the vocabulary cannot parse means reading the sentences, so
+ * the API walks the `sampled` most recent runs' checkpoints. `total` is how many
+ * runs exist, and the page states both: a window that read as the whole history
+ * would be the one way this panel could mislead.
+ *
+ * `runs` is the sampled runs that had an extraction at all — the population the
+ * figures describe — and `scored` how many of those reached the Matcher. `score` is
+ * pooled (`checkable` over `criteria` across the window), not a mean of per-run
+ * scores, so a two-criterion protocol does not swing it as far as a forty-criterion
+ * one. `phrasings` is how many distinct wordings were seen, against the capped
+ * `phrases` ranking.
+ */
+export type CoverageAggregate = {
+  sampled: number;
+  total: number;
+  runs: number;
+  scored: number;
+  criteria: number;
+  checkable: number;
+  structured: number;
+  unparseable: number;
+  unresolved: number;
+  score: number;
+  phrasings: number;
+  phrases: CoveragePhrase[];
+};
+
+/**
+ * `GET /api/metrics/summary` — the domain metrics as an in-app summary (#58),
+ * plus the coverage aggregate (#93).
+ *
+ * The first three panels are read off the same collectors `/metrics` serializes, so
+ * the page and a scrape cannot disagree. The counters live in the serving process's
+ * memory and reset with it, which is why `since` travels: these are the runs this
+ * instance has seen, not an all-time total. `coverage` is the exception — it comes
+ * from the durable checkpoints, so it survives a restart and states its own window.
  */
 export type MetricsSummary = {
   /** ISO-8601 epoch of the counters — when this instance's registry came up. */
@@ -516,6 +632,11 @@ export type MetricsSummary = {
     /** De-cumulated histogram, captioned by attempt count ("1", "6–10"). */
     buckets: (MetricShare & { label: string })[];
   };
+  /**
+   * Screenability across recent runs (#93). Optional so a payload from an older
+   * build renders the three counter panels rather than failing on a missing key.
+   */
+  coverage?: CoverageAggregate;
 };
 
 /**
@@ -631,6 +752,11 @@ export type ScreeningState = {
    * on a missing key.
    */
   attrition?: CohortAttrition;
+  /**
+   * Screenability (#93), derived by the API from `values.parsed_criteria` and
+   * `values.matched_patients`. Optional for the same reason the two above are.
+   */
+  coverage?: Coverage;
   /**
    * The same metadata row the runs index shows. Present even when the run has
    * no checkpoint yet (uploaded but never streamed), which is exactly when
