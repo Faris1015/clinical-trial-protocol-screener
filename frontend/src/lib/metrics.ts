@@ -27,9 +27,13 @@ export function formatShare(share: number): string {
  * The API has already rounded every figure it sends, and number→string drops the
  * zeros that rounding leaves, so a mean of exactly one reads "1 attempt" rather
  * than "1.00 attempts". Rounding stays the API's job.
+ *
+ * `plural` is for the nouns an "s" does not pluralize — "criterion" is the one the
+ * coverage score (#93) counts in, and it appears in a screen-reader label as well
+ * as in prose, so getting it right is not cosmetic.
  */
-export function formatCount(count: number, noun: string): string {
-  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+export function formatCount(count: number, noun: string, plural = `${noun}s`): string {
+  return `${count} ${count === 1 ? noun : plural}`;
 }
 
 /**

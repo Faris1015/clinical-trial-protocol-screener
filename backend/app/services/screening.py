@@ -41,8 +41,10 @@ from app.services import (
     attrition,
     cohort,
     comparison,
+    coverage,
     criteria_edits,
     metrics,
+    metrics_summary,
     notifications,
     provenance,
     report,
@@ -77,6 +79,7 @@ __all__ = [
     "compare_screenings",
     "create_screening",
     "create_screening_batch",
+    "get_metrics_summary",
     "get_screening_protocol",
     "get_screening_report",
     "get_screening_state",
@@ -87,15 +90,13 @@ __all__ = [
     "stream_screening",
 ]
 
-# The four criteria buckets a parse produces. `unparseable` is deliberately not
-# among them: it holds sentences the parser gave up on, so counting it would
-# inflate "criteria found" with the exact lines it could not turn into criteria.
-_CRITERIA_BUCKETS = (
-    "inclusion_quantitative",
-    "inclusion_categorical",
-    "exclusion_quantitative",
-    "exclusion_categorical",
-)
+# How many of the most recent runs the coverage aggregate (#93) reads. Unlike
+# every other figure in the metrics summary, that one cannot come off a Prometheus
+# collector: ranking the `unparseable` phrasings needs the sentences themselves,
+# which live in the checkpoints. So it is a bounded walk — one checkpoint read per
+# run — and the payload states both this window and the instance's total, because a
+# sample that read as the whole history would be the one way this could mislead.
+COVERAGE_SAMPLE = 50
 
 
 class Snapshot(Protocol):
@@ -156,9 +157,13 @@ def _status_from_snapshot(snapshot: Snapshot) -> str:
 
 
 def _criteria_count(values: dict[str, Any]) -> int:
-    """How many criteria the parser extracted, across all four buckets."""
-    parsed = values.get("parsed_criteria") or {}
-    return sum(len(parsed.get(bucket) or []) for bucket in _CRITERIA_BUCKETS)
+    """How many criteria the parser extracted, across all four buckets.
+
+    `services/coverage.py` owns the count because it is the numerator of that
+    module's parse layer (#93): the runs index column and the coverage panel are
+    the same number, so there is one definition of what "criteria found" means.
+    """
+    return coverage.structured_count(values)
 
 
 def _match_count(values: dict[str, Any]) -> int:
@@ -171,22 +176,36 @@ def _match_count(values: dict[str, Any]) -> int:
     return cohort.matched_count(values.get("matched_patients") or [])
 
 
+def _summary_columns(values: dict[str, Any]) -> dict[str, int]:
+    """Everything the runs index renders for a row, derived from one snapshot.
+
+    Both writers of these columns go through here, so a rejected run's row and a
+    finished run's row are filled in by one derivation. `criteria_count` is the
+    coverage payload's own `structured` figure rather than a second count of the
+    same four buckets — the index's "Criteria" column and its "Coverage" column
+    have to be two readings of one extraction (#93).
+    """
+    screenability = coverage.build_coverage(values)
+    return {
+        "criteria_count": screenability["structured"],
+        "match_count": _match_count(values),
+        "coverage_checkable": screenability["checkable"],
+        "coverage_criteria": screenability["criteria"],
+    }
+
+
 async def _record_outcome(store: ScreeningStore, thread_id: str, snapshot: Snapshot) -> str:
     """Denormalize the finished (or parked) run into the store's summary columns,
     returning the status it recorded.
 
-    Called once per terminal frame, so the runs index (#51) can render status and
-    counts for every row without loading a checkpoint per screening. The status is
-    handed back rather than recomputed by the caller, so the row the index shows
-    and the notification a reviewer gets (#60) can never disagree about the phase.
+    Called once per terminal frame, so the runs index (#51) can render status,
+    counts and coverage for every row without loading a checkpoint per screening.
+    The status is handed back rather than recomputed by the caller, so the row the
+    index shows and the notification a reviewer gets (#60) can never disagree
+    about the phase.
     """
     status = _status_from_snapshot(snapshot)
-    await store.set_status(
-        thread_id,
-        status,
-        criteria_count=_criteria_count(snapshot.values),
-        match_count=_match_count(snapshot.values),
-    )
+    await store.set_status(thread_id, status, **_summary_columns(snapshot.values))
     return status
 
 
@@ -425,6 +444,12 @@ async def list_screenings(
     Returns an envelope rather than a bare list because the page alone can't
     answer "is there a next one": `total` is the count matching the filter, not
     the count on this page.
+
+    `coverage` is the screenability score (#93) rebuilt from the row's two
+    denormalized columns — read here rather than derived from a checkpoint,
+    because a page view would otherwise load one per row. The percentage is
+    resolved by `coverage.score_of` rather than divided in the browser, so a row
+    in this list and the panel on the run's own page are one formula read twice.
     """
     page = await store.list(limit=limit, offset=offset, status=status, search=search)
     return {
@@ -436,6 +461,11 @@ async def list_screenings(
                 "created_at": r.created_at,
                 "criteria_count": r.criteria_count,
                 "match_count": r.match_count,
+                "coverage": coverage.CoverageSummary(
+                    checkable=r.coverage_checkable,
+                    criteria=r.coverage_criteria,
+                    score=coverage.score_of(r.coverage_checkable, r.coverage_criteria),
+                ),
             }
             for r in page.items
         ],
@@ -443,6 +473,55 @@ async def list_screenings(
         "limit": limit,
         "offset": offset,
     }
+
+
+async def get_metrics_summary(
+    store: ScreeningStore, graph: ScreeningGraph, *, sample: int = COVERAGE_SAMPLE
+) -> dict:
+    """The in-app metrics summary (#58) with the coverage aggregate beside it (#93).
+
+    Composed here rather than in `services/metrics_summary.py` because the two
+    halves come from different places on purpose: the funnel, the Critic
+    rejections and the loop depth are read off the live Prometheus collectors and
+    need no store at all, while coverage is a reduction over checkpoints — and a
+    ranking of `unparseable` phrasings is not something a Prometheus label can
+    carry (a protocol sentence per label value is unbounded cardinality, and the
+    counter would answer "how many" without ever saying "of what").
+
+    So this walks the `sample` most recent runs, one checkpoint read each, and
+    pools their coverage. That is the cost of the vocabulary backlog being
+    data-driven, and it is bounded and stated: the payload carries how many runs
+    were read and how many exist.
+
+    The reads are sequential rather than gathered: they are one connection's
+    worth of cheap single-row lookups, and holding fifty `aget_state` calls in
+    flight for a read-only page would trade a page nobody waits on for contention
+    every other request pays for. The values go to `build_coverage` raw rather than
+    through `jsonable_encoder`: it reads two fields, and re-encoding fifty whole
+    checkpoints — protocol text, event log, entire cohorts — to read them would be
+    the most expensive thing on this request by an order of magnitude.
+
+    One unreadable checkpoint costs its own run and nothing else. Before this block
+    existed the endpoint could not fail at all (three `collect()` calls over
+    in-memory counters), and a single corrupt row taking the funnel down with it
+    would be a bad trade for a figure that is a sample anyway. A skipped run is
+    logged and drops out of `sampled`, so the payload's own window narrows rather
+    than the page quietly claiming it read everything.
+    """
+    page = await store.list(limit=sample, offset=0)
+    coverages = []
+    for record in page.items:
+        try:
+            snapshot = await graph.aget_state({"configurable": {"thread_id": record.thread_id}})
+        except Exception:  # noqa: BLE001 — one bad checkpoint must not fail the page
+            log.warning(
+                "screening.coverage_read_failed", failed_thread=record.thread_id, exc_info=True
+            )
+            continue
+        coverages.append(coverage.build_coverage(snapshot.values))
+    aggregate = coverage.aggregate(coverages, total=page.total)
+    log.info("screening.coverage_aggregated", runs=aggregate["runs"], score=aggregate["score"])
+    return {**metrics_summary.summarize_metrics(), "coverage": aggregate}
 
 
 async def stream_screening(
@@ -625,13 +704,9 @@ async def reject_screening(
     # would quietly report "awaiting_approval" again if the cursor move ever
     # regressed — hiding the exact bug this feature exists to fix. The counts come
     # from the pre-rejection snapshot, so the runs index keeps showing what the
-    # run had extracted (`match_count` is 0; the matcher never ran).
-    await store.set_status(
-        thread_id,
-        "rejected",
-        criteria_count=_criteria_count(snapshot.values),
-        match_count=_match_count(snapshot.values),
-    )
+    # run had extracted (`match_count` is 0; the matcher never ran) and what share
+    # of it was checkable — often the very reason the run was rejected (#93).
+    await store.set_status(thread_id, "rejected", **_summary_columns(snapshot.values))
     # Counted only now — after the checkpoint and the store agree — so the funnel
     # can never report a rejection that isn't on the record.
     metrics.record_rejection()
@@ -840,6 +915,13 @@ async def get_screening_state(store: ScreeningStore, graph: ScreeningGraph, thre
     screened patients out, ranked, with the overlap between the top ones. It reads
     only `values["matched_patients"]`, so it costs nothing beyond the checkpoint
     already loaded and is empty for a run that never reached the Matcher.
+
+    `coverage` is the third (#93): how much of the protocol this run could
+    actually check, and what it could not. Served on this payload for the same
+    reason the other two are — and specifically so the *gate* can show it, since a
+    run parked awaiting approval is a run whose checkpoint this endpoint already
+    describes. A reviewer sees "we could only check 14 of 20 criteria" while the
+    decision is still theirs.
     """
     config = await _require_thread(store, thread_id)
     bind_contextvars(thread_id=thread_id)
@@ -851,6 +933,7 @@ async def get_screening_state(store: ScreeningStore, graph: ScreeningGraph, thre
         "pending": list(snapshot.next),
         "timeline": timeline.build_timeline(values),
         "attrition": attrition.build_attrition(values),
+        "coverage": coverage.build_coverage(values),
         # `_require_thread` just passed, so the row is there; guard anyway rather
         # than assert, since the two reads aren't in one transaction.
         "screening": {

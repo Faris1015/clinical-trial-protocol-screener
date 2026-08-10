@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { AlertTriangle, BarChart3, Layers, ShieldCheck } from "lucide-react";
+import { AlertTriangle, BarChart3, Gauge, Layers, ShieldCheck } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -12,7 +12,7 @@ import { formatCount, formatShare, outcomeBarClass } from "@/lib/metrics";
 import { ruleHref } from "@/lib/rules";
 import { formatTimestamp } from "@/lib/runs";
 import { cn } from "@/lib/utils";
-import type { MetricsSummary } from "@/types";
+import type { CoverageAggregate, MetricsSummary } from "@/types";
 
 /**
  * The in-app metrics summary (#58).
@@ -71,7 +71,7 @@ export function MetricsOverview() {
 
   if (!summary) return <MetricsSkeleton />;
 
-  const { funnel, rejections, attempts } = summary;
+  const { funnel, rejections, attempts, coverage } = summary;
   // Every counter, not just the funnel: a run that the Critic has already pushed
   // back but that has not yet reached a terminal outcome bumps the rejection
   // counter while the funnel is still empty. Gating on the funnel alone would
@@ -81,6 +81,11 @@ export function MetricsOverview() {
 
   return (
     <div className="space-y-4" data-region="metrics-overview">
+      {/* Above the counter panels, and outside the cold-start branch below: this
+          one is derived from the durable checkpoints rather than from this
+          process's registry, so it has data on an instance that restarted a minute
+          ago — exactly when the three panels below are empty. */}
+      {coverage && coverage.runs > 0 && <Screenability coverage={coverage} />}
       {nothingCounted ? (
         <ColdStart since={summary.since} />
       ) : (
@@ -112,12 +117,15 @@ function MeterRow({
   share,
   barClass,
   noun,
+  plural,
 }: {
   label: React.ReactNode;
   count: number;
   share: number;
   barClass: string;
   noun: string;
+  /** For a noun an "s" does not pluralize — "criterion" (#93). */
+  plural?: string;
 }) {
   return (
     <div className="space-y-1.5">
@@ -129,7 +137,7 @@ function MeterRow({
         <span className="text-sm font-medium tabular-nums" aria-hidden="true">
           {count}
         </span>
-        <span className="sr-only">{formatCount(count, noun)}</span>
+        <span className="sr-only">{formatCount(count, noun, plural)}</span>
         <span className="text-muted-foreground w-14 text-right text-xs tabular-nums">
           {formatShare(share)}
         </span>
@@ -332,6 +340,110 @@ function Attempts({ attempts }: { attempts: MetricsSummary["attempts"] }) {
             noun="run"
           />
         ))
+      )}
+    </Panel>
+  );
+}
+
+/**
+ * Screenability across recent runs (#93) — and the phrasings that cost the most
+ * of it, which is the point of aggregating it at all.
+ *
+ * The per-run score tells a reviewer what one protocol could be screened on. Pooled
+ * over runs it answers a different question, and one nobody could answer before: *which
+ * wording should the `EhrAttribute` vocabulary swallow next*. A phrasing that shows
+ * up in nine of fifty protocols is a week of parser work that pays for itself; one
+ * that shows up once is a protocol quirk. That ranking is the backlog, and it is
+ * data rather than a hunch.
+ *
+ * The window is stated twice on purpose — in the caption and in the footer of the
+ * list — because this panel is a sample where the three beside it are totals, and a
+ * ranking that read as all-time would send someone off to implement the wrong
+ * attribute.
+ */
+function Screenability({ coverage }: { coverage: CoverageAggregate }) {
+  const uncheckable = coverage.criteria - coverage.checkable;
+  return (
+    <Panel
+      icon={Gauge}
+      title="Protocol coverage"
+      caption={
+        `${coverage.checkable} of ${coverage.criteria} criteria across ` +
+        `${formatCount(coverage.runs, "run")} could be checked` +
+        (coverage.sampled < coverage.total
+          ? ` — the ${coverage.sampled} most recent of ${coverage.total}.`
+          : ".")
+      }
+      region="metrics-coverage"
+    >
+      <MeterRow
+        label={
+          <>
+            Checkable
+            <span className="text-muted-foreground"> criteria</span>
+          </>
+        }
+        count={coverage.checkable}
+        share={coverage.score}
+        barClass="bg-status-pass"
+        noun="criterion"
+        plural="criteria"
+      />
+      <p className="text-muted-foreground text-sm">
+        {uncheckable === 0 ? (
+          // Conditioned on how many of these runs actually reached the Matcher: on
+          // a window of runs parked at the gate, "and evaluated" would report a
+          // check none of them ran.
+          coverage.scored === coverage.runs ? (
+            "Every criterion these runs extracted was structured and evaluated."
+          ) : (
+            "Every criterion these runs extracted was structured; " +
+            `${coverage.runs - coverage.scored} of them have not been matched yet.`
+          )
+        ) : (
+          <>
+            {formatCount(coverage.unparseable, "sentence")} never became a criterion and{" "}
+            {formatCount(coverage.unresolved, "criterion", "criteria")} could not be evaluated
+            against patient records
+            {coverage.scored < coverage.runs
+              ? ` (${coverage.runs - coverage.scored} of these runs never reached matching).`
+              : "."}
+          </>
+        )}
+      </p>
+      {coverage.phrases.length > 0 && (
+        <div className="border-t pt-3" data-region="metrics-coverage-phrases">
+          <h3 className="text-muted-foreground mb-1.5 text-xs font-medium">
+            Phrasings the vocabulary cannot parse
+          </h3>
+          <div className="space-y-3">
+            {coverage.phrases.map((phrase) => (
+              <MeterRow
+                key={phrase.text}
+                label={
+                  <span className="block">
+                    {phrase.text}
+                    <span className="text-muted-foreground block text-xs">
+                      in {formatCount(phrase.runs, "run")}
+                    </span>
+                  </span>
+                }
+                count={phrase.count}
+                share={phrase.share}
+                barClass="bg-status-warn"
+                noun="sentence"
+              />
+            ))}
+          </div>
+          {coverage.phrasings > coverage.phrases.length && (
+            // No silent truncation: the ranking is capped, and a reader deciding
+            // what to build next has to know how much tail sits below it.
+            <p className="text-muted-foreground pt-2 text-xs">
+              The {coverage.phrases.length} most frequent of {coverage.phrasings} distinct phrasings
+              in this window.
+            </p>
+          )}
+        </div>
       )}
     </Panel>
   );

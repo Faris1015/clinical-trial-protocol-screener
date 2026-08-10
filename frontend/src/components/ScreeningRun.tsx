@@ -10,6 +10,7 @@ import { Reveal } from "@/components/motion";
 import { CohortSkeleton, CriteriaSkeleton } from "@/components/skeletons";
 import { CriteriaProvenance } from "@/components/provenance/criteria-provenance";
 import { PatientMatchTable } from "@/components/PatientMatchTable";
+import { GateCoverage } from "@/components/review/gate-coverage";
 import { RejectScreening } from "@/components/review/reject-screening";
 import { ReportDownload } from "@/components/report-download";
 import { Button } from "@/components/ui/button";
@@ -212,6 +213,13 @@ export function ScreeningRun({ threadId }: { threadId: string | null }) {
           </Reveal>
         ) : null}
       </AnimatePresence>
+
+      {/* What this run could actually screen on (#93), between the criteria and
+          the gate that authorizes matching them. A reviewer being asked to approve
+          an extraction that dropped six sentences should read that here, not in the
+          report afterwards — and the figure is the server's own, so it is the same
+          number the run detail view will show. */}
+      {threadId && phase === "awaiting_approval" && <GateCoverage threadId={threadId} />}
 
       <AnimatePresence>
         {phase === "awaiting_approval" && (

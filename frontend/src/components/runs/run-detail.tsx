@@ -11,6 +11,7 @@ import { CriteriaDiff } from "@/components/review/criteria-diff";
 import { PatientMatchTable } from "@/components/PatientMatchTable";
 import { CohortAttritionPanel } from "@/components/runs/cohort-attrition";
 import { CohortSimulator } from "@/components/runs/cohort-simulator";
+import { CoveragePanel } from "@/components/runs/coverage-panel";
 import { ReportDownload } from "@/components/report-download";
 import { RunTimeline } from "@/components/runs/run-timeline";
 import { Reveal } from "@/components/motion";
@@ -207,6 +208,11 @@ export function RunDetail() {
           ))}
         </section>
       )}
+
+      {/* How much of the protocol this run could check (#93) — above the criteria
+          it is a share of, because the tables below are what it *did* check and a
+          reader working through them needs to know what never reached them. */}
+      <CoveragePanel coverage={state.coverage} />
 
       {/* Provenance (#54): the criteria next to the protocol they were read out
           of, so an auditor replaying this run can check any one of them against
