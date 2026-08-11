@@ -128,6 +128,20 @@ class ScreeningNotReportableError(ScreenerError):
     http_status = 409
 
 
+class ScreeningNotExportableError(ScreenerError):
+    """A cohort export was requested for a screening that never ran (#102).
+
+    Deliberately the same condition — and the same status — as
+    `ScreeningNotReportableError`: the two downloads sit beside each other in the
+    UI and are two renderings of one snapshot, so a run one of them refuses and the
+    other serves would be a defect a reader cannot resolve. A run that parsed but
+    never matched is *not* this: its export is the approved criteria over an empty
+    cohort, which is a true statement about the run.
+    """
+
+    http_status = 409
+
+
 class PayloadTooLargeError(ScreenerError):
     """An upload exceeded the configured size cap."""
 

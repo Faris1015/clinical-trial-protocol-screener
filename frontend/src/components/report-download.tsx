@@ -4,28 +4,16 @@ import { useState } from "react";
 import { Download, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { apiFetch, problemDetail } from "@/lib/api";
+import { filenameFrom, saveBlob } from "@/lib/download";
 
 /**
  * Download one run's screening report (#56).
  *
- * Fetched rather than linked. A plain `<a href download>` would work — the report
- * route is same-origin and the session is a cookie the browser attaches itself —
- * but it has no error channel: a 401 on an expired session, a 409 for a run that
- * never streamed, or a 404 would all navigate the user to a JSON error body, and
- * `apiFetch`'s session-expiry handler would never fire. Going through fetch keeps
- * both (the message renders inline, the expiry redirects) at the cost of holding
- * the document in memory for the length of one click.
- *
- * The filename comes from the server's `Content-Disposition` so the file a
- * reviewer ends up with is named by the same rule everywhere; the fallback covers
- * a topology where the header isn't readable (a cross-origin dev proxy that
- * doesn't expose it), where a generic name still beats a blob id.
+ * The document a reviewer hands off. Its machine-readable sibling is
+ * `cohort-export.tsx` (#102), which sits beside it and shares the fetch-and-save
+ * mechanics in `lib/download.ts` — see there for why both are fetched rather than
+ * linked.
  */
-function filenameFrom(disposition: string | null): string {
-  const match = disposition?.match(/filename="([^"]+)"/);
-  return match?.[1] ?? "trialgate-report.html";
-}
-
 export function ReportDownload({
   threadId,
   className,
@@ -49,23 +37,10 @@ export function ReportDownload({
         setError(await problemDetail(response, "Could not build the report"));
         return;
       }
-      const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
-      // A synthetic click is the only way to hand a fetched body to the browser's
-      // download machinery. Two details are not stylistic: the anchor has to be
-      // *in the document* for a programmatic click to start a download in Firefox,
-      // and the object URL must be revoked on a later task rather than on the line
-      // after `click()` — revoking inside the same task cancels the download in
-      // some browsers, while never revoking pins the whole document in memory for
-      // the lifetime of the page.
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = filenameFrom(response.headers.get("content-disposition"));
-      anchor.hidden = true;
-      document.body.append(anchor);
-      anchor.click();
-      anchor.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 0);
+      saveBlob(
+        await response.blob(),
+        filenameFrom(response.headers.get("content-disposition"), "trialgate-report.html")
+      );
     } catch {
       setError("Could not reach the server.");
     } finally {
