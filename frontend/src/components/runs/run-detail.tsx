@@ -13,6 +13,7 @@ import { CohortAttritionPanel } from "@/components/runs/cohort-attrition";
 import { CohortSimulator } from "@/components/runs/cohort-simulator";
 import { CoveragePanel } from "@/components/runs/coverage-panel";
 import { UsagePanel } from "@/components/runs/usage-panel";
+import { CohortExport } from "@/components/cohort-export";
 import { ReportDownload } from "@/components/report-download";
 import { RunTimeline } from "@/components/runs/run-timeline";
 import { Reveal } from "@/components/motion";
@@ -176,8 +177,18 @@ export function RunDetail() {
                 every phase that produced something — a parked or escalated run's
                 criteria and findings are exactly what gets handed to whoever has
                 to act on it. Hidden only for a run that never streamed, which the
-                API answers with a 409 anyway. */}
-            {!neverRan && <ReportDownload threadId={threadId} size="sm" />}
+                API answers with a 409 anyway.
+
+                The machine-readable cohort (#102) sits beside it, on the narrower
+                condition that there *is* a cohort: the endpoint answers a
+                criteria-only run with an empty file, but offering "Export cohort"
+                on a run with no patients promises something worth opening. */}
+            {!neverRan && (
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <ReportDownload threadId={threadId} size="sm" />
+                {matches.length > 0 && <CohortExport threadId={threadId} />}
+              </div>
+            )}
           </div>
         </CardHeader>
       </Card>
