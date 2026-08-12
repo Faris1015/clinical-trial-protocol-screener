@@ -7,7 +7,12 @@ USERS          ?= 50
 SPAWN_RATE     ?= 10
 RUN_TIME       ?= 5m
 
-.PHONY: lint format typecheck test check eval loadtest loadtest-ui
+# Where `make test-pg` points the postgres suite. Override to reuse a database
+# you already have: `make test-pg POSTGRES_TEST_DSN=postgresql://...`.
+PG_TEST_CONTAINER ?= trialgate-test-pg
+POSTGRES_TEST_DSN ?= postgresql://postgres:trialgate@localhost:55432/trialgate_test
+
+.PHONY: lint format typecheck test test-pg check eval loadtest loadtest-ui
 
 lint:
 	cd backend && $(CURDIR)/$(BACKEND_PY)/ruff check app tests
@@ -23,6 +28,20 @@ typecheck:
 
 test:
 	cd backend && $(CURDIR)/$(BACKEND_PY)/python -m pytest -q
+
+# The postgres store suite, against a throwaway container (#97). Skipped by a
+# plain `make test`, which needs no database — CI runs it against a service
+# container, and this is the same suite for anyone touching persistence.py.
+# Port 55432 so it never collides with a local postgres on 5432.
+test-pg:
+	@docker rm -f $(PG_TEST_CONTAINER) >/dev/null 2>&1 || true
+	docker run -d --name $(PG_TEST_CONTAINER) -p 55432:5432 \
+		-e POSTGRES_PASSWORD=trialgate -e POSTGRES_DB=trialgate_test postgres:16-alpine
+	@echo "waiting for postgres..."
+	@until docker exec $(PG_TEST_CONTAINER) pg_isready -U postgres >/dev/null 2>&1; do sleep 1; done
+	-cd backend && POSTGRES_TEST_DSN=$(POSTGRES_TEST_DSN) \
+		$(CURDIR)/$(BACKEND_PY)/python -m pytest -q tests/test_persistence_postgres.py
+	@docker rm -f $(PG_TEST_CONTAINER) >/dev/null
 
 check: lint typecheck test
 

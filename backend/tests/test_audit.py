@@ -39,6 +39,7 @@ from app.persistence import (
     AuditDecision,
     AuditFilter,
     InMemoryAuditStore,
+    InMemoryRuleStore,
     InMemoryScreeningStore,
     open_persistence,
 )
@@ -404,6 +405,7 @@ async def test_a_criteria_revision_is_indexed_with_the_revision_it_produced():
     frames = await screening.resume_with_edited_criteria(
         store,
         index,
+        InMemoryRuleStore(),
         graph,
         thread_id,
         criteria=_revised(65),
@@ -425,7 +427,7 @@ async def test_an_escalation_is_indexed_when_the_run_reaches_it():
     store, index, thread_id = await _fixture()
     graph = _Graph(pending=(), values={"current_step": "escalated", "parse_attempts": 3})
 
-    frames = await screening.stream_screening(store, index, graph, thread_id)
+    frames = await screening.stream_screening(store, index, InMemoryRuleStore(), graph, thread_id)
     async for _frame in frames:
         pass
 
@@ -441,7 +443,7 @@ async def test_a_run_that_simply_finishes_indexes_nothing():
     store, index, thread_id = await _fixture()
     graph = _Graph(pending=(), after=_Snapshot({"current_step": "done"}))
 
-    frames = await screening.stream_screening(store, index, graph, thread_id)
+    frames = await screening.stream_screening(store, index, InMemoryRuleStore(), graph, thread_id)
     async for _frame in frames:
         pass
 
@@ -523,6 +525,12 @@ async def test_the_index_carries_no_patient_data(offline):
         "detail",
         "revision",
         "source_filename",
+        # What the decision was about (#97). PHI-safe by the same construction as
+        # the rest: a closed kind enum, and an id that is either a server-minted
+        # thread_id or an admin-authored rule id — neither has anywhere for a
+        # patient to be.
+        "subject_kind",
+        "subject_id",
     }
 
 

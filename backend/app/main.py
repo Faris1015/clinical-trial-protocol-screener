@@ -55,7 +55,7 @@ from app.exceptions import (
 )
 from app.health import app_version, readiness
 from app.logging_config import bind_contextvars, clear_contextvars, configure_logging, get_logger
-from app.persistence import AuditStore, Persistence, ScreeningStore, open_persistence
+from app.persistence import AuditStore, Persistence, RuleStore, ScreeningStore, open_persistence
 from app.schemas.criteria import CriteriaSchema
 from app.services import audit, rules, screening, simulation, sse
 from app.services.concurrency import ConcurrencyLimiter, release_after
@@ -142,6 +142,11 @@ def _audit() -> AuditStore:
     return _persistence.audit
 
 
+def _rules() -> RuleStore:
+    assert _persistence is not None, "persistence not initialized — is the app started?"
+    return _persistence.rules
+
+
 def _graph() -> CompiledStateGraph:
     assert graph is not None, "graph not initialized — is the app started?"
     return graph
@@ -151,8 +156,14 @@ def _graph() -> CompiledStateGraph:
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     global _persistence, graph
     _persistence = await open_persistence(settings)
+    # Seeds the rules table from `RULES_PATH` on first boot and does nothing on
+    # every boot after (#97) — see `services/rules.seed_from_file`. Here rather
+    # than in `open_persistence` because it is a domain concern, not a connection
+    # one: the store knows how to write rows, the service knows which rows a fresh
+    # instance should start with and how to reject a malformed one.
+    seeded = await rules.seed_from_file(_persistence.rules)
     graph = screening.build_screening_graph(_persistence.checkpointer)
-    log.info("app.started", checkpoint_backend=_persistence.backend)
+    log.info("app.started", checkpoint_backend=_persistence.backend, rules_seeded=seeded)
     try:
         yield
     finally:
@@ -417,10 +428,10 @@ async def list_users(
 ) -> list[PrincipalResponse]:
     """Configured accounts — admin only, and never their password hashes.
 
-    The user-management half of the admin role. The compliance rules are readable
-    by any reviewer (`GET /api/rules`, #57); writing them would land here.
-    It is also what gives the role ladder a real 403 to enforce: a reviewer
-    hitting this gets Forbidden, and the frontend hides the nav entry for them.
+    The user-management half of the admin role; the other half is authoring the
+    Critic's deterministic rules (`POST`/`PATCH /api/rules`, #97). The compliance
+    rules stay readable by any reviewer (`GET /api/rules`, #57) — only writing
+    them is gated here.
     """
     users = configured_users(settings)
     return [
@@ -573,7 +584,7 @@ async def stream_screening(
     # freed in release_after's finally, even if the client disconnects.
     active_screenings.acquire()
     try:
-        frames = await screening.stream_screening(_store(), _audit(), _graph(), thread_id)
+        frames = await screening.stream_screening(_store(), _audit(), _rules(), _graph(), thread_id)
     except BaseException:
         active_screenings.release()
         raise
@@ -707,6 +718,7 @@ async def edit_criteria(
         frames = await screening.resume_with_edited_criteria(
             _store(),
             _audit(),
+            _rules(),
             _graph(),
             thread_id,
             criteria=edits.criteria.model_dump(),
@@ -1029,16 +1041,123 @@ async def list_compliance_rules(
 ) -> dict:
     """The compliance rules the Critic checks every extraction against (#57).
 
-    Read-only, and served rather than bundled into the frontend: the rules file is
-    deployment configuration (`RULES_PATH`), so an instance running amended rules
-    must show the rules it is actually running, not the ones that were in the repo
-    when the bundle was built.
+    Served rather than bundled into the frontend: the rules are a table an admin
+    authors (#97), so an instance running amended rules must show the rules it is
+    actually running, not the ones that were in the repo when the bundle was built.
 
-    Reviewer-guarded like every other read. Nothing here is patient data, but the
-    thresholds are this deployment's compliance posture and there is no reason to
-    hand them to an unauthenticated caller.
+    Reviewer-guarded like every other read, and the *same* payload for both roles —
+    a reviewer sees exactly the page they saw before, including retired rules.
+    Nothing here is patient data, but the thresholds are this deployment's
+    compliance posture and there is no reason to hand them to an unauthenticated
+    caller. The edit affordance is admin-only, and it is the write routes below
+    that enforce that, never the shape of this response.
     """
-    return rules.list_compliance_rules()
+    return await rules.list_compliance_rules(_rules())
+
+
+class RuleRequest(BaseModel):
+    """One authored compliance rule (#97).
+
+    Deliberately loose at this layer and strict one layer down: the fields a rule
+    needs depend on its `check`, so `services/rules.validate` is what enforces the
+    contract and it is the only place that knows the mapping. A Pydantic model per
+    check kind would put that knowledge in two places, and the 422 an admin reads
+    would come from whichever one happened to fire first.
+
+    `model_config` forbids unknown fields so a typo'd `min_plausable` is refused
+    rather than silently dropped — the rule would otherwise be stored without the
+    bound its author believed they set.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    id: str = Field(default="", description="Ignored on edit; the URL owns the id.")
+    check: str = Field(description="One of the engine's check kinds.")
+    description: str = Field(description="The technical rationale; rides back to the Parser.")
+    attribute: str = Field(default="", description="The criterion attribute the rule tests.")
+    plain: str = Field(default="", description="The same rationale for a non-technical reader.")
+    keywords: list[str] = Field(
+        default_factory=list, description="Protocol words that bring the rule into play."
+    )
+    # `int | float`, not bare `float`: Pydantic would coerce a JSON `5` to `5.0`,
+    # and the bound is echoed back into every rendered condition — so an authored
+    # rule would read "5.0 ≤ egfr ≤ 150.0" beside a seeded "90 ≤ systolic_bp ≤ 200".
+    # The union preserves whichever the author actually sent, which is the whole
+    # point of `services/rules._number`.
+    min_plausible: int | float | None = Field(default=None, description="'range' lower bound.")
+    max_plausible: int | float | None = Field(default=None, description="'range' upper bound.")
+    required_category: str = Field(
+        default="", description="'keyword_implies_criterion' target category."
+    )
+
+
+class RuleEnabledRequest(BaseModel):
+    """Retire a rule, or bring a retired one back (#97, AC 4)."""
+
+    enabled: bool = Field(description="False retires the rule; the row and its id remain.")
+
+
+@app.post("/api/rules", status_code=201)
+@limiter.limit(lambda: settings.rate_limit_create)
+async def create_compliance_rule(
+    request: Request,
+    rule: RuleRequest,
+    principal: Annotated[Principal, Depends(require_admin)],
+) -> dict:
+    """Author a new deterministic rule (#97, AC 2).
+
+    `require_admin`, which is the point of the issue as much as the feature is:
+    the role existed with almost nothing to do, and the people who know the
+    regulatory boundaries are the ones who should be able to extend the layer that
+    enforces them.
+
+    The new rule guards the *next* screening. A run already in flight keeps the
+    rule set it entered the graph with (see `ScreenerState.compliance_rules`), so
+    authoring a rule can never change a verdict halfway through a run.
+    """
+    return await rules.create_rule(_rules(), _audit(), rule.model_dump(), principal)
+
+
+@app.patch("/api/rules/{rule_id}")
+@limiter.limit(lambda: settings.rate_limit_create)
+async def update_compliance_rule(
+    request: Request,
+    rule_id: str,
+    rule: RuleRequest,
+    principal: Annotated[Principal, Depends(require_admin)],
+) -> dict:
+    """Revise a rule's wording, thresholds or scope (#97, AC 2).
+
+    PATCH by HTTP method but a full replacement of the authored fields by body —
+    see `services/rules.update_rule` for why a sparse patch would be unsound for
+    an object whose required fields depend on one of its own values. The id comes
+    from the URL and is not the author's to change: a rule id is what findings
+    cite, so re-pointing one at different wording is a new rule, not an edit.
+    """
+    return await rules.update_rule(_rules(), _audit(), rule_id, rule.model_dump(), principal)
+
+
+@app.patch("/api/rules/{rule_id}/enabled")
+@limiter.limit(lambda: settings.rate_limit_create)
+async def set_compliance_rule_enabled(
+    request: Request,
+    rule_id: str,
+    body: RuleEnabledRequest,
+    principal: Annotated[Principal, Depends(require_admin)],
+) -> dict:
+    """Retire a rule, or restore it (#97, AC 4).
+
+    Its own endpoint rather than a field on the edit above, for two reasons. It is
+    the change an auditor looks for specifically — folding it into a general
+    revision would bury "this guardrail was switched off" inside "the wording
+    changed". And it is the one mutation that needs no valid rule body, so a rule
+    can always be retired, including one whose stored shape a later validation
+    rule would now reject.
+
+    There is no DELETE. A finding cites a rule id forever; deleting the row would
+    leave every past finding pointing at nothing.
+    """
+    return await rules.set_rule_enabled(_rules(), _audit(), rule_id, body.enabled, principal)
 
 
 @app.get("/api/metrics/summary")

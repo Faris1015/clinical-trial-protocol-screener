@@ -64,7 +64,13 @@ from app.exceptions import (
     InvalidAuditFilterError,
 )
 from app.logging_config import get_logger
-from app.persistence import AuditDecision, AuditFilter, AuditRecord, AuditStore
+from app.persistence import (
+    SUBJECT_SCREENING,
+    AuditDecision,
+    AuditFilter,
+    AuditRecord,
+    AuditStore,
+)
 from app.services.export import BOM, csv_cell
 
 if TYPE_CHECKING:
@@ -75,9 +81,23 @@ log = get_logger("audit")
 # The decisions the index carries, in the order the filter offers them. Approval
 # and rejection are the two answers to the gate (#50, #91), a revision is the
 # third exit from it (#53), and an escalation is the pipeline handing a run back
-# to a human (#55). Deliberately closed: a value outside this tuple is a 422 on
-# the filter rather than a silently empty page.
-ACTIONS = ("approved", "rejected", "criteria_revised", "escalated")
+# to a human (#55). The four rule actions (#97) are decisions about the Critic's
+# deterministic layer rather than about any run — an admin widening a plausible
+# range is exactly what an auditor comes here to find, and it belongs in the same
+# index as the approvals that were then granted under it.
+#
+# Deliberately closed: a value outside this tuple is a 422 on the filter rather
+# than a silently empty page.
+ACTIONS = (
+    "approved",
+    "rejected",
+    "criteria_revised",
+    "escalated",
+    "rule_created",
+    "rule_updated",
+    "rule_disabled",
+    "rule_enabled",
+)
 
 # Rendered names, the same convention `services/timeline.py` follows: an entry
 # carries the label a human reads *and* the raw action, so the screen, the CSV and
@@ -87,6 +107,10 @@ ACTION_LABELS = {
     "rejected": "Rejected",
     "criteria_revised": "Criteria revised",
     "escalated": "Escalated",
+    "rule_created": "Rule created",
+    "rule_updated": "Rule updated",
+    "rule_disabled": "Rule retired",
+    "rule_enabled": "Rule restored",
 }
 
 # The actor behind a decision no person made. Not an email and not empty: an empty
@@ -115,6 +139,12 @@ _CSV_COLUMNS = (
     "action_label",
     "actor",
     "actor_role",
+    # What the decision was about (#97). `thread_id` stays where it was — an
+    # auditor's existing spreadsheet filters on it — and the subject pair sits
+    # beside it, because a rule mutation has no run to name and a column that was
+    # blank for those rows would read as missing data.
+    "subject_kind",
+    "subject_id",
     "thread_id",
     "source_filename",
     "criteria_revision",
@@ -130,6 +160,11 @@ class AuditEntry(TypedDict):
     `TimelineEntry` established). `revision` is non-zero only for a
     `criteria_revised` entry, and it is what lets a client deep-link to that
     revision's before/after diff on the run rather than to the run at large (AC 3).
+
+    `subject_kind`/`subject_id` are what the entry is about — a run, or a
+    compliance rule (#97). They travel so a client can build the right deep link
+    without inferring the subject from the action name, which would put the list
+    of rule actions in two places and let them drift.
     """
 
     id: int
@@ -142,6 +177,8 @@ class AuditEntry(TypedDict):
     detail: str
     revision: int
     source_filename: str
+    subject_kind: str
+    subject_id: str
 
 
 # --- Recording --------------------------------------------------------------
@@ -157,6 +194,8 @@ async def record(
     revision: int = 0,
     source_filename: str = "",
     occurred_at: str | None = None,
+    subject_kind: str = SUBJECT_SCREENING,
+    subject_id: str = "",
 ) -> None:
     """Append one decision to the index, as it happens.
 
@@ -165,6 +204,10 @@ async def record(
     checkpoint where there is one, so the index and the run's own trail agree to
     the microsecond rather than to within a round trip; it defaults to now for a
     decision that carries no such stamp.
+
+    `subject_kind`/`subject_id` default to the run named by `thread_id`, which is
+    what every decision about a screening is about; a rule mutation (#97) passes
+    them explicitly and leaves `thread_id` empty.
 
     Never raises. See the module docstring: the decision is already durable in the
     checkpoint by the time this runs, and turning an indexing failure into a failed
@@ -180,6 +223,8 @@ async def record(
         detail=detail,
         revision=revision,
         source_filename=source_filename,
+        subject_kind=subject_kind,
+        subject_id=subject_id or thread_id,
     )
     try:
         await store.record(decision)
@@ -294,6 +339,8 @@ def entry(row: AuditRecord) -> AuditEntry:
         detail=row.detail,
         revision=row.revision,
         source_filename=row.source_filename,
+        subject_kind=row.subject_kind,
+        subject_id=row.subject_id,
     )
 
 
@@ -442,6 +489,11 @@ def render_csv(entries: Iterable[AuditEntry]) -> str:
                 item["label"],
                 csv_cell(item["actor"]),
                 item["actor_role"],
+                item["subject_kind"],
+                # A rule id is authored input, so it goes through `csv_cell` like
+                # every other free-ish field. A thread_id is a server-minted UUID
+                # and stays as it was.
+                csv_cell(item["subject_id"]),
                 item["thread_id"],
                 csv_cell(item["source_filename"]),
                 item["revision"],

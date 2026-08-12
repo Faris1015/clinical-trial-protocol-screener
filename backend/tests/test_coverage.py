@@ -21,7 +21,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main
-from app.persistence import InMemoryAuditStore, InMemoryScreeningStore
+from app.persistence import InMemoryAuditStore, InMemoryRuleStore, InMemoryScreeningStore
 from app.services import coverage, report, screening
 from tests.auth_helpers import REVIEWER, sign_in
 
@@ -759,7 +759,7 @@ async def test_a_finished_run_denormalizes_its_coverage_into_the_index_row():
     frames = [
         frame
         async for frame in await screening.stream_screening(
-            store, _audit(), TerminalGraph(FakeSnapshot(SCORED)), thread_id
+            store, _audit(), InMemoryRuleStore(), TerminalGraph(FakeSnapshot(SCORED)), thread_id
         )
     ]
     assert frames  # the terminal frame at least

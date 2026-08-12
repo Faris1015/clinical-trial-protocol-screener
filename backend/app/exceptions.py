@@ -205,6 +205,41 @@ class AuditExportTooLargeError(ScreenerError):
     http_status = 413
 
 
+class InvalidRuleError(ScreenerError):
+    """An authored compliance rule does not satisfy its check kind's contract (#97).
+
+    A missing id or description, an unknown check kind, a `range` without two
+    numeric bounds or with them inverted, a `must_be_quantitative` with no
+    keywords to bring it into scope — every way a rule can be written that the
+    engine could not run, or could run only to no effect.
+
+    The whole point of validating on write: `run_deterministic_checks` indexes
+    into a rule with `rule["min_plausible"]`, so a malformed row is a KeyError in
+    the middle of somebody's screening. Refusing it at authoring time turns that
+    into a 422 for the admin who typed it, while they are looking at the form.
+    """
+
+    http_status = 422
+
+
+class RuleNotFoundError(ScreenerError):
+    """An edit or a retirement named a rule id that is not in the table (#97)."""
+
+    http_status = 404
+
+
+class DuplicateRuleError(ScreenerError):
+    """A new rule reused an id the table already holds (#97).
+
+    Refused rather than merged into an update: a finding cites a rule id forever,
+    so silently rewriting the rule behind an existing id would change what every
+    past finding means. Editing the existing rule is the deliberate way to do that,
+    and it is a different request.
+    """
+
+    http_status = 409
+
+
 class TooManyActiveScreeningsError(ScreenerError):
     """Every concurrency slot is in use; the caller should retry shortly."""
 

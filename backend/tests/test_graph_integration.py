@@ -17,6 +17,7 @@ import app.graph.nodes.matcher as matcher_mod
 import app.graph.nodes.parser as parser_mod
 from app.config import get_settings
 from app.graph.builder import build_graph
+from app.graph.nodes.critic import load_rules
 from app.graph.state import initial_state
 from tests.fakes import (
     FAKE_PATIENTS,
@@ -46,7 +47,12 @@ async def _run_to_pause(graph: Any, thread_id: str, text: str = PROTOCOL_TEXT) -
     """Stream the graph from a fresh state until it ends or interrupts."""
     config = _config(thread_id)
     async for _chunk in graph.astream(
-        initial_state(text, "protocol.md"), config, stream_mode="updates"
+        # The rules the run is judged against are snapshotted into its state by
+        # `stream_screening` in production (#97); this drives the graph directly,
+        # so it does the same with the shipped set.
+        initial_state(text, "protocol.md", load_rules()),
+        config,
+        stream_mode="updates",
     ):
         pass
     return await graph.aget_state(config)

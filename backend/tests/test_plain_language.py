@@ -168,7 +168,10 @@ def _critic_state(criteria: dict, text: str = "protocol") -> ScreenerState:
     return cast(
         ScreenerState,
         {
-            **initial_state(text, "p.md"),
+            # The seeded rule set, as `stream_screening` would snapshot it into
+            # the run (#97) — these tests are about what the engine does with
+            # the shipped rules, so they hand it the shipped rules.
+            **initial_state(text, "p.md", load_rules()),
             "parsed_criteria": criteria,
             "parse_attempts": 1,
             "current_step": "critiquing",

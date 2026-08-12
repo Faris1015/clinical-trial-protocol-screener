@@ -22,6 +22,27 @@ jobs:
     defaults:
       run:
         working-directory: backend
+    # CHECKPOINT_BACKEND=postgres is the multi-replica production target, and
+    # without a database here every `Postgres*Store` is code the suite imports and
+    # never runs — sqlite's twin passing proves nothing about the statements the
+    # two engines spell differently (ON CONFLICT vs OR IGNORE, ADD COLUMN IF NOT
+    # EXISTS vs PRAGMA introspection, and postgres's refusal to assign a boolean
+    # to an integer column). `tests/test_persistence_postgres.py` skips itself
+    # when POSTGRES_TEST_DSN is unset, so a developer's `pytest` still needs no
+    # database; this is what makes CI the place those tests actually run.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: trialgate
+          POSTGRES_DB: trialgate_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -52,7 +73,10 @@ jobs:
             exit 1
           fi
       - name: Install
-        run: pip install -e ".[dev]"
+        # The `postgres` extra too: it is optional for a sqlite deployment, but
+        # without psycopg installed the postgres suite would skip here for the
+        # wrong reason — a missing import rather than a missing database.
+        run: pip install -e ".[dev,postgres]"
       - name: Lint (ruff)
         run: ruff check app tests
       - name: Format check (ruff)
@@ -62,6 +86,13 @@ jobs:
       - name: Tests + coverage
         # Coverage floor lives in pyproject ([tool.coverage.report] fail_under)
         # so it is one source of truth; #9 raises it to 80 once tests land.
+        #
+        # POSTGRES_TEST_DSN is what un-skips tests/test_persistence_postgres.py
+        # against the service container above. Set here rather than in the file's
+        # own default so the suite stays opt-in everywhere else — a developer who
+        # has no postgres running gets skips, not failures.
+        env:
+          POSTGRES_TEST_DSN: postgresql://postgres:trialgate@localhost:5432/trialgate_test
         run: pytest -q --cov=app --cov-report=term-missing
 
   frontend:
