@@ -47,10 +47,18 @@ from app.graph.nodes.critic import SEMANTIC_RULE_ID
 from app.services.metrics import (
     COUNTERS_SINCE,
     TERMINAL_OUTCOMES,
+    agent_node_duration_seconds,
     critic_rejections_total,
+    llm_cost_usd_total,
+    llm_tokens_total,
     parse_attempts,
+    screening_cost_usd,
+    screening_node_cost_usd,
     screenings_total,
+    term_mapping_llm_pairs_total,
+    term_mapping_resolutions_total,
 )
+from app.services.usage import LLM_NODES
 
 # Funnel order: the outcomes a run can end on, worst-last, so the page reads
 # "most runs finished, some escalated, a few were rejected, a few failed". Any
@@ -258,10 +266,243 @@ def _attempts() -> dict[str, Any]:
     }
 
 
-def summarize_metrics() -> dict[str, Any]:
-    """The in-app metrics summary: funnel, Critic rejections, loop depth (#58).
+# --- Percentiles and cost (#101) --------------------------------------------
+#
+# The three panels above are distributions a reviewer reads whole. Cost and
+# latency are read at a point instead — "what does a screening usually cost",
+# "how slow is the Matcher at the tail" — so they are reported as quantiles,
+# estimated from the same histograms `/metrics` exposes.
 
-    Cheap enough to serve per request — three `collect()` calls over a handful of
+
+def _buckets(
+    metric: MetricWrapperBase, name: str, labels: dict[str, str]
+) -> list[tuple[float, float]]:
+    """One histogram's cumulative `(upper_bound, count)` pairs, ascending.
+
+    Filtered to the given label set (empty for an unlabelled histogram) so a
+    labelled metric's children are read one at a time rather than summed into a
+    distribution no single agent ever had.
+    """
+    return sorted(
+        (float(sample_labels["le"]), value)
+        for sample_labels, value in _samples(metric, name)
+        if "le" in sample_labels
+        and all(sample_labels.get(key) == value for key, value in labels.items())
+    )
+
+
+def _quantile(buckets: list[tuple[float, float]], quantile: float) -> float | None:
+    """Estimate a quantile from cumulative histogram buckets.
+
+    The standard Prometheus estimate: find the first bucket whose cumulative count
+    reaches the target rank, then interpolate linearly between its lower and upper
+    bounds. That is an approximation, and the payload labels it as one — an
+    exact p95 would need every observation, which is the thing a histogram exists
+    not to keep.
+
+    None when there is nothing to estimate from (no observations), or when the
+    rank falls in the open-ended `+Inf` bucket, where there is no upper bound to
+    interpolate towards and any number would be invented. Callers render the
+    absence rather than a zero.
+    """
+    if not buckets:
+        return None
+    total = buckets[-1][1]
+    if total <= 0:
+        return None
+    rank = quantile * total
+    previous_bound = 0.0
+    previous_cumulative = 0.0
+    for bound, cumulative in buckets:
+        if cumulative >= rank:
+            if math.isinf(bound):
+                return None
+            width = cumulative - previous_cumulative
+            if width <= 0:
+                return round(bound, 6)
+            share = (rank - previous_cumulative) / width
+            return round(previous_bound + share * (bound - previous_bound), 6)
+        previous_bound, previous_cumulative = bound, cumulative
+    return None
+
+
+def _latency() -> list[dict[str, Any]]:
+    """Per-node p50/p95 wall-clock, in the app rather than only in Prometheus (#101).
+
+    `agent_node_duration_seconds` has always carried this; until now reading it
+    meant a Grafana. The rows are every agent the registry has timed — including
+    `router` and `human_escalation`, which make no LLM call but are still nodes a
+    reviewer watches — ordered with the LLM-bound ones first because those are
+    where the seconds are.
+    """
+    agents = sorted(
+        {
+            labels["agent"]
+            for labels, _ in _samples(
+                agent_node_duration_seconds, "agent_node_duration_seconds_count"
+            )
+            if "agent" in labels
+        },
+        key=_node_order,
+    )
+    rows = []
+    for agent in agents:
+        buckets = _buckets(
+            agent_node_duration_seconds, "agent_node_duration_seconds_bucket", {"agent": agent}
+        )
+        observations = _count(buckets[-1][1]) if buckets else 0
+        if not observations:
+            continue
+        rows.append(
+            {
+                "node": agent,
+                "runs": observations,
+                "p50_seconds": _quantile(buckets, 0.50),
+                "p95_seconds": _quantile(buckets, 0.95),
+            }
+        )
+    return rows
+
+
+def _node_order(node: str) -> tuple[int, str]:
+    """Sort key shared by the cost and latency breakdowns: the LLM-bound nodes in
+    pipeline order, everything else after, alphabetically."""
+    return (LLM_NODES.index(node), node) if node in LLM_NODES else (len(LLM_NODES), node)
+
+
+def _cost_nodes() -> list[dict[str, Any]]:
+    """Cost and tokens per node: the total spent, and the median a screening spends.
+
+    `total_cost_usd` is the counter — every dollar the instance has spent on that
+    node since it started. `median_cost_usd` is the per-screening histogram's p50,
+    observed only for runs that actually reached the node, so the Matcher's median
+    describes screenings that were approved rather than every run ever started.
+    Both are here because they answer different questions: the counter says where
+    the money went, the median says what one more screening will cost.
+    """
+    totals: dict[str, dict[str, float]] = {}
+    for labels, value in _samples(llm_cost_usd_total, "llm_cost_usd_total"):
+        node = labels.get("node", "")
+        totals.setdefault(node, {"cost": 0.0, "prompt": 0.0, "completion": 0.0})["cost"] += value
+    for labels, value in _samples(llm_tokens_total, "llm_tokens_total"):
+        node = labels.get("node", "")
+        kind = labels.get("kind", "")
+        if kind in ("prompt", "completion"):
+            totals.setdefault(node, {"cost": 0.0, "prompt": 0.0, "completion": 0.0})[kind] += value
+
+    rows = []
+    for node, figures in sorted(totals.items(), key=lambda item: _node_order(item[0])):
+        prompt = _count(figures["prompt"])
+        completion = _count(figures["completion"])
+        if not prompt and not completion:
+            continue
+        buckets = _buckets(
+            screening_node_cost_usd, "screening_node_cost_usd_bucket", {"node": node}
+        )
+        rows.append(
+            {
+                "node": node,
+                "prompt_tokens": prompt,
+                "completion_tokens": completion,
+                "tokens": prompt + completion,
+                # Rounded to the micro-dollar — the precision the stored figure
+                # has, and one the page can print without inventing digits.
+                "total_cost_usd": round(figures["cost"], 6),
+                "median_cost_usd": _quantile(buckets, 0.50),
+                "screenings": _count(buckets[-1][1]) if buckets else 0,
+            }
+        )
+    return rows
+
+
+def _cost() -> dict[str, Any]:
+    """What the models cost this instance, and what one screening costs (#101).
+
+    `median_cost_usd` is the middle of `screening_cost_usd`, estimated from its
+    buckets — see `_quantile`, and `estimated` in the payload, which says so. It
+    is a median rather than a mean because one pathological protocol that looped
+    the Critic to the cap would drag a mean somewhere no real screening sits.
+
+    `priced` is whether any spend has been recorded at all. An instance on Ollama
+    or the stub reports real tokens and exactly zero dollars, and a page that
+    printed "$0.00 median" without saying why would read as a bug rather than as
+    the correct answer for a local model.
+
+    `screenings` counts the runs that actually called a model, which is smaller
+    than the funnel total whenever the Router turned an upload away — see
+    `metrics.record_screening_usage`, which excludes those rather than letting a
+    rejection that cost nothing pull the median of the runs that cost something.
+    """
+    buckets = _buckets(screening_cost_usd, "screening_cost_usd_bucket", {})
+    screenings = _count(buckets[-1][1]) if buckets else 0
+    total_cost = sum(value for _, value in _samples(llm_cost_usd_total, "llm_cost_usd_total"))
+    tokens = {
+        kind: _count(
+            sum(
+                value
+                for labels, value in _samples(llm_tokens_total, "llm_tokens_total")
+                if labels.get("kind") == kind
+            )
+        )
+        for kind in ("prompt", "completion")
+    }
+    return {
+        "screenings": screenings,
+        "calls_priced": total_cost > 0,
+        "prompt_tokens": tokens["prompt"],
+        "completion_tokens": tokens["completion"],
+        "tokens": tokens["prompt"] + tokens["completion"],
+        "total_cost_usd": round(total_cost, 6),
+        "median_cost_usd": _quantile(buckets, 0.50),
+        "p95_cost_usd": _quantile(buckets, 0.95),
+        # The exact companion to the estimated median: a histogram keeps its own
+        # sum, so the mean is arithmetic rather than interpolation. Both are here
+        # because they fail differently — the median shrugs off the one protocol
+        # that looped the Critic to the cap, and the mean is right to the
+        # micro-dollar. A reader given only an estimate has no way to check it.
+        "mean_cost_usd": round(
+            _scalar(screening_cost_usd, "screening_cost_usd_sum") / screenings, 6
+        )
+        if screenings
+        else None,
+        "nodes": _cost_nodes(),
+    }
+
+
+def _term_mapping() -> dict[str, Any]:
+    """The Matcher's term-mapping cache, as a hit rate (#101).
+
+    `resolutions` is how many `(criterion, term)` questions the cohorts screened
+    so far required; `llm_pairs` is how many were actually put to a model. The
+    difference is what caching saved, and the ratio is the architectural claim
+    this feature exists to make checkable: mappings are resolved once per
+    screening, not once per patient, so the rate rises with cohort size rather
+    than staying flat.
+
+    `hit_rate` is None before anything has been resolved — a share of nothing is
+    not 100%, and the page omits the claim rather than publishing a perfect score
+    an empty instance did not earn.
+    """
+    resolutions = _count(_scalar(term_mapping_resolutions_total, "term_mapping_resolutions_total"))
+    llm_pairs = _count(_scalar(term_mapping_llm_pairs_total, "term_mapping_llm_pairs_total"))
+    # Clamped at zero: `resolutions` is an upper bound on the lookups actually
+    # performed (see matcher.TermMappingCost), so it cannot legitimately fall
+    # below `llm_pairs` — but a negative rate from a future change to either
+    # definition would be worse than a floor.
+    served = max(resolutions - llm_pairs, 0)
+    return {
+        "resolutions": resolutions,
+        "llm_pairs": llm_pairs,
+        "served_from_cache": served,
+        "hit_rate": _share(served, resolutions) if resolutions else None,
+    }
+
+
+def summarize_metrics() -> dict[str, Any]:
+    """The in-app metrics summary: funnel, Critic rejections, loop depth (#58),
+    cost, per-node latency and the term-mapping cache (#101).
+
+    Cheap enough to serve per request — a handful of `collect()` calls over
     in-memory children, no store round trip and no scrape.
     """
     funnel = _funnel()
@@ -277,4 +518,12 @@ def summarize_metrics() -> dict[str, Any]:
         "funnel": funnel,
         "rejections": _rejections(funnel["total"]),
         "attempts": _attempts(),
+        # Percentile figures are estimated from histogram buckets rather than
+        # from the observations themselves. Stated in the payload so the page can
+        # say so too: this complements Grafana, and a p95 presented as exact
+        # would be the claim that it does not.
+        "estimated_percentiles": True,
+        "cost": _cost(),
+        "latency": _latency(),
+        "term_mapping": _term_mapping(),
     }

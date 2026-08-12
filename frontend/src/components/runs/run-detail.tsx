@@ -12,6 +12,7 @@ import { PatientMatchTable } from "@/components/PatientMatchTable";
 import { CohortAttritionPanel } from "@/components/runs/cohort-attrition";
 import { CohortSimulator } from "@/components/runs/cohort-simulator";
 import { CoveragePanel } from "@/components/runs/coverage-panel";
+import { UsagePanel } from "@/components/runs/usage-panel";
 import { CohortExport } from "@/components/cohort-export";
 import { ReportDownload } from "@/components/report-download";
 import { RunTimeline } from "@/components/runs/run-timeline";
@@ -314,6 +315,11 @@ export function RunDetail() {
           reviewer behind each human step attributed. Derived server-side, so this
           is the same trail the exported report prints. */}
       <RunTimeline timeline={state.timeline} />
+
+      {/* What the run cost (#101), last: it is the operational footnote to
+          everything above rather than a clinical finding, and it reads best next
+          to the timeline whose steps it prices. */}
+      <UsagePanel usage={state.usage} />
     </Reveal>
   );
 }

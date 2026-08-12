@@ -50,7 +50,10 @@ class FlakyRunnable:
         self.result = result
         self.calls = 0
 
-    def invoke(self, _input: object) -> object:
+    # `*_args, **_kwargs` mirrors `Runnable.invoke(input, config=None, **kwargs)`:
+    # `invoke_with_retry` passes a `config` carrying the usage-accounting callback
+    # (#101), as it does to every real runnable.
+    def invoke(self, _input: object, *_args: object, **_kwargs: object) -> object:
         self.calls += 1
         if self.calls <= self.failures:
             raise self.exc
@@ -127,7 +130,7 @@ class ScriptedLLM:
     def with_structured_output(self, _schema: object) -> "ScriptedLLM":
         return self
 
-    def invoke(self, messages: object) -> object:
+    def invoke(self, messages: object, *_args: object, **_kwargs: object) -> object:
         self.calls.append(messages)
         out = self.outputs[min(len(self.calls), len(self.outputs)) - 1]
         if isinstance(out, Exception):

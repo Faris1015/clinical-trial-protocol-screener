@@ -24,7 +24,7 @@ import json
 import re
 from collections.abc import Callable, Mapping, Sequence
 from operator import eq, ge, gt, le, lt
-from typing import Any
+from typing import Any, NamedTuple
 
 from langchain_core.exceptions import OutputParserException
 from langgraph.config import get_stream_writer
@@ -35,6 +35,7 @@ from app.exceptions import DataStoreError, LLMUnavailableError
 from app.graph.state import ScreenerState, event
 from app.logging_config import get_logger
 from app.schemas.review import TermMapping
+from app.services import metrics
 from app.services.llm import get_llm, invoke_with_retry
 
 OPS = {">=": ge, "<=": le, ">": gt, "<": lt, "==": eq}
@@ -486,11 +487,36 @@ def _map_terms_via_llm(criterion_value: str, terms: list[str]) -> dict[str, str]
     return {_norm(r.term): r.verdict for r in mapping.results}
 
 
+class TermMappingCost(NamedTuple):
+    """What the term-mapping step cost the cohort, and what it would have cost
+    per patient (#101).
+
+    `llm_pairs` is the distinct `(criterion, term)` pairs actually sent to a
+    model — the cache's misses, and the thing the LLM was billed for.
+    `resolutions` is how many of those pairs the cohort's patients *between them*
+    need resolved: the same pair recurs once per patient carrying that term, and
+    a matcher that resolved per patient would have asked once for each.
+
+    So `1 - llm_pairs / resolutions` is the term-mapping cache hit rate — the
+    caching claim as a number, computed where both halves are already in hand.
+    It counts a pair once per patient that carries the term rather than once per
+    mention, because a patient listing a drug twice is still one patient's
+    question. It is an upper bound on the lookups `_categorical_presence`
+    actually performs, which stops early on the first match: the figure is what
+    the cohort's terms *require*, which is the honest denominator for "how much
+    did caching save".
+    """
+
+    resolutions: int
+    llm_pairs: int
+
+
 def build_verdict_cache(
     criteria: dict,
     patients: list[dict],
     mapper: TermMapper = _map_terms_via_llm,
     on_progress: Callable[[int, int], None] | None = None,
+    on_cost: Callable[[TermMappingCost], None] | None = None,
 ) -> dict[tuple[str, str], str]:
     """Resolve the ambiguous categorical tail once for the whole cohort.
 
@@ -503,15 +529,31 @@ def build_verdict_cache(
     `on_progress(done, total)` is called before each LLM mapper call. Each call
     can take tens of seconds on a local model, so this lets the caller emit a
     keepalive/progress signal between them (see matcher_node).
+
+    `on_cost(TermMappingCost)` is called once, at the end, with what the cache
+    saved (#101) — see `TermMappingCost`. A callback rather than a second return
+    value because every existing caller wants the cache and nothing else, and the
+    figure is only ever forwarded to a counter.
     """
     categoricals = criteria["inclusion_categorical"] + criteria["exclusion_categorical"]
     # One representative original spelling per normalized term, for the prompt.
     term_by_norm: dict[str, str] = {}
+    # How many patients carry each normalized term — the multiplier a per-patient
+    # implementation would have paid on every pair. Counted per patient, not per
+    # mention: `_patient_terms` concatenates three fields and one patient can list
+    # the same drug in two of them.
+    patients_with_term: dict[str, int] = {}
     for p in patients:
+        seen: set[str] = set()
         for t in _patient_terms(p):
-            term_by_norm.setdefault(_norm(t), t)
+            tnorm = _norm(t)
+            term_by_norm.setdefault(tnorm, t)
+            if tnorm not in seen:
+                seen.add(tnorm)
+                patients_with_term[tnorm] = patients_with_term.get(tnorm, 0) + 1
 
     cache: dict[tuple[str, str], str] = {}
+    resolutions = 0
     # Only criteria with an ambiguous tail actually make an LLM call; count those
     # for a meaningful progress denominator.
     llm_bound = [
@@ -522,10 +564,18 @@ def build_verdict_cache(
     done = 0
     for c in categoricals:
         cval = _norm(c["value"])
+        # One `_fast_present` sweep per criterion, reused for both the candidate
+        # set and the cost figure: it is a regex scan per (criterion, term) pair,
+        # and on a large cohort a second sweep for accounting alone would be tens
+        # of thousands of extra scans per screening.
+        unsettled = [tnorm for tnorm in term_by_norm if not _fast_present(cval, tnorm)]
+        # Counted before the `continue` below: a criterion whose terms are all
+        # already cached (the protocol quotes it twice) still had those
+        # resolutions required by the cohort — they were simply served from the
+        # cache, which is precisely the saving being measured.
+        resolutions += sum(patients_with_term.get(tnorm, 0) for tnorm in unsettled)
         candidates = {
-            tnorm: original
-            for tnorm, original in term_by_norm.items()
-            if not _fast_present(cval, tnorm) and (cval, tnorm) not in cache
+            tnorm: term_by_norm[tnorm] for tnorm in unsettled if (cval, tnorm) not in cache
         }
         if not candidates:
             continue
@@ -547,6 +597,8 @@ def build_verdict_cache(
             verdicts = {tnorm: "uncertain" for tnorm in candidates}
         for tnorm in candidates:
             cache[(cval, tnorm)] = verdicts.get(tnorm, "no_match")
+    if on_cost is not None:
+        on_cost(TermMappingCost(resolutions=resolutions, llm_pairs=len(cache)))
     return cache
 
 
@@ -594,7 +646,16 @@ def matcher_node(state: ScreenerState) -> dict:
     criteria = state["parsed_criteria"]
     assert criteria is not None, "matcher runs after parser — parsed_criteria is set"
     patients = load_patients()
-    verdicts = build_verdict_cache(criteria, patients, on_progress=_progress_emitter())
+    verdicts = build_verdict_cache(
+        criteria,
+        patients,
+        on_progress=_progress_emitter(),
+        # The caching claim, counted (#101): what the cohort's terms required
+        # against what the LLM was actually asked. Recorded here rather than
+        # inside `build_verdict_cache` so that function stays a pure derivation
+        # its unit tests can call without touching the metrics registry.
+        on_cost=lambda cost: metrics.record_term_mapping(cost.resolutions, cost.llm_pairs),
+    )
     evaluations = [evaluate_patient(p, criteria, verdicts) for p in patients]
     eligible = [e for e in evaluations if e["eligible"] and not e["needs_review"]]
     review = [e for e in evaluations if e["needs_review"]]

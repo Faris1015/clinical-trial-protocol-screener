@@ -118,7 +118,7 @@ def test_record_rejection_counts_the_outcome_the_graph_never_emits(isolated, mon
     can't see it — `record_rejection` is what keeps the run in the funnel at all."""
     monkeypatch.setattr(metrics_mod, "screenings_total", isolated.screenings)
 
-    metrics_mod.record_rejection()
+    metrics_mod.record_rejection({})
 
     assert _outcomes(summarize_metrics())["rejected"]["count"] == 1
 
@@ -285,6 +285,281 @@ def test_the_payload_says_whether_the_metrics_are_also_scrapable(isolated, monke
     assert summarize_metrics()["exported"] is False
 
 
+# --- cost, latency and the term-mapping cache (#101) -------------------------
+
+
+@pytest.fixture
+def isolated_cost(monkeypatch):
+    """Fresh copies of the metrics the cost/latency/cache blocks read.
+
+    Same reason as `isolated`: these are read off module globals, and a private
+    registry is what makes an exact median assertable rather than a delta over
+    whatever the rest of the suite happened to record.
+    """
+    registry = CollectorRegistry()
+    fakes = SimpleNamespace(
+        screening_cost=Histogram(
+            "screening_cost_usd", "test", buckets=metrics_mod._COST_BUCKETS, registry=registry
+        ),
+        node_cost=Histogram(
+            "screening_node_cost_usd",
+            "test",
+            ["node"],
+            buckets=metrics_mod._COST_BUCKETS,
+            registry=registry,
+        ),
+        tokens=Counter("llm_tokens_total", "test", ["node", "provider", "kind"], registry=registry),
+        cost_total=Counter("llm_cost_usd_total", "test", ["node", "provider"], registry=registry),
+        duration=Histogram(
+            "agent_node_duration_seconds",
+            "test",
+            ["agent"],
+            buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
+            registry=registry,
+        ),
+        resolutions=Counter("term_mapping_resolutions_total", "test", registry=registry),
+        pairs=Counter("term_mapping_llm_pairs_total", "test", registry=registry),
+    )
+    for name, fake in (
+        ("screening_cost_usd", fakes.screening_cost),
+        ("screening_node_cost_usd", fakes.node_cost),
+        ("llm_tokens_total", fakes.tokens),
+        ("llm_cost_usd_total", fakes.cost_total),
+        ("agent_node_duration_seconds", fakes.duration),
+        ("term_mapping_resolutions_total", fakes.resolutions),
+        ("term_mapping_llm_pairs_total", fakes.pairs),
+    ):
+        monkeypatch.setattr(metrics_summary, name, fake)
+    return fakes
+
+
+def test_the_summary_reports_a_median_cost_per_screening(isolated_cost):
+    """AC 4: the headline figure. A median rather than a mean, so one pathological
+    protocol that looped the Critic to the cap can't drag it somewhere no real
+    screening sits."""
+    for cost in (0.004, 0.006, 0.008, 0.4):
+        isolated_cost.screening_cost.observe(cost)
+    isolated_cost.cost_total.labels(node="parser", provider="anthropic").inc(0.418)
+
+    cost = summarize_metrics()["cost"]
+    assert cost["screenings"] == 4
+    assert cost["calls_priced"] is True
+    # Three of four runs are under a cent; the median must land there and not be
+    # dragged out by the single expensive one.
+    assert cost["median_cost_usd"] is not None
+    assert cost["median_cost_usd"] < 0.01
+    assert cost["total_cost_usd"] == 0.418
+
+
+def test_a_run_that_never_called_a_model_is_not_in_the_median(isolated_cost, monkeypatch):
+    """The Router rejects non-protocol input before the Parser runs, and that
+    rejection is terminal. Observing its zero would pull the median toward a
+    figure no *screening* ever cost — on an instance that turns away three
+    uploads for every real protocol, a two-cent screening reads as a third of a
+    cent.
+    """
+    monkeypatch.setattr(metrics_mod, "screening_cost_usd", isolated_cost.screening_cost)
+    monkeypatch.setattr(metrics_mod, "screening_node_cost_usd", isolated_cost.node_cost)
+
+    for _ in range(3):
+        metrics_mod.record_screening_usage([])  # router-rejected: no call at all
+    metrics_mod.record_screening_usage(
+        [
+            {
+                "node": "parser",
+                "prompt_tokens": 5000,
+                "completion_tokens": 800,
+                "cost_micro_usd": 20_000,
+                "estimated": False,
+            }
+        ]
+    )
+
+    cost = summarize_metrics()["cost"]
+    assert cost["screenings"] == 1, "only the run that actually called a model"
+    assert cost["median_cost_usd"] is not None
+    assert cost["median_cost_usd"] > 0.01
+
+
+def test_a_run_whose_calls_were_unpriced_is_still_in_the_median(isolated_cost, monkeypatch):
+    """The other side of the guard: a local model's screening really did cost
+    nothing, and that zero is the honest median for the instance. Excluding it
+    would leave an Ollama deployment with an empty cost panel and no way to tell
+    that from one that has never run.
+
+    Note what the estimator can and cannot say here. A run costing exactly $0
+    lands in the first bucket, and interpolating within it yields half that
+    bucket's width rather than a true zero — a histogram cannot distinguish $0.00
+    from $0.0004. That is precisely why `calls_priced` exists and why the page
+    gates on it: an unpriced instance is told it has no billed spend rather than
+    shown a bucket artefact as though it were a price.
+    """
+    monkeypatch.setattr(metrics_mod, "screening_cost_usd", isolated_cost.screening_cost)
+    monkeypatch.setattr(metrics_mod, "screening_node_cost_usd", isolated_cost.node_cost)
+
+    metrics_mod.record_screening_usage(
+        [
+            {
+                "node": "parser",
+                "prompt_tokens": 5000,
+                "completion_tokens": 800,
+                "cost_micro_usd": 0,
+                "estimated": False,
+            }
+        ]
+    )
+
+    cost = summarize_metrics()["cost"]
+    assert cost["screenings"] == 1, "the run was counted, not filtered out with the zeros"
+    assert cost["median_cost_usd"] is not None
+    assert cost["median_cost_usd"] < metrics_mod._COST_BUCKETS[0]
+    # And the figure the page actually keys on is unambiguous.
+    assert cost["calls_priced"] is False
+
+
+def test_the_cost_is_split_by_node(isolated_cost):
+    """AC 4: "split by node". The total says where the money went; the median says
+    what one more screening will cost at that node."""
+    for node, per_run in (("parser", 0.006), ("critic", 0.001), ("matcher", 0.02)):
+        isolated_cost.node_cost.labels(node=node).observe(per_run)
+        isolated_cost.cost_total.labels(node=node, provider="anthropic").inc(per_run)
+        isolated_cost.tokens.labels(node=node, provider="anthropic", kind="prompt").inc(1000)
+        isolated_cost.tokens.labels(node=node, provider="anthropic", kind="completion").inc(200)
+
+    rows = {row["node"]: row for row in summarize_metrics()["cost"]["nodes"]}
+    # Pipeline order, so a reader follows the run rather than an alphabet.
+    assert [row["node"] for row in summarize_metrics()["cost"]["nodes"]] == [
+        "parser",
+        "critic",
+        "matcher",
+    ]
+    assert rows["parser"]["tokens"] == 1200
+    assert rows["matcher"]["total_cost_usd"] == 0.02
+    assert rows["critic"]["median_cost_usd"] is not None
+
+
+def test_an_unpriced_instance_reports_tokens_and_no_money(isolated_cost):
+    """AC 2, at the summary level: a local deployment shows real tokens and says
+    plainly that nothing here is priced, rather than printing "$0.00 median" as
+    though the figure were a measurement of spend."""
+    isolated_cost.screening_cost.observe(0.0)
+    isolated_cost.tokens.labels(node="parser", provider="ollama", kind="prompt").inc(5000)
+    isolated_cost.tokens.labels(node="parser", provider="ollama", kind="completion").inc(900)
+
+    cost = summarize_metrics()["cost"]
+    assert cost["tokens"] == 5900
+    assert cost["calls_priced"] is False
+    assert cost["total_cost_usd"] == 0
+
+
+def test_the_summary_reports_per_node_latency_percentiles(isolated_cost):
+    """AC 5: p50/p95 per node in the app, not only in the Prometheus histogram."""
+    for _ in range(19):
+        isolated_cost.duration.labels(agent="parser").observe(0.2)
+    isolated_cost.duration.labels(agent="parser").observe(4.0)  # one slow tail run
+    isolated_cost.duration.labels(agent="router").observe(0.01)
+
+    rows = {row["node"]: row for row in summarize_metrics()["latency"]}
+    assert rows["parser"]["runs"] == 20
+    assert rows["parser"]["p50_seconds"] is not None
+    assert rows["parser"]["p95_seconds"] is not None
+    # The tail is what the p95 is for: it must sit well above the median.
+    assert rows["parser"]["p95_seconds"] > rows["parser"]["p50_seconds"]
+    assert rows["router"]["p50_seconds"] is not None
+
+
+def test_a_node_with_no_timed_runs_gets_no_row(isolated_cost):
+    """An empty row would claim a node that has never run is instantaneous."""
+    assert summarize_metrics()["latency"] == []
+
+
+def test_the_summary_reports_the_term_mapping_cache_hit_rate(isolated_cost):
+    """AC 4: the caching claim, aggregated. 500 resolutions the cohorts needed
+    against 10 pairs the model was actually asked is a 98% hit rate — and it is
+    the shape of that ratio, not its exact value, that the architecture claims."""
+    isolated_cost.resolutions.inc(500)
+    isolated_cost.pairs.inc(10)
+
+    cache = summarize_metrics()["term_mapping"]
+    assert cache["resolutions"] == 500
+    assert cache["llm_pairs"] == 10
+    assert cache["served_from_cache"] == 490
+    assert cache["hit_rate"] == 98.0
+
+
+def test_the_hit_rate_is_omitted_before_anything_has_been_resolved(isolated_cost):
+    """A share of nothing is not 100% — the page omits the claim rather than
+    publishing a perfect score an empty instance did not earn."""
+    assert summarize_metrics()["term_mapping"]["hit_rate"] is None
+
+
+def test_a_percentile_with_no_observations_is_none_rather_than_zero(isolated_cost):
+    """Zero is a cost; None is the API saying it has nothing to estimate from.
+    Conflating them would report an instance that has run nothing as free."""
+    cost = summarize_metrics()["cost"]
+    assert cost["median_cost_usd"] is None
+    assert cost["p95_cost_usd"] is None
+
+
+def test_the_summary_reports_an_exact_mean_beside_the_estimated_median(isolated_cost):
+    """A histogram keeps its own sum, so the mean is arithmetic rather than
+    interpolation — and it is the figure a reader can check the estimate against.
+    Three runs at 2, 4 and 30 cents: the mean is exactly 12 cents, and the median
+    sits near the middle run rather than being dragged out by the expensive one."""
+    for cost in (0.02, 0.04, 0.30):
+        isolated_cost.screening_cost.observe(cost)
+    isolated_cost.cost_total.labels(node="parser", provider="anthropic").inc(0.36)
+
+    cost = summarize_metrics()["cost"]
+    assert cost["mean_cost_usd"] == 0.12, "exact, to the micro-dollar"
+    assert 0.02 < cost["median_cost_usd"] < 0.06, cost["median_cost_usd"]
+
+
+def test_the_mean_is_omitted_when_nothing_has_been_observed(isolated_cost):
+    """None rather than a division by zero — and rather than a 0 that would read
+    as a free instance."""
+    assert summarize_metrics()["cost"]["mean_cost_usd"] is None
+
+
+def test_the_cost_buckets_resolve_the_range_screenings_actually_land_in(isolated_cost):
+    """Bucket width is the error bar on the headline figure of this whole feature.
+
+    A quantile read off a histogram interpolates inside whichever bucket the rank
+    lands in, so a coarse step through the cents range makes a measured screening
+    report a cost it never had — a 0.05→0.1 step reported a $0.054 run as $0.075,
+    39% high. This pins the resolution rather than the bucket list: any re-tuning
+    is free to move the bounds as long as the estimate stays close to the truth.
+    """
+    for actual in (0.006, 0.018, 0.054, 0.12):
+        isolated_cost.screening_cost.observe(actual)
+        estimate = _quantile_of(isolated_cost.screening_cost, 0.50)
+        assert estimate is not None
+        assert abs(estimate - actual) / actual < 0.25, f"{actual} estimated as {estimate}"
+        isolated_cost.screening_cost._sum.set(0)
+        for bucket in isolated_cost.screening_cost._buckets:
+            bucket.set(0)
+
+
+def _quantile_of(histogram, quantile: float) -> float | None:
+    """The summary's own estimator, run against one histogram directly."""
+    buckets = sorted(
+        (float(sample.labels["le"]), sample.value)
+        for family in histogram.collect()
+        for sample in family.samples
+        if sample.name.endswith("_bucket")
+    )
+    return metrics_summary._quantile(buckets, quantile)
+
+
+def test_the_real_cost_histograms_use_the_buckets_this_suite_assumes():
+    """The anti-drift twin of the parse_attempts bucket test: re-tuning
+    `_COST_BUCKETS` must fail here rather than quietly changing what the medians
+    above are asserting."""
+    assert metrics_mod._COST_BUCKETS[0] == 0.0005
+    assert metrics_mod._COST_BUCKETS[-1] == 5.0
+    assert metrics_mod._COST_BUCKETS == tuple(sorted(metrics_mod._COST_BUCKETS))
+
+
 # --- the route ---------------------------------------------------------------
 
 
@@ -305,7 +580,20 @@ def test_a_reviewer_can_read_the_summary(client):
     body = response.json()
     # `coverage` (#93) is the one block not read off a collector — it is pooled from
     # recent checkpoints, and tests/test_coverage.py covers it.
-    assert set(body) == {"since", "exported", "funnel", "rejections", "attempts", "coverage"}
+    assert set(body) == {
+        "since",
+        "exported",
+        "funnel",
+        "rejections",
+        "attempts",
+        "coverage",
+        # The cost accounting (#101): what the models spent, how slow each node
+        # is at the tail, and what the term-mapping cache saved.
+        "estimated_percentiles",
+        "cost",
+        "latency",
+        "term_mapping",
+    }
 
 
 # --- reconciliation with /metrics --------------------------------------------

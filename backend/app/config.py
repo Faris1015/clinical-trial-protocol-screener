@@ -48,6 +48,20 @@ class Settings(BaseSettings):
     # can see how inference latency interacts with the threadpool + concurrency
     # gate without needing a real GPU.
     stub_latency_seconds: float = Field(0.0, ge=0.0)
+    # Per-model price table for the cost accounting (#101), as
+    # "model=input/output" entries in USD per million tokens, comma- or
+    # newline-separated. The separator is "=" rather than ":" because Ollama model
+    # ids contain a colon ("qwen2.5:7b") and would otherwise be unaddressable.
+    # A model with no entry reports its tokens at zero cost — which is the right
+    # reading for a local model, and the reason the defaults name only the hosted
+    # ones. An id is matched exactly first, then by the longest configured prefix,
+    # so a dated snapshot inherits its family's price without needing a row.
+    # Prices move; override this rather than editing the code when they do.
+    llm_prices: str = (
+        "claude-opus-5=5/25,claude-opus-4-8=5/25,claude-opus-4-7=5/25,"
+        "claude-sonnet-5=3/15,claude-sonnet-4-6=3/15,claude-haiku-4-5=1/5,"
+        "claude-fable-5=10/50"
+    )
 
     # --- API ---
     # Comma-separated list, e.g. "http://localhost:3000,https://screener.example.com"

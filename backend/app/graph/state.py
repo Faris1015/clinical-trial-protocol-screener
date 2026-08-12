@@ -9,6 +9,8 @@ import operator
 from datetime import UTC
 from typing import Annotated, Literal, TypedDict
 
+from app.services.usage import LlmCall
+
 # The phases a screening moves through. Doubles as the list endpoint's status
 # filter (#51): the store's `status` column is denormalized from `current_step`
 # (see services.screening._status_from_snapshot), so one definition keeps the
@@ -130,6 +132,20 @@ class ScreenerState(TypedDict):
     events: Annotated[list[AgentEvent], operator.add]
     current_step: ScreeningStatus
 
+    # What the models cost (#101). One entry per LLM call — node, provider,
+    # model, prompt/completion tokens and estimated micro-USD (see
+    # services/usage.py) — appended by the graph's `_instrument` wrapper through
+    # the same reducer `events` uses, so the parse/critic loop's repeated calls
+    # accumulate rather than overwrite.
+    #
+    # It lives in the checkpoint rather than in a counter because a screening's
+    # bill spans two requests: the stream that parks the run at the gate and the
+    # approval that resumes it into the Matcher. Only durable state bridges them —
+    # and it is what lets the run detail view report a cost for a run that
+    # finished last week. PHI-safe by construction: token counts and a price,
+    # never prompt or completion text.
+    llm_usage: Annotated[list[LlmCall], operator.add]
+
 
 def event(agent: str, status: str, detail: str) -> AgentEvent:
     from datetime import datetime
@@ -171,4 +187,5 @@ def initial_state(raw_protocol_text: str, source_filename: str) -> ScreenerState
         match_summary="",
         events=[],
         current_step="routing",
+        llm_usage=[],
     )

@@ -208,6 +208,83 @@ def test_verdicts_cached_across_patients():
     assert all(evaluate_patient(p, crit, cache)["eligible"] for p in patients)
 
 
+def test_llm_calls_are_bounded_by_distinct_criteria_not_by_patient_count():
+    """The caching claim, pinned (#101).
+
+    This is the architectural assertion the whole project rests on: a model is
+    consulted once per *distinct criterion*, and its verdicts are reused across
+    every patient in the cohort. The regression it guards against is subtle and
+    expensive — move the mapper call inside the per-patient loop and every test
+    above still passes, the cohort still comes out right, and the bill silently
+    goes up by two orders of magnitude.
+
+    So the assertion is on the shape of the cost, not on a magic number: the same
+    two criteria against 5 patients and against 200 make exactly the same calls.
+    """
+    crit = _criteria(
+        inclusion_categorical=[_cat("egfr mutation", category="biomarker")],
+        exclusion_categorical=[_cat("prior immunotherapy")],
+    )
+    rules = {("egfr mutation", "egfr l858r alteration"): "match"}
+
+    def calls_for(cohort_size: int) -> list:
+        patients = [
+            _patient(f"P{i}", diagnoses=["EGFR L858R alteration"], history=["pembrolizumab"])
+            for i in range(cohort_size)
+        ]
+        calls: list = []
+        build_verdict_cache(crit, patients, _make_mapper(rules, calls))
+        return calls
+
+    small, large = calls_for(5), calls_for(200)
+    # One batch per criterion with an ambiguous tail — and the cohort's size does
+    # not enter into it.
+    assert len(small) == 2
+    assert len(large) == len(small)
+    # Same distinct terms asked about, whether five patients share them or two
+    # hundred do.
+    assert {criterion for criterion, _ in large} == {"egfr mutation", "prior immunotherapy"}
+
+
+def test_the_cache_reports_what_it_saved(monkeypatch):
+    """The hit rate the metrics page shows (#101), at its source.
+
+    `resolutions` is how many `(criterion, term)` questions the cohort's records
+    raise; `llm_pairs` is how many reached a model. With 10 patients sharing 2
+    terms across 1 criterion the cohort raises 20 questions and the model is asked
+    2 — which is the saving, stated as the number the summary divides.
+    """
+    crit = _criteria(inclusion_categorical=[_cat("egfr mutation", category="biomarker")])
+    patients = [
+        _patient(f"P{i}", diagnoses=["EGFR L858R alteration"], history=["aspirin"])
+        for i in range(10)
+    ]
+    recorded: list = []
+    build_verdict_cache(
+        crit, patients, _make_mapper({}, []), on_cost=lambda cost: recorded.append(cost)
+    )
+
+    assert len(recorded) == 1
+    cost = recorded[0]
+    assert cost.llm_pairs == 2  # two distinct terms, one criterion
+    assert cost.resolutions == 20  # ten patients × those two terms
+    assert cost.resolutions > cost.llm_pairs
+
+
+def test_a_term_listed_twice_by_one_patient_counts_once(monkeypatch):
+    """`_patient_terms` concatenates three record fields, so one patient can list
+    the same drug twice. The saving is counted per patient asking the question,
+    not per mention — otherwise a messy record would inflate the hit rate."""
+    crit = _criteria(inclusion_categorical=[_cat("prior platinum chemotherapy")])
+    patient = _patient("P1", medications=["carboplatin"], history=["carboplatin"])
+    recorded: list = []
+    build_verdict_cache(
+        crit, [patient], _make_mapper({}, []), on_cost=lambda cost: recorded.append(cost)
+    )
+    assert recorded[0].resolutions == 1
+    assert recorded[0].llm_pairs == 1
+
+
 def test_no_categoricals_makes_no_llm_call():
     crit = _criteria(
         inclusion_quantitative=[

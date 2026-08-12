@@ -37,6 +37,44 @@ export function formatCount(count: number, noun: string, plural = `${noun}s`): s
 }
 
 /**
+ * A dollar figure at a precision that shows it (#101).
+ *
+ * A screening costs cents, so a fixed two decimals would print every real figure
+ * as "$0.00" — the one rendering that turns a working cost accountant into a
+ * broken-looking one. Below a cent the value keeps four decimals; at or above a
+ * cent it takes the conventional two. `null` is not a zero: it is the API saying
+ * it has nothing to estimate from, and reads as an em dash rather than as free.
+ */
+export function formatUsd(cost: number | null | undefined): string {
+  if (cost === null || cost === undefined) return "—";
+  if (cost > 0 && cost < 0.01) return `$${cost.toFixed(4)}`;
+  return `$${cost.toFixed(2)}`;
+}
+
+/**
+ * A token count, thousands-separated. Token counts run to five and six figures on
+ * a real protocol, where an unseparated run of digits is unreadable at a glance.
+ */
+export function formatTokens(tokens: number): string {
+  return tokens.toLocaleString("en-US");
+}
+
+/**
+ * A duration in the unit a reader can hold: milliseconds under a second, seconds
+ * above it. Node durations span three orders of magnitude — a deterministic
+ * router in single-digit milliseconds, a cohort mapping call in tens of seconds —
+ * and one fixed unit makes one end of that range unreadable.
+ *
+ * `null` is the API declining to estimate a percentile (see
+ * `MetricsSummary.estimated_percentiles`), not a zero.
+ */
+export function formatDuration(seconds: number | null | undefined): string {
+  if (seconds === null || seconds === undefined) return "—";
+  if (seconds < 1) return `${Math.round(seconds * 1000)} ms`;
+  return `${seconds.toFixed(seconds < 10 ? 1 : 0)} s`;
+}
+
+/**
  * Which bar colour a funnel outcome reads as, reusing the clinical status tokens
  * the run badges use — `done` is the only success, `failed` the only outright
  * failure, and an escalation is neither (it is the gate working, and a human is

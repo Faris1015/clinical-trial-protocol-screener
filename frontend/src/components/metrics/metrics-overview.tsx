@@ -2,17 +2,30 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { AlertTriangle, BarChart3, Gauge, Layers, ShieldCheck } from "lucide-react";
+import { AlertTriangle, BarChart3, Coins, Gauge, Layers, ShieldCheck, Timer } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { MetricsSkeleton } from "@/components/skeletons";
 import { apiFetch, problemDetail } from "@/lib/api";
-import { formatCount, formatShare, outcomeBarClass } from "@/lib/metrics";
+import {
+  formatCount,
+  formatDuration,
+  formatShare,
+  formatTokens,
+  formatUsd,
+  outcomeBarClass,
+} from "@/lib/metrics";
 import { ruleHref } from "@/lib/rules";
 import { formatTimestamp } from "@/lib/runs";
 import { cn } from "@/lib/utils";
-import type { CoverageAggregate, MetricsSummary } from "@/types";
+import type {
+  CostSummary,
+  CoverageAggregate,
+  MetricsSummary,
+  NodeLatency,
+  TermMappingCache,
+} from "@/types";
 
 /**
  * The in-app metrics summary (#58).
@@ -71,13 +84,14 @@ export function MetricsOverview() {
 
   if (!summary) return <MetricsSkeleton />;
 
-  const { funnel, rejections, attempts, coverage } = summary;
+  const { funnel, rejections, attempts, coverage, cost, latency, term_mapping } = summary;
   // Every counter, not just the funnel: a run that the Critic has already pushed
   // back but that has not yet reached a terminal outcome bumps the rejection
   // counter while the funnel is still empty. Gating on the funnel alone would
-  // hide that finding behind a "nothing has run yet" notice.
+  // hide that finding behind a "nothing has run yet" notice. Tokens count too:
+  // a run still mid-parse has already spent money the page can report (#101).
   const nothingCounted =
-    funnel.total === 0 && rejections.total === 0 && attempts.observations === 0;
+    funnel.total === 0 && rejections.total === 0 && attempts.observations === 0 && !cost?.tokens;
 
   return (
     <div className="space-y-4" data-region="metrics-overview">
@@ -97,9 +111,19 @@ export function MetricsOverview() {
           <Funnel funnel={funnel} />
           <Attempts attempts={attempts} />
           <Rejections rejections={rejections} runs={funnel.total} />
+          {/* Cost and latency (#101) below the pipeline panels: they describe
+              what the pipeline above *costs*, and a reader wants to know where
+              runs end up before asking what they spent getting there. */}
+          {cost && cost.tokens > 0 && <Cost cost={cost} />}
+          {latency && latency.length > 0 && <Latency latency={latency} />}
+          {term_mapping && term_mapping.resolutions > 0 && <TermMapping cache={term_mapping} />}
         </div>
       )}
-      <Provenance since={summary.since} exported={summary.exported} />
+      <Provenance
+        since={summary.since}
+        exported={summary.exported}
+        estimatedPercentiles={summary.estimated_percentiles ?? false}
+      />
     </div>
   );
 }
@@ -346,6 +370,160 @@ function Attempts({ attempts }: { attempts: MetricsSummary["attempts"] }) {
 }
 
 /**
+ * What the models cost (#101) — the panel that turns the project's central
+ * architectural claim into a measurement.
+ *
+ * The claim is that a model is used only where language understanding is
+ * genuinely required. The median cost of one screening is what makes it
+ * checkable: a hundred-patient cohort screened for cents is an argument, and one
+ * screened for dollars is a bug report. The split by agent is where that argument
+ * gets specific — if the Matcher's share ever rivals the Parser's, the term
+ * mapping stopped being cached.
+ *
+ * The median is estimated from histogram buckets rather than kept exactly (the
+ * footer says so), and a deployment whose models have no configured price shows
+ * real tokens with no dollars at all — because "we are not billed for this" is a
+ * different statement from "this was free", and only one of them is true of a
+ * local model.
+ */
+function Cost({ cost }: { cost: CostSummary }) {
+  return (
+    <Panel
+      icon={Coins}
+      title="Cost per screening"
+      caption={
+        cost.calls_priced
+          ? `${formatUsd(cost.median_cost_usd)} median across ${formatCount(
+              cost.screenings,
+              "finished run"
+            )}, ${formatUsd(cost.mean_cost_usd)} on average — ${formatUsd(
+              cost.total_cost_usd
+            )} spent in total.`
+          : `${formatTokens(cost.tokens)} tokens across ${formatCount(
+              cost.screenings,
+              "finished run"
+            )}. No model here has a configured price, so nothing is billed.`
+      }
+      region="metrics-cost"
+    >
+      {cost.nodes.map((node) => (
+        <div className="space-y-1" key={node.node} data-region="metrics-cost-node">
+          <div className="flex flex-wrap items-baseline gap-x-2">
+            <span className="min-w-0 flex-1 text-sm capitalize">
+              {node.node}
+              <span className="text-muted-foreground normal-case">
+                {" "}
+                · {formatTokens(node.tokens)} tokens
+              </span>
+            </span>
+            <span className="text-sm font-medium tabular-nums">
+              {cost.calls_priced ? formatUsd(node.median_cost_usd) : "—"}
+            </span>
+            <span className="text-muted-foreground w-20 text-right text-xs tabular-nums">
+              {cost.calls_priced ? `${formatUsd(node.total_cost_usd)} total` : ""}
+            </span>
+          </div>
+        </div>
+      ))}
+      <p className="text-muted-foreground text-sm">
+        {cost.calls_priced
+          ? `Median per screening by agent, with the instance total beside it. A run's 95th percentile is ${formatUsd(
+              cost.p95_cost_usd
+            )}.`
+          : "Token counts are real; the price table (LLM_PRICES) has no entry for the models this instance runs."}
+      </p>
+    </Panel>
+  );
+}
+
+/**
+ * How long each agent takes, at the middle and at the tail (#101).
+ *
+ * `agent_node_duration_seconds` has carried this since #7, but reading it meant
+ * standing up a Prometheus — so the one figure an operator asks for most often
+ * ("which agent is slow, and how bad does it get?") was the one this page
+ * couldn't answer. p95 next to p50 rather than instead of it: the gap between
+ * them is the question, since an agent whose tail is ten times its median is a
+ * different problem from one that is uniformly slow.
+ */
+function Latency({ latency }: { latency: NodeLatency[] }) {
+  return (
+    <Panel
+      icon={Timer}
+      title="Agent latency"
+      caption="Wall-clock per node execution, at the median and the 95th percentile."
+      region="metrics-latency"
+    >
+      {latency.map((node) => (
+        <div
+          className="flex flex-wrap items-baseline gap-x-2"
+          key={node.node}
+          data-region="metrics-latency-node"
+        >
+          <span className="min-w-0 flex-1 text-sm capitalize">
+            {node.node}
+            <span className="text-muted-foreground normal-case">
+              {" "}
+              · {formatCount(node.runs, "run")}
+            </span>
+          </span>
+          <span className="text-sm font-medium tabular-nums">
+            {formatDuration(node.p50_seconds)}
+          </span>
+          <span className="text-muted-foreground w-20 text-right text-xs tabular-nums">
+            {formatDuration(node.p95_seconds)} p95
+          </span>
+        </div>
+      ))}
+    </Panel>
+  );
+}
+
+/**
+ * What the Matcher's term-mapping cache saved (#101).
+ *
+ * The Matcher resolves each ambiguous `(criterion, term)` pair once per
+ * *screening* and reuses the verdict across every patient in the cohort. This
+ * panel is that design decision as a number: the questions the cohort's records
+ * raised, against the ones a model was actually asked. The gap is the whole
+ * argument for the caching, and it widens with cohort size — which is exactly why
+ * a flat figure would be the wrong thing to show.
+ */
+function TermMapping({ cache }: { cache: TermMappingCache }) {
+  return (
+    <Panel
+      icon={Layers}
+      title="Term-mapping cache"
+      caption="Criterion/term questions the cohorts raised, against the ones that reached a model."
+      region="metrics-term-mapping"
+      // Full width, like the rejection breakdown: one meter row and a sentence
+      // squeezed into half a grid leaves an empty column beside it, and the
+      // sentence is the point — the ratio only means something once you know
+      // what the two numbers in it are.
+      className="lg:col-span-2"
+    >
+      <MeterRow
+        label={
+          <>
+            Served from cache
+            <span className="text-muted-foreground"> instead of the model</span>
+          </>
+        }
+        count={cache.served_from_cache}
+        share={cache.hit_rate ?? 0}
+        barClass="bg-status-pass"
+        noun="resolution"
+      />
+      <p className="text-muted-foreground text-sm">
+        {formatCount(cache.resolutions, "resolution")} needed across every cohort screened;{" "}
+        {formatCount(cache.llm_pairs, "distinct pair")} went to a model. Mappings are resolved once
+        per screening, so this rate rises with cohort size rather than staying flat.
+      </p>
+    </Panel>
+  );
+}
+
+/**
  * Screenability across recent runs (#93) — and the phrasings that cost the most
  * of it, which is the point of aggregating it at all.
  *
@@ -473,14 +651,28 @@ function ColdStart({ since }: { since: string }) {
  * Where the numbers came from and what window they cover — the footer that makes
  * the page auditable rather than merely informative.
  */
-function Provenance({ since, exported }: { since: string; exported: boolean }) {
+function Provenance({
+  since,
+  exported,
+  estimatedPercentiles,
+}: {
+  since: string;
+  exported: boolean;
+  estimatedPercentiles: boolean;
+}) {
   return (
     <p className="text-muted-foreground text-sm" data-region="metrics-provenance">
       Counted in this instance since {formatTimestamp(since)}; the counters live in the serving
       process and reset when it restarts.{" "}
       {exported
-        ? "They are the same custom metrics /metrics exposes to Prometheus — Grafana has the history, trends and percentiles this page deliberately leaves out."
+        ? "They are the same custom metrics /metrics exposes to Prometheus — Grafana has the history and trends this page deliberately leaves out."
         : "Prometheus export is switched off on this instance (METRICS_ENABLED), so these counters are recorded but nothing is scraping them."}
+      {/* Said plainly rather than left to be assumed: a median read off bucket
+          boundaries is close, not exact, and a page that presented it as exact
+          would be making a claim about the API that isn't true. */}
+      {estimatedPercentiles
+        ? " Medians and 95th percentiles are estimated from histogram buckets rather than from every observation."
+        : ""}
     </p>
   );
 }
