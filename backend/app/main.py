@@ -862,6 +862,58 @@ async def download_report(
     )
 
 
+# What each export format is served as. The CSV type is `text/csv` with an
+# explicit charset — the BOM `services/export.py` writes tells Excel, and the
+# header tells everything else.
+_EXPORT_MEDIA_TYPES = {
+    "csv": "text/csv; charset=utf-8",
+    "json": "application/json; charset=utf-8",
+}
+
+
+@app.get("/api/screenings/{thread_id}/export")
+@limiter.limit(lambda: settings.rate_limit_read)
+async def download_cohort_export(
+    request: Request,
+    thread_id: str,
+    principal: Annotated[Principal, Depends(require_reviewer)],
+    format: Annotated[Literal["csv", "json"], Query()] = "csv",
+) -> Response:
+    """Download one run's evaluated cohort as CSV or JSON (#102).
+
+    The report route's sibling, and guarded at the same rung on purpose: this
+    carries the same patient data out of the app in a different wrapper, so a role
+    that may not read the report must not be able to read the cohort by asking for
+    it as a spreadsheet. `services/screening.get_screening_export` logs who took a
+    copy, which is what attributes the download in the audit index (#98).
+
+    The response headers do the same work they do on the report, for the same
+    reason: `attachment` keeps a document built from an uploaded protocol from
+    rendering as a page in our own origin, `nosniff` stops the declared type being
+    second-guessed (a CSV sniffed as HTML is exactly the hole the disposition
+    closes), and the CSP costs a reference-free file nothing.
+
+    `format` is a `Literal`, so an unknown value is a 422 from FastAPI's own
+    validation rather than a silent fallback to CSV — a client asking for a format
+    this build does not serve should be told, not handed a different file.
+    """
+    filename, body = await screening.get_screening_export(
+        _store(), _graph(), thread_id, format, principal
+    )
+    return Response(
+        content=body,
+        media_type=_EXPORT_MEDIA_TYPES[format],
+        headers={
+            # `export_filename` emits only [A-Za-z0-9._-] (it runs the stored name
+            # back through `sanitize_filename`), so the quoted form needs no
+            # further escaping and cannot inject a header.
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'",
+        },
+    )
+
+
 @app.get("/api/rules")
 @limiter.limit(lambda: settings.rate_limit_read)
 async def list_compliance_rules(

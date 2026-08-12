@@ -12,6 +12,7 @@ imports the graph builder directly.
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
@@ -29,6 +30,7 @@ from app.exceptions import (
     ScreenerError,
     ScreeningNotApprovableError,
     ScreeningNotEditableError,
+    ScreeningNotExportableError,
     ScreeningNotFoundError,
     ScreeningNotRejectableError,
     ScreeningNotReportableError,
@@ -39,10 +41,12 @@ from app.graph.state import ScreeningStatus, event, initial_state
 from app.logging_config import bind_contextvars, get_logger
 from app.services import (
     attrition,
+    checkpoint,
     cohort,
     comparison,
     coverage,
     criteria_edits,
+    export,
     metrics,
     metrics_summary,
     notifications,
@@ -80,6 +84,7 @@ __all__ = [
     "create_screening",
     "create_screening_batch",
     "get_metrics_summary",
+    "get_screening_export",
     "get_screening_protocol",
     "get_screening_report",
     "get_screening_state",
@@ -1090,3 +1095,48 @@ async def get_screening_report(
         )
     log.info("screening.report_exported", exported_by=exporter.email, exporter_role=exporter.role)
     return report.report_filename(payload), report.render_report(payload)
+
+
+async def get_screening_export(
+    store: ScreeningStore, graph: ScreeningGraph, thread_id: str, fmt: str, exporter: Principal
+) -> tuple[str, str]:
+    """One run's cohort as a machine-readable download (#102): `(filename, body)`.
+
+    The report's sibling, and deliberately the same shape of function: built from
+    `get_screening_state`'s payload rather than a second read of the checkpoint, so
+    the CSV a coordinator loads into a CTMS, the JSON an auditor reads and the HTML
+    report they were all exported from are three renderings of one snapshot. The
+    buckets in all three come from `services/cohort.py`.
+
+    Refused for the same run the report refuses — a screening uploaded but never
+    streamed, which is a 409 rather than an empty file. A run that parsed but never
+    matched is *allowed*: its export is the approved criteria with an empty cohort,
+    which is a true and useful statement about the run, where a 409 would tell a
+    script the run does not exist.
+
+    `exporter` is recorded in the log, not in the checkpoint — the same rule the
+    report follows, and for the same reason: this is a read, and a read that
+    amended the run it was reading would rewrite history on every download. The
+    line is what the org-wide audit index (#98) attributes the download from.
+    """
+    payload = await get_screening_state(store, graph, thread_id)
+    if not export.has_exportable_content(payload):
+        raise ScreeningNotExportableError(
+            "This screening has never run, so there is no cohort to export — stream it first."
+        )
+    log.info(
+        "screening.cohort_exported",
+        export_format=fmt,
+        exported_by=exporter.email,
+        exporter_role=exporter.role,
+        # How much patient data left the app, which is the figure that makes the
+        # line worth having — counted off the payload rather than the rendered
+        # body, which would mean parsing rows back out of a string.
+        patients=len(
+            checkpoint.rows(checkpoint.mapping(payload.get("values")), "matched_patients")
+        ),
+    )
+    filename = export.export_filename(payload, fmt)
+    if fmt == "json":
+        return filename, json.dumps(export.build_export(payload), indent=2, ensure_ascii=False)
+    return filename, export.render_csv(payload)

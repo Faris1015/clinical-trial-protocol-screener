@@ -12,6 +12,7 @@ import { CriteriaProvenance } from "@/components/provenance/criteria-provenance"
 import { PatientMatchTable } from "@/components/PatientMatchTable";
 import { GateCoverage } from "@/components/review/gate-coverage";
 import { RejectScreening } from "@/components/review/reject-screening";
+import { CohortExport } from "@/components/cohort-export";
 import { ReportDownload } from "@/components/report-download";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -308,13 +309,19 @@ export function ScreeningRun({ threadId }: { threadId: string | null }) {
         ) : null}
       </AnimatePresence>
 
-      {/* Offered here only once the run has finished (#56). The report is built
+      {/* Offered here only once the run has finished (#56, #102). Both are built
           server-side from the checkpoint, so exporting mid-run would hand a
           reviewer a document that omits whatever the pipeline wrote in the
           seconds after they clicked — and the run detail view is where a
           partially-completed run gets exported from, with its phase stated on the
-          page. */}
-      {threadId && phase === "done" && <ReportDownload threadId={threadId} />}
+          page. The cohort export needs a cohort on top of that: a finished run
+          that matched nobody has a report worth reading and no rows to load. */}
+      {threadId && phase === "done" && (
+        <div className="flex flex-wrap items-center gap-3">
+          <ReportDownload threadId={threadId} />
+          {matches.length > 0 && <CohortExport threadId={threadId} size="lg" />}
+        </div>
+      )}
     </div>
   );
 }
