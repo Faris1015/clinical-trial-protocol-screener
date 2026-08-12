@@ -53,6 +53,7 @@ from app.services import (
     notifications,
     provenance,
     report,
+    rules,
     simulation,
     sse,
     timeline,
@@ -71,7 +72,7 @@ if TYPE_CHECKING:
     from langgraph.checkpoint.base import BaseCheckpointSaver
     from langgraph.graph.state import CompiledStateGraph
 
-    from app.persistence import AuditStore, ScreeningStore
+    from app.persistence import AuditStore, RuleStore, ScreeningStore
 
 log = get_logger("screening")
 
@@ -576,20 +577,33 @@ async def get_metrics_summary(
 
 
 async def stream_screening(
-    store: ScreeningStore, audit_store: AuditStore, graph: ScreeningGraph, thread_id: str
+    store: ScreeningStore,
+    audit_store: AuditStore,
+    rule_store: RuleStore,
+    graph: ScreeningGraph,
+    thread_id: str,
 ) -> AsyncIterator[str]:
     """Validate the thread, then return an SSE frame iterator for the graph run.
 
     Validation happens eagerly (raising ScreeningNotFoundError before any frame
     is yielded) so an unknown thread_id becomes a 404 HTTP response, not an
     error buried mid-stream after the response headers are already sent.
+
+    The enabled compliance rules are read here and snapshotted into the run's
+    state (#97). This is the async side of the boundary — the Critic node is
+    synchronous and cannot query a table — and it is also where "the rules as of
+    when this run started" is a meaningful thing to capture. See
+    `ScreenerState.compliance_rules`.
     """
     config = await _require_thread(store, thread_id)
     bind_contextvars(thread_id=thread_id)
     screening_input = await store.get_input(thread_id)
     assert screening_input is not None  # exists() just passed
-    log.info("screening.stream_started")
-    state = initial_state(screening_input.raw_protocol_text, screening_input.source_filename)
+    active = await rules.active_engine_rules(rule_store)
+    log.info("screening.stream_started", compliance_rules=len(active))
+    state = initial_state(
+        screening_input.raw_protocol_text, screening_input.source_filename, active
+    )
     return _graph_frames(
         store,
         audit_store,
@@ -883,6 +897,7 @@ def _stale_cohort(values: dict[str, Any]) -> dict[str, Any]:
 async def resume_with_edited_criteria(
     store: ScreeningStore,
     audit_store: AuditStore,
+    rule_store: RuleStore,
     graph: ScreeningGraph,
     thread_id: str,
     *,
@@ -958,6 +973,12 @@ async def resume_with_edited_criteria(
             # fed to the Parser as objections to criteria a human already fixed.
             "compliance_passed": False,
             "critic_feedback": None,
+            # Re-snapshotted rather than reused from the checkpoint (#97): a
+            # re-run is a fresh judgement, and the rule an admin has since fixed
+            # or retired is one a reviewer is often re-running *because of*.
+            # Within the re-run's own parse→critic loop this stays fixed, which is
+            # the property `ScreenerState.compliance_rules` exists to give.
+            "compliance_rules": await rules.active_engine_rules(rule_store),
             "current_step": "critiquing",
             "events": [
                 event(

@@ -14,6 +14,12 @@ Three things must survive a restart, crash, or deploy:
    screening has one status and many decisions, and the org-wide question an
    auditor asks — *what did this person do last quarter* — is not a question
    about any one run.
+4. **The compliance rules** — the Critic's deterministic layer, authored by
+   admins rather than baked into the image (#97). ``app/rules/compliance_rules.yaml``
+   seeds the table on first boot and stays in the repo as the documented default
+   set; from then on this table is what the engine runs. A rule is retired by
+   flipping ``enabled``, never by deleting the row: a finding cites a rule id
+   forever, and a deleted rule would leave every past finding unresolvable.
 
 All three live in the *same* database, selected by ``CHECKPOINT_BACKEND``:
 
@@ -22,16 +28,17 @@ All three live in the *same* database, selected by ``CHECKPOINT_BACKEND``:
 - ``postgres`` — multi-replica production target (deps in the ``postgres`` extra).
 
 Route handlers never touch SQL: they call the ``ScreeningStore`` /
-``AuditStore`` repositories. Nothing here is constructed at import —
-``AsyncSqliteSaver`` captures the running loop in its constructor, so everything
-is built inside ``open_persistence`` from the app's lifespan.
+``AuditStore`` / ``RuleStore`` repositories. Nothing here is constructed at
+import — ``AsyncSqliteSaver`` captures the running loop in its constructor, so
+everything is built inside ``open_persistence`` from the app's lifespan.
 """
 
 from __future__ import annotations
 
+import json
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -601,6 +608,13 @@ class PostgresScreeningStore(ScreeningStore):
 
 # --- The decision index (#98) -----------------------------------------------
 
+# What an audit entry is about. A run for every decision the index carried at
+# first (#98); a compliance rule for the authoring actions (#97). Closed, and
+# defaulted to the run so a row written before the column existed reads as what
+# it actually was rather than as an unknown kind.
+SUBJECT_SCREENING = "screening"
+SUBJECT_RULE = "rule"
+
 
 @dataclass(frozen=True)
 class AuditDecision:
@@ -622,6 +636,15 @@ class AuditDecision:
     ``source_filename`` is denormalized from the screening row so the index reads
     without a join: an auditor's first scan is by protocol name, and the row it
     would join against can be deleted while the decision must not be.
+
+    ``subject_kind``/``subject_id`` are what the entry is *about* (#97). Every
+    decision this index carried at first was about a run, so ``thread_id`` was
+    the whole answer; authoring a compliance rule is a decision about no run at
+    all. Rather than overload ``thread_id`` — a column named for one thing,
+    quietly holding another, that every existing filter and link already trusts —
+    the subject is named outright. ``thread_id`` stays as the run filter the API
+    exposes, and ``subject_id`` mirrors it for a screening entry so one column
+    answers "what was this about" for every row.
     """
 
     thread_id: str
@@ -632,6 +655,8 @@ class AuditDecision:
     detail: str
     revision: int = 0
     source_filename: str = ""
+    subject_kind: str = SUBJECT_SCREENING
+    subject_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -724,11 +749,13 @@ def _audit_filters(filters: AuditFilter, placeholder: str) -> tuple[str, list[st
 _AUDIT_ORDER = " ORDER BY occurred_at DESC, id DESC"
 
 _AUDIT_COLUMNS = (
-    "id, thread_id, action, actor, actor_role, occurred_at, detail, revision, source_filename"
+    "id, thread_id, action, actor, actor_role, occurred_at, detail, revision, source_filename, "
+    "subject_kind, subject_id"
 )
 
 _INSERT_AUDIT_COLUMNS = (
-    "thread_id, action, actor, actor_role, occurred_at, detail, revision, source_filename"
+    "thread_id, action, actor, actor_role, occurred_at, detail, revision, source_filename, "
+    "subject_kind, subject_id"
 )
 
 # The `id` column is the one piece of DDL the two engines spell differently.
@@ -742,9 +769,30 @@ CREATE TABLE IF NOT EXISTS audit_events (
     occurred_at     TEXT NOT NULL,
     detail          TEXT NOT NULL,
     revision        INTEGER NOT NULL DEFAULT 0,
-    source_filename TEXT NOT NULL DEFAULT ''
+    source_filename TEXT NOT NULL DEFAULT '',
+    subject_kind    TEXT NOT NULL DEFAULT 'screening',
+    subject_id      TEXT NOT NULL DEFAULT ''
 )
 """
+
+# Added after the index first shipped (#98 → #97), the same way `_ADDED_COLUMNS`
+# extends the screenings table. The defaults are what make the migration total:
+# every existing row is a decision about a run, which is exactly what
+# `'screening'` says.
+_ADDED_AUDIT_COLUMNS = (
+    ("subject_kind", "TEXT NOT NULL DEFAULT 'screening'"),
+    ("subject_id", "TEXT NOT NULL DEFAULT ''"),
+)
+
+# Backfill for rows written before `subject_id` existed: their subject is the run
+# they name. Runs once in effect — after it, no row matches the WHERE — so it is
+# safe to re-issue on every startup, which is what makes it idempotent without a
+# migration-version table. Scoped to `screening` rows so it can never touch a
+# rule entry whose `thread_id` is deliberately empty.
+_BACKFILL_AUDIT_SUBJECT = (
+    "UPDATE audit_events SET subject_id = thread_id "
+    f"WHERE subject_id = '' AND subject_kind = '{SUBJECT_SCREENING}' AND thread_id <> ''"
+)
 
 # One index per way the page is asked for. The first is the default ordering and
 # every unfiltered page view; the other two are the filters an auditor actually
@@ -770,6 +818,8 @@ def _audit_record(row: Sequence[Any]) -> AuditRecord:
         detail=row[6],
         revision=row[7],
         source_filename=row[8],
+        subject_kind=row[9],
+        subject_id=row[10],
     )
 
 
@@ -784,6 +834,11 @@ def _audit_values(decision: AuditDecision) -> tuple[Any, ...]:
         decision.detail,
         decision.revision,
         decision.source_filename,
+        decision.subject_kind,
+        # Defaulted from `thread_id` rather than required at every call site: a
+        # decision about a run already names it, and making the two disagree
+        # should not be something a caller can do by forgetting an argument.
+        decision.subject_id or decision.thread_id,
     )
 
 
@@ -799,7 +854,16 @@ class InMemoryAuditStore(AuditStore):
     async def record(self, decision: AuditDecision) -> None:
         # `len + 1` reproduces the SQL stores' 1-based autoincrement, so a test
         # asserting on ids reads the same on either backend.
-        self._rows.append(AuditRecord(**vars(decision), id=len(self._rows) + 1))
+        # A *copy* of the fields: `vars()` hands back the instance's own __dict__,
+        # and assigning into it would reach through the frozen dataclass and edit
+        # the caller's decision — a store that silently rewrites what it was
+        # handed is the last place that should happen.
+        fields = {**vars(decision)}
+        # The same default `_audit_values` applies, applied here too rather than
+        # only in SQL — a store that disagreed with its twin about what was
+        # written would make the in-memory backend useless for testing the rest.
+        fields["subject_id"] = decision.subject_id or decision.thread_id
+        self._rows.append(AuditRecord(**fields, id=len(self._rows) + 1))
 
     async def list(
         self, *, limit: int, offset: int, filters: AuditFilter | None = None
@@ -838,13 +902,23 @@ class SqliteAuditStore(AuditStore):
 
     async def setup(self) -> None:
         await self._conn.execute(_CREATE_AUDIT_TABLE.format(pk="INTEGER PRIMARY KEY AUTOINCREMENT"))
+        # sqlite has no ADD COLUMN IF NOT EXISTS — same introspection the
+        # screenings table needs, for the same upgrade-in-place reason.
+        async with self._conn.execute("PRAGMA table_info(audit_events)") as cur:
+            existing = {row[1] for row in await cur.fetchall()}
+        for column, ddl in _ADDED_AUDIT_COLUMNS:
+            if column not in existing:
+                await self._conn.execute(f"ALTER TABLE audit_events ADD COLUMN {column} {ddl}")
+                log.info("persistence.column_added", table="audit_events", column=column)
+        await self._conn.execute(_BACKFILL_AUDIT_SUBJECT)
         for statement in _CREATE_AUDIT_INDEXES:
             await self._conn.execute(statement)
         await self._conn.commit()
 
     async def record(self, decision: AuditDecision) -> None:
         await self._conn.execute(
-            f"INSERT INTO audit_events ({_INSERT_AUDIT_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            f"INSERT INTO audit_events ({_INSERT_AUDIT_COLUMNS}) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             _audit_values(decision),
         )
         await self._conn.commit()
@@ -873,6 +947,11 @@ class PostgresAuditStore(AuditStore):
 
     async def setup(self) -> None:
         await self._conn.execute(_CREATE_AUDIT_TABLE.format(pk="BIGSERIAL PRIMARY KEY"))
+        for column, ddl in _ADDED_AUDIT_COLUMNS:
+            await self._conn.execute(
+                f"ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS {column} {ddl}"
+            )
+        await self._conn.execute(_BACKFILL_AUDIT_SUBJECT)
         for statement in _CREATE_AUDIT_INDEXES:
             await self._conn.execute(statement)
         await self._conn.commit()
@@ -880,7 +959,7 @@ class PostgresAuditStore(AuditStore):
     async def record(self, decision: AuditDecision) -> None:
         await self._conn.execute(
             f"INSERT INTO audit_events ({_INSERT_AUDIT_COLUMNS}) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             _audit_values(decision),
         )
         await self._conn.commit()
@@ -900,12 +979,435 @@ class PostgresAuditStore(AuditStore):
         return AuditPage(items=[_audit_record(r) for r in rows], total=total)
 
 
+# --- The rules table (#97) --------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RuleRecord:
+    """One authored rule of the Critic's deterministic layer.
+
+    The stored shape of what ``app/rules/compliance_rules.yaml`` holds, plus the
+    four attribution columns and the ``enabled`` flag the file has no room for.
+    The contract a rule keeps is the one the engine already reads (``id``,
+    ``check``, ``description``, optional ``plain``, plus whatever the check kind
+    requires) — see ``services/rules.py`` for the validation that enforces it.
+
+    **``params`` rather than a column per threshold.** ``range`` needs two bounds,
+    ``keyword_implies_criterion`` needs a category, and the other two kinds need
+    neither. A column each would be four mostly-NULL columns whose meaning depends
+    on another column's value, and every new check kind would be a migration. The
+    check kind decides what belongs in here and ``services/rules.validate`` is the
+    one place that knows the mapping.
+
+    **``position`` keeps file order.** The seed file groups rules by clinical
+    domain and comments each group, which is the order the person maintaining them
+    thinks in; sorting by id would scatter it. New rules append.
+
+    ``enabled`` is the soft retirement the issue asks for: a disabled rule stops
+    firing but keeps its row, so a finding that cites it still resolves and the
+    viewer can render it as retired rather than as a broken link.
+    """
+
+    id: str
+    check: str
+    description: str
+    position: int = 0
+    attribute: str = ""
+    plain: str = ""
+    keywords: list[str] = field(default_factory=list)
+    params: dict[str, Any] = field(default_factory=dict)
+    enabled: bool = True
+    created_by: str = ""
+    created_at: str = ""
+    updated_by: str = ""
+    updated_at: str = ""
+
+    def as_engine_rule(self) -> dict[str, Any]:
+        """The row in the shape ``run_deterministic_checks`` reads.
+
+        Flattening ``params`` back to top-level keys is what lets the engine, the
+        seed file and the API all speak one vocabulary: the YAML the repo ships
+        and the dict the engine iterates are the same document, so a rule authored
+        through the API and one read from the file are indistinguishable by the
+        time they reach the check.
+        """
+        return {
+            "id": self.id,
+            "attribute": self.attribute,
+            "check": self.check,
+            "description": self.description,
+            "plain": self.plain,
+            "keywords": list(self.keywords),
+            **self.params,
+        }
+
+
+class RuleStore(ABC):
+    """Thin async repository for the authored rules. No ORM."""
+
+    @abstractmethod
+    async def setup(self) -> None:
+        """Create the table if absent. Idempotent."""
+
+    @abstractmethod
+    async def seed(self, records: Sequence[RuleRecord]) -> int:
+        """Insert `records` only if the table is empty; return how many landed.
+
+        The whole of "the YAML seeds the table on first boot, and the DB is the
+        source of truth thereafter": once a single row exists this is a no-op, so
+        an admin's edits are never silently reverted by a redeploy.
+
+        The emptiness check and the inserts are not one transaction, and on the
+        multi-replica target they are not even one process: replicas boot
+        together, so two can both find the table empty and both start inserting.
+        Every implementation therefore ignores a row whose id is already present,
+        which makes a lost race a no-op rather than an IntegrityError that takes
+        down the second replica's startup. The return value is what was
+        *attempted*, not what won the race — it feeds a log line, not a decision.
+        """
+
+    @abstractmethod
+    async def list(self, *, include_disabled: bool = True) -> list[RuleRecord]:
+        """Every rule in `position` order — the engine asks for enabled only."""
+
+    @abstractmethod
+    async def get(self, rule_id: str) -> RuleRecord | None:
+        """One rule by id, enabled or not."""
+
+    @abstractmethod
+    async def add(self, record: RuleRecord) -> None:
+        """Insert one authored rule. The caller has already checked the id is free."""
+
+    @abstractmethod
+    async def replace(self, record: RuleRecord) -> None:
+        """Overwrite one rule's authored fields, keeping its id and creation stamps."""
+
+    @abstractmethod
+    async def set_enabled(self, rule_id: str, enabled: bool, actor: str, at: str) -> None:
+        """Retire or restore a rule, recording who and when."""
+
+    @abstractmethod
+    async def next_position(self) -> int:
+        """Where a newly authored rule sorts: after everything already there."""
+
+
+_CREATE_RULES_TABLE = """
+CREATE TABLE IF NOT EXISTS compliance_rules (
+    id          TEXT PRIMARY KEY,
+    position    INTEGER NOT NULL DEFAULT 0,
+    attribute   TEXT NOT NULL DEFAULT '',
+    check_kind  TEXT NOT NULL,
+    description TEXT NOT NULL,
+    plain       TEXT NOT NULL DEFAULT '',
+    keywords    TEXT NOT NULL DEFAULT '[]',
+    params      TEXT NOT NULL DEFAULT '{}',
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    created_by  TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL DEFAULT '',
+    updated_by  TEXT NOT NULL DEFAULT '',
+    updated_at  TEXT NOT NULL DEFAULT ''
+)
+"""
+
+# `check` is a reserved word in SQL (the column constraint), so the column is
+# `check_kind` while every other layer — the YAML, the engine, the API payload —
+# says `check`. The translation lives here and nowhere else.
+_RULE_COLUMNS = (
+    "id, position, attribute, check_kind, description, plain, keywords, params, enabled, "
+    "created_by, created_at, updated_by, updated_at"
+)
+
+_RULE_ORDER = " ORDER BY position, id"
+
+
+def _rule_record(row: Sequence[Any]) -> RuleRecord:
+    """One `_RULE_COLUMNS` row → a record. Shared by both SQL stores.
+
+    `keywords`/`params` are stored as JSON text rather than in a JSON column type:
+    sqlite has none, and the two engines' JSON types differ enough that one
+    encoding in the application is simpler than two in the schema. A row whose
+    JSON is unreadable degrades to empty rather than raising — the same tolerance
+    `services/rules._text` applies to the file, and for the same reason: an
+    operator who hand-edited the database must still be able to load the page that
+    shows them what they broke.
+    """
+    return RuleRecord(
+        id=row[0],
+        position=row[1],
+        attribute=row[2],
+        check=row[3],
+        description=row[4],
+        plain=row[5],
+        keywords=_json_list(row[6]),
+        params=_json_dict(row[7]),
+        enabled=bool(row[8]),
+        created_by=row[9],
+        created_at=row[10],
+        updated_by=row[11],
+        updated_at=row[12],
+    )
+
+
+def _json_list(raw: Any) -> list[str]:
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else raw
+    except (ValueError, TypeError):
+        return []
+    return [str(item) for item in value] if isinstance(value, list) else []
+
+
+def _json_dict(raw: Any) -> dict[str, Any]:
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else raw
+    except (ValueError, TypeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _rule_values(record: RuleRecord) -> tuple[Any, ...]:
+    """The insert parameters for one rule, in `_RULE_COLUMNS` order."""
+    return (
+        record.id,
+        record.position,
+        record.attribute,
+        record.check,
+        record.description,
+        record.plain,
+        json.dumps(record.keywords),
+        json.dumps(record.params),
+        int(record.enabled),
+        record.created_by,
+        record.created_at,
+        record.updated_by,
+        record.updated_at,
+    )
+
+
+# The authored fields an update overwrites. Deliberately excludes `id`,
+# `position`, `created_by` and `created_at`: an edit revises a rule, it does not
+# re-create one, and rewriting who first authored it would be a lie the audit log
+# could not catch.
+_RULE_UPDATE_SET = (
+    "attribute = {p}, check_kind = {p}, description = {p}, plain = {p}, keywords = {p}, "
+    "params = {p}, enabled = {p}, updated_by = {p}, updated_at = {p}"
+)
+
+
+def _rule_update_values(record: RuleRecord) -> tuple[Any, ...]:
+    """Parameters for `_RULE_UPDATE_SET`, then the id for the WHERE."""
+    return (
+        record.attribute,
+        record.check,
+        record.description,
+        record.plain,
+        json.dumps(record.keywords),
+        json.dumps(record.params),
+        int(record.enabled),
+        record.updated_by,
+        record.updated_at,
+        record.id,
+    )
+
+
+class InMemoryRuleStore(RuleStore):
+    """Dict-backed rules for tests — no durability, no I/O."""
+
+    def __init__(self) -> None:
+        self._rows: dict[str, RuleRecord] = {}
+
+    async def setup(self) -> None:
+        return None
+
+    async def seed(self, records: Sequence[RuleRecord]) -> int:
+        if self._rows:
+            return 0
+        # `setdefault`, mirroring the SQL stores' ignore-on-conflict: a duplicate
+        # id within one seed set keeps the first, rather than the last silently
+        # winning.
+        for record in records:
+            self._rows.setdefault(record.id, record)
+        return len(records)
+
+    async def list(self, *, include_disabled: bool = True) -> list[RuleRecord]:
+        rows = [r for r in self._rows.values() if include_disabled or r.enabled]
+        return sorted(rows, key=lambda r: (r.position, r.id))
+
+    async def get(self, rule_id: str) -> RuleRecord | None:
+        return self._rows.get(rule_id)
+
+    async def add(self, record: RuleRecord) -> None:
+        self._rows[record.id] = record
+
+    async def replace(self, record: RuleRecord) -> None:
+        existing = self._rows[record.id]
+        # Mirrors `_RULE_UPDATE_SET`: the immutable four survive the write.
+        self._rows[record.id] = RuleRecord(
+            **{
+                **vars(record),
+                "position": existing.position,
+                "created_by": existing.created_by,
+                "created_at": existing.created_at,
+            }
+        )
+
+    async def set_enabled(self, rule_id: str, enabled: bool, actor: str, at: str) -> None:
+        existing = self._rows[rule_id]
+        self._rows[rule_id] = RuleRecord(
+            **{**vars(existing), "enabled": enabled, "updated_by": actor, "updated_at": at}
+        )
+
+    async def next_position(self) -> int:
+        return max((r.position for r in self._rows.values()), default=-1) + 1
+
+
+class SqliteRuleStore(RuleStore):
+    """aiosqlite-backed rules, sharing the store's autocommit connection."""
+
+    def __init__(self, conn: aiosqlite.Connection) -> None:
+        self._conn = conn
+
+    async def setup(self) -> None:
+        await self._conn.execute(_CREATE_RULES_TABLE)
+        await self._conn.commit()
+
+    async def seed(self, records: Sequence[RuleRecord]) -> int:
+        async with self._conn.execute("SELECT COUNT(*) FROM compliance_rules") as cur:
+            row = await cur.fetchone()
+        if row and row[0]:
+            return 0
+        for record in records:
+            # OR IGNORE: another replica may have seeded between the count above
+            # and this insert — see `RuleStore.seed`.
+            await self._conn.execute(
+                f"INSERT OR IGNORE INTO compliance_rules ({_RULE_COLUMNS}) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                _rule_values(record),
+            )
+        await self._conn.commit()
+        return len(records)
+
+    async def list(self, *, include_disabled: bool = True) -> list[RuleRecord]:
+        where = "" if include_disabled else " WHERE enabled = 1"
+        async with self._conn.execute(
+            f"SELECT {_RULE_COLUMNS} FROM compliance_rules{where}{_RULE_ORDER}"
+        ) as cur:
+            rows = await cur.fetchall()
+        return [_rule_record(row) for row in rows]
+
+    async def get(self, rule_id: str) -> RuleRecord | None:
+        async with self._conn.execute(
+            f"SELECT {_RULE_COLUMNS} FROM compliance_rules WHERE id = ?", (rule_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        return _rule_record(row) if row else None
+
+    async def add(self, record: RuleRecord) -> None:
+        await self._conn.execute(
+            f"INSERT INTO compliance_rules ({_RULE_COLUMNS}) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            _rule_values(record),
+        )
+        await self._conn.commit()
+
+    async def replace(self, record: RuleRecord) -> None:
+        await self._conn.execute(
+            f"UPDATE compliance_rules SET {_RULE_UPDATE_SET.format(p='?')} WHERE id = ?",
+            _rule_update_values(record),
+        )
+        await self._conn.commit()
+
+    async def set_enabled(self, rule_id: str, enabled: bool, actor: str, at: str) -> None:
+        await self._conn.execute(
+            "UPDATE compliance_rules SET enabled = ?, updated_by = ?, updated_at = ? WHERE id = ?",
+            (int(enabled), actor, at, rule_id),
+        )
+        await self._conn.commit()
+
+    async def next_position(self) -> int:
+        async with self._conn.execute("SELECT MAX(position) FROM compliance_rules") as cur:
+            row = await cur.fetchone()
+        return (row[0] + 1) if row and row[0] is not None else 0
+
+
+class PostgresRuleStore(RuleStore):
+    """psycopg-backed rules for production. Same schema, ``%s`` placeholders."""
+
+    def __init__(self, conn: AsyncConnection) -> None:
+        self._conn = conn
+
+    async def setup(self) -> None:
+        await self._conn.execute(_CREATE_RULES_TABLE)
+        await self._conn.commit()
+
+    async def seed(self, records: Sequence[RuleRecord]) -> int:
+        cur = await self._conn.execute("SELECT COUNT(*) FROM compliance_rules")
+        row = await cur.fetchone()
+        if row and row[0]:
+            return 0
+        for record in records:
+            # ON CONFLICT DO NOTHING is postgres's spelling of the sqlite store's
+            # OR IGNORE — the replicas-boot-together race, see `RuleStore.seed`.
+            await self._conn.execute(
+                f"INSERT INTO compliance_rules ({_RULE_COLUMNS}) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT (id) DO NOTHING",
+                _rule_values(record),
+            )
+        await self._conn.commit()
+        return len(records)
+
+    async def list(self, *, include_disabled: bool = True) -> list[RuleRecord]:
+        where = "" if include_disabled else " WHERE enabled = 1"
+        cur = await self._conn.execute(
+            f"SELECT {_RULE_COLUMNS} FROM compliance_rules{where}{_RULE_ORDER}"
+        )
+        return [_rule_record(row) for row in await cur.fetchall()]
+
+    async def get(self, rule_id: str) -> RuleRecord | None:
+        cur = await self._conn.execute(
+            f"SELECT {_RULE_COLUMNS} FROM compliance_rules WHERE id = %s", (rule_id,)
+        )
+        row = await cur.fetchone()
+        return _rule_record(row) if row else None
+
+    async def add(self, record: RuleRecord) -> None:
+        await self._conn.execute(
+            f"INSERT INTO compliance_rules ({_RULE_COLUMNS}) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            _rule_values(record),
+        )
+        await self._conn.commit()
+
+    async def replace(self, record: RuleRecord) -> None:
+        await self._conn.execute(
+            f"UPDATE compliance_rules SET {_RULE_UPDATE_SET.format(p='%s')} WHERE id = %s",
+            _rule_update_values(record),
+        )
+        await self._conn.commit()
+
+    async def set_enabled(self, rule_id: str, enabled: bool, actor: str, at: str) -> None:
+        await self._conn.execute(
+            "UPDATE compliance_rules SET enabled = %s, updated_by = %s, updated_at = %s "
+            "WHERE id = %s",
+            # `int`, not the bool: the column is INTEGER on both engines (sqlite
+            # has no boolean), and psycopg would otherwise adapt a Python bool to
+            # postgres `boolean` and fail the assignment.
+            (int(enabled), actor, at, rule_id),
+        )
+        await self._conn.commit()
+
+    async def next_position(self) -> int:
+        cur = await self._conn.execute("SELECT MAX(position) FROM compliance_rules")
+        row = await cur.fetchone()
+        return (row[0] + 1) if row and row[0] is not None else 0
+
+
 # --- Lifecycle --------------------------------------------------------------
 
 
 @dataclass
 class Persistence:
-    """Bundles the checkpointer and both stores with their lifecycle.
+    """Bundles the checkpointer and every store with their lifecycle.
 
     Built once per process in the app lifespan; ``aclose`` releases every
     connection on shutdown.
@@ -915,6 +1417,7 @@ class Persistence:
     checkpointer: BaseCheckpointSaver
     store: ScreeningStore
     audit: AuditStore
+    rules: RuleStore
     _closers: list[Callable[[], Awaitable[None]]]
 
     async def aclose(self) -> None:
@@ -923,7 +1426,7 @@ class Persistence:
 
 
 async def open_persistence(settings: Settings) -> Persistence:
-    """Open connections, create tables, and wire up checkpointer + store."""
+    """Open connections, create tables, and wire up checkpointer + stores."""
     backend = settings.checkpoint_backend
     log.info("persistence.opening", backend=backend)
 
@@ -931,9 +1434,11 @@ async def open_persistence(settings: Settings) -> Persistence:
         checkpointer: BaseCheckpointSaver = MemorySaver()
         store: ScreeningStore = InMemoryScreeningStore()
         audit: AuditStore = InMemoryAuditStore()
+        rules: RuleStore = InMemoryRuleStore()
         await store.setup()
         await audit.setup()
-        return Persistence(backend, checkpointer, store, audit, [])
+        await rules.setup()
+        return Persistence(backend, checkpointer, store, audit, rules, [])
 
     if backend == "sqlite":
         return await _open_sqlite(settings)
@@ -983,8 +1488,12 @@ async def _open_sqlite(settings: Settings) -> Persistence:
     # of writers rather than one too few.
     audit = SqliteAuditStore(store_conn)
     await audit.setup()
+    rules = SqliteRuleStore(store_conn)
+    await rules.setup()
 
-    return Persistence("sqlite", checkpointer, store, audit, [saver_conn.close, store_conn.close])
+    return Persistence(
+        "sqlite", checkpointer, store, audit, rules, [saver_conn.close, store_conn.close]
+    )
 
 
 async def _open_postgres(settings: Settings) -> Persistence:
@@ -999,11 +1508,26 @@ async def _open_postgres(settings: Settings) -> Persistence:
     saver_conn = await AsyncConnection.connect(dsn, autocommit=True)
     store_conn = await AsyncConnection.connect(dsn, autocommit=True)
 
-    checkpointer = AsyncPostgresSaver(saver_conn)
+    # The ignore is narrow and load-bearing to explain: `AsyncPostgresSaver` is
+    # annotated for an `AsyncConnection[dict[str, Any]]` — a connection opened
+    # with `row_factory=dict_row` — and this one yields tuples. The saver sets the
+    # row factory it needs on its own cursors, so the annotation is stricter than
+    # the runtime contract; a full screening was driven through the graph against
+    # postgres:16 on exactly this connection and the checkpoint round-tripped.
+    #
+    # `unused-ignore` rides along because the `postgres` extra is optional: with
+    # psycopg installed (CI, #97) the arg-type ignore is required, and without it
+    # mypy infers `Any` here and would flag the ignore itself as unused. Naming
+    # both codes is what keeps one annotation correct in both installations.
+    checkpointer = AsyncPostgresSaver(saver_conn)  # type: ignore[arg-type, unused-ignore]
     await checkpointer.setup()
     store = PostgresScreeningStore(store_conn)
     await store.setup()
     audit = PostgresAuditStore(store_conn)
     await audit.setup()
+    rules = PostgresRuleStore(store_conn)
+    await rules.setup()
 
-    return Persistence("postgres", checkpointer, store, audit, [saver_conn.close, store_conn.close])
+    return Persistence(
+        "postgres", checkpointer, store, audit, rules, [saver_conn.close, store_conn.close]
+    )

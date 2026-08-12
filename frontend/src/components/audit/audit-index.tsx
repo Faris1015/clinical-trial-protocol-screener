@@ -18,7 +18,14 @@ import {
 import { AuditExport } from "@/components/audit/audit-export";
 import { useAuth } from "@/components/AuthProvider";
 import { apiFetch, problemDetail } from "@/lib/api";
-import { actionLabel, actionVariant, actionsFor, dayBound, decisionHref } from "@/lib/audit";
+import {
+  actionLabel,
+  actionVariant,
+  actionsFor,
+  dayBound,
+  decisionHref,
+  decisionSubject,
+} from "@/lib/audit";
 import { FIELD } from "@/lib/field";
 import { formatTimestamp } from "@/lib/runs";
 import type { AuditAction, AuditEntry, AuditPage } from "@/types";
@@ -268,7 +275,11 @@ export function AuditIndex() {
                     <TableHead>When</TableHead>
                     <TableHead>Decision</TableHead>
                     <TableHead>Who</TableHead>
-                    <TableHead>Run</TableHead>
+                    {/* Not "Run": since #97 a decision can be about a compliance
+                        rule instead, and a column headed "Run" over a rule id
+                        would read as a mislabelled cell rather than a second
+                        kind of subject. */}
+                    <TableHead>Subject</TableHead>
                     <TableHead>Detail</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -350,15 +361,19 @@ function AuditRow({ entry }: { entry: AuditEntry }) {
           </>
         )}
       </TableCell>
+      {/* What the decision was about. A run names the protocol it screened; a
+          rule mutation (#97) names the rule, and links to it on the rules page —
+          a rule entry has no run, and pointing one at `/runs/` would be a 404
+          dressed as a link. */}
       <TableCell>
         <Link
-          href={decisionHref(entry.thread_id, entry.revision)}
+          href={decisionHref(entry)}
           className="hover:text-primary font-medium underline-offset-4 hover:underline"
         >
-          {entry.source_filename || "Screening"}
+          {entry.subject_kind === "rule" ? "Compliance rule" : entry.source_filename || "Screening"}
         </Link>
         <span className="text-muted-foreground block font-mono text-xs break-all">
-          {entry.thread_id}
+          {decisionSubject(entry)}
         </span>
       </TableCell>
       {/* The one column that wraps: a rejection carries the reviewer's whole

@@ -517,13 +517,62 @@ export type ComplianceRule = {
   /** Protocol words that bring the rule into play; empty when it always runs. */
   keywords: string[];
   layer: "deterministic" | "semantic";
+  /**
+   * False for a retired rule (#97). Retirement is soft: the rule stops firing but
+   * stays listed, because a finding from a past run still cites its id.
+   */
+  enabled: boolean;
+  /**
+   * Whether an admin may author this row. False for the semantic layer, which is
+   * described here but is not a rule anyone can edit or switch off. Carried rather
+   * than derived from `layer` so a component never decides for itself which rows
+   * get an edit button.
+   */
+  editable: boolean;
+  created_by: string;
+  created_at: string;
+  updated_by: string;
+  updated_at: string;
+  /** `range` bounds, present only on a rule of that check kind. */
+  min_plausible?: number;
+  max_plausible?: number;
+  /** `keyword_implies_criterion`'s target category. */
+  required_category?: string;
 };
 
-/** `GET /api/rules` — every rule the Critic checks against, in file order (#57). */
+/** The check kinds the deterministic engine implements, and so the ones an admin may author. */
+export type CheckKind =
+  "range" | "must_be_quantitative" | "required_attribute" | "keyword_implies_criterion";
+
+/**
+ * The rule editor's form state (#97).
+ *
+ * Every field is a string, including the numeric bounds — see `lib/rules.ruleForm`
+ * for why that is the right shape for a form rather than a lossy one.
+ */
+export type RuleForm = {
+  id: string;
+  check: CheckKind;
+  attribute: string;
+  description: string;
+  plain: string;
+  /** Comma-separated in the input; split on submit. */
+  keywords: string;
+  min_plausible: string;
+  max_plausible: string;
+  required_category: string;
+};
+
+/** `GET /api/rules` — every rule the Critic checks against, in table order (#57, #97). */
 export type RulesPayload = {
   rules: ComplianceRule[];
-  /** The rules file this instance is actually running, by name. */
+  /**
+   * The file the rules table was *seeded* from, by name. Not what the instance
+   * runs — since first boot that is the table itself (#97).
+   */
   source: string;
+  /** How many rules the engine will actually run on the next screening. */
+  active: number;
 };
 
 /**
@@ -915,10 +964,28 @@ export type AuditEntry = {
   detail: string;
   revision: number;
   source_filename: string;
+  /**
+   * What the decision was about (#97). A run for the four gate decisions, a
+   * compliance rule for the authoring ones — which is what lets the table build
+   * the right deep link without inferring the subject from the action name.
+   */
+  subject_kind: AuditSubjectKind | string;
+  subject_id: string;
 };
 
 /** The decisions the index carries. A future action still renders — see `lib/audit`. */
-export type AuditAction = "approved" | "rejected" | "criteria_revised" | "escalated";
+export type AuditAction =
+  | "approved"
+  | "rejected"
+  | "criteria_revised"
+  | "escalated"
+  | "rule_created"
+  | "rule_updated"
+  | "rule_disabled"
+  | "rule_enabled";
+
+/** What an entry points at. */
+export type AuditSubjectKind = "screening" | "rule";
 
 /**
  * `GET /api/audit` — one page of the index plus the filter that was applied.

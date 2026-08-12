@@ -88,6 +88,20 @@ class ScreenerState(TypedDict):
     parse_attempts: int
     compliance_findings: list[dict]
 
+    # The deterministic rules this run is judged against (#97), snapshotted into
+    # the state when the run enters the graph and refreshed when a revised run
+    # re-enters it.
+    #
+    # In the state rather than read by the Critic node itself, because rules now
+    # live in a table (`persistence.RuleStore`) and the node is synchronous —
+    # there is no way for it to await a query. Passing them in is not merely the
+    # workaround, though, it is the better contract: the Critic's parse→critic
+    # loop can run several times, and a rule retired between two attempts of the
+    # *same run* would otherwise change the verdict halfway through. A snapshot
+    # makes one run one rule set, and puts the rules a run was judged by in its
+    # own checkpoint, where an auditor reading a year-old run can still see them.
+    compliance_rules: list[dict]
+
     # Plain-language layer (#52). `compliance_summary` is the Critic's verdict in
     # one sentence a non-technical reviewer can act on; each finding carries its
     # own `explanation` alongside the technical `message`. Distinct from
@@ -158,12 +172,23 @@ def event(agent: str, status: str, detail: str) -> AgentEvent:
     )
 
 
-def initial_state(raw_protocol_text: str, source_filename: str) -> ScreenerState:
+def initial_state(
+    raw_protocol_text: str,
+    source_filename: str,
+    compliance_rules: list[dict] | None = None,
+) -> ScreenerState:
     """Build the fresh state a screening starts from.
 
     The graph's first checkpoint is written from this when a run streams, so
     it is rebuilt from the durable store (not held in process memory) — a
     restart between upload and stream loses nothing.
+
+    `compliance_rules` is the enabled rule set as of the moment the run starts
+    (#97); `stream_screening` reads it from the rules table. It defaults to empty
+    rather than being required so a caller building a bare state — the fakes in
+    the test suite, chiefly — needs no rules table to do it. An empty set means
+    the deterministic layer finds nothing, which is the safe direction: the
+    semantic layer still runs and the run still stops at the human gate.
     """
     return ScreenerState(
         raw_protocol_text=raw_protocol_text,
@@ -173,6 +198,7 @@ def initial_state(raw_protocol_text: str, source_filename: str) -> ScreenerState
         critic_feedback=None,
         parse_attempts=0,
         compliance_findings=[],
+        compliance_rules=list(compliance_rules or []),
         compliance_summary="",
         approved_by=None,
         approved_by_role=None,

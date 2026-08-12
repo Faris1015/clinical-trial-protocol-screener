@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 
 import app.main as main
 from app.config import Settings
-from app.persistence import SqliteScreeningStore, open_persistence
+from app.persistence import AuditDecision, RuleRecord, SqliteScreeningStore, open_persistence
 from tests.auth_helpers import sign_in
 
 # A minimal protocol that clears the router's length + eligibility-marker gate.
@@ -430,3 +430,219 @@ def test_list_endpoint_rejects_out_of_range_and_unknown_filters(client):
 def test_no_module_level_thread_dict():
     # Acceptance criterion: no module-level mutable dict holds screening state.
     assert not hasattr(main, "THREADS")
+
+
+# --- the rules table, on sqlite (#97) ----------------------------------------
+
+
+async def test_sqlite_rules_survive_reopen(tmp_path):
+    """The point of moving the rules into the database at all: an admin's rule has
+    to still be there after a restart, and it has to come back with its bounds and
+    keywords intact rather than as the JSON text they are stored as."""
+    settings = _sqlite_settings(tmp_path)
+    p = await open_persistence(settings)
+    try:
+        await p.rules.add(
+            RuleRecord(
+                id="EGFR-001",
+                check="range",
+                description="eGFR outside plausible range",
+                attribute="egfr",
+                keywords=["renal", "kidney"],
+                params={"min_plausible": 5, "max_plausible": 150},
+                created_by="admin@test.local",
+            )
+        )
+    finally:
+        await p.aclose()
+
+    p = await open_persistence(settings)
+    try:
+        (rule,) = await p.rules.list()
+        assert rule.id == "EGFR-001"
+        assert rule.keywords == ["renal", "kidney"]
+        assert rule.params == {"min_plausible": 5, "max_plausible": 150}
+        assert rule.enabled is True
+        assert rule.created_by == "admin@test.local"
+    finally:
+        await p.aclose()
+
+
+async def test_sqlite_seed_only_fills_an_empty_table(tmp_path):
+    """A redeploy re-runs seeding, and must not revert an admin's work."""
+    settings = _sqlite_settings(tmp_path)
+    p = await open_persistence(settings)
+    try:
+        first = RuleRecord(id="A-001", check="required_attribute", description="a", attribute="age")
+        assert await p.rules.seed([first]) == 1
+        second = RuleRecord(
+            id="B-001", check="required_attribute", description="b", attribute="age"
+        )
+        assert await p.rules.seed([second]) == 0
+        assert [rule.id for rule in await p.rules.list()] == ["A-001"]
+    finally:
+        await p.aclose()
+
+
+async def test_sqlite_seeding_a_duplicate_id_is_ignored_rather_than_raising(tmp_path):
+    """`INSERT OR IGNORE`, sqlite's spelling of the conflict-ignoring insert the
+    postgres store gets from `ON CONFLICT DO NOTHING`. Same guarantee on both
+    engines: a repeated id in a hand-edited `RULES_PATH` file must not take down
+    startup, and the first one wins."""
+    p = await open_persistence(_sqlite_settings(tmp_path))
+    try:
+        written = await p.rules.seed(
+            [
+                RuleRecord(
+                    id="A-001", check="required_attribute", description="winner", attribute="age"
+                ),
+                RuleRecord(
+                    id="A-001", check="required_attribute", description="loser", attribute="age"
+                ),
+            ]
+        )
+        assert written == 2  # attempted, not landed — see `RuleStore.seed`
+        (rule,) = await p.rules.list()
+        assert rule.description == "winner"
+    finally:
+        await p.aclose()
+
+
+async def test_sqlite_retirement_is_soft_and_the_row_remains(tmp_path):
+    p = await open_persistence(_sqlite_settings(tmp_path))
+    try:
+        await p.rules.add(
+            RuleRecord(id="R-001", check="required_attribute", description="r", attribute="age")
+        )
+        await p.rules.set_enabled("R-001", False, "admin@test.local", "2026-08-11T00:00:00+00:00")
+
+        # Gone from the engine's view...
+        assert await p.rules.list(include_disabled=False) == []
+        # ...but still resolvable, which is what keeps a past finding's link alive.
+        retired = await p.rules.get("R-001")
+        assert retired is not None
+        assert retired.enabled is False
+        assert retired.updated_by == "admin@test.local"
+    finally:
+        await p.aclose()
+
+
+async def test_sqlite_replace_keeps_the_original_authorship(tmp_path):
+    """An edit revises a rule; it does not re-create one. Rewriting who first
+    authored it would be a lie the audit log could not catch."""
+    p = await open_persistence(_sqlite_settings(tmp_path))
+    try:
+        await p.rules.add(
+            RuleRecord(
+                id="R-001",
+                check="required_attribute",
+                description="before",
+                attribute="age",
+                position=3,
+                created_by="first@test.local",
+                created_at="2026-01-01T00:00:00+00:00",
+            )
+        )
+        await p.rules.replace(
+            RuleRecord(
+                id="R-001",
+                check="required_attribute",
+                description="after",
+                attribute="age",
+                # All four of these are ignored by the UPDATE, deliberately.
+                position=99,
+                created_by="impostor@test.local",
+                created_at="2026-12-31T00:00:00+00:00",
+                updated_by="second@test.local",
+            )
+        )
+        rule = await p.rules.get("R-001")
+        assert rule is not None
+        assert rule.description == "after"
+        assert rule.updated_by == "second@test.local"
+        assert (rule.created_by, rule.created_at) == (
+            "first@test.local",
+            "2026-01-01T00:00:00+00:00",
+        )
+        assert rule.position == 3
+    finally:
+        await p.aclose()
+
+
+async def test_sqlite_next_position_appends_after_everything(tmp_path):
+    p = await open_persistence(_sqlite_settings(tmp_path))
+    try:
+        assert await p.rules.next_position() == 0
+        await p.rules.add(
+            RuleRecord(
+                id="R-001", check="required_attribute", description="r", attribute="age", position=7
+            )
+        )
+        assert await p.rules.next_position() == 8
+    finally:
+        await p.aclose()
+
+
+async def test_sqlite_audit_setup_migrates_and_backfills_a_pre_existing_index(tmp_path):
+    """Upgrading a deployment whose `audit_events` predates the subject columns
+    (#98 → #97). The backfill is the part that matters: every row already there is
+    a decision about a run, and leaving `subject_id` empty would break the deep
+    link on every historical entry."""
+    import aiosqlite
+
+    path = tmp_path / "screenings.sqlite"
+    legacy = await aiosqlite.connect(path)
+    await legacy.execute(
+        "CREATE TABLE audit_events ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, thread_id TEXT NOT NULL, action TEXT NOT NULL, "
+        "actor TEXT NOT NULL, actor_role TEXT NOT NULL, occurred_at TEXT NOT NULL, "
+        "detail TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 0, "
+        "source_filename TEXT NOT NULL DEFAULT '')"
+    )
+    await legacy.execute(
+        "INSERT INTO audit_events "
+        "(thread_id, action, actor, actor_role, occurred_at, detail) "
+        "VALUES ('run-old', 'approved', 'a@test.local', 'reviewer', "
+        "'2026-01-01T00:00:00+00:00', 'Cleared the gate')"
+    )
+    await legacy.commit()
+    await legacy.close()
+
+    p = await open_persistence(_sqlite_settings(tmp_path))
+    try:
+        (row,) = (await p.audit.list(limit=10, offset=0)).items
+        assert row.thread_id == "run-old"
+        assert row.subject_kind == "screening"
+        # Backfilled from the run it names, not left empty.
+        assert row.subject_id == "run-old"
+        # And setup() is still idempotent on the now-migrated file — it runs on
+        # every boot, and a backfill that re-fired would have to be harmless.
+        await p.audit.setup()
+        assert (await p.audit.list(limit=10, offset=0)).items[0].subject_id == "run-old"
+    finally:
+        await p.aclose()
+
+
+async def test_sqlite_backfill_never_touches_a_rule_entry(tmp_path):
+    """A rule mutation carries an empty `thread_id` on purpose. The backfill is
+    scoped to screening rows so it can never overwrite the rule id with it."""
+    p = await open_persistence(_sqlite_settings(tmp_path))
+    try:
+        await p.audit.record(
+            AuditDecision(
+                thread_id="",
+                action="rule_created",
+                actor="admin@test.local",
+                actor_role="admin",
+                occurred_at="2026-08-11T00:00:00+00:00",
+                detail="range — 1 ≤ age ≤ 2",
+                subject_kind="rule",
+                subject_id="AGE-002",
+            )
+        )
+        await p.audit.setup()  # re-runs the backfill
+        (row,) = (await p.audit.list(limit=10, offset=0)).items
+        assert (row.subject_kind, row.subject_id) == ("rule", "AGE-002")
+        assert row.thread_id == ""
+    finally:
+        await p.aclose()

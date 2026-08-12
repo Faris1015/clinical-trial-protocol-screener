@@ -69,8 +69,9 @@ data gets touched.
   `source_text` from the protocol so reviewers can audit every threshold.
 - **The Parser is allowed to admit defeat.** Vague criteria ("adequate organ function")
   go into an explicit `unparseable` bucket instead of being hallucinated into numbers.
-- **The Critic is hybrid.** Layer 1 is a deterministic YAML rules database (testable,
-  auditable); layer 2 is an LLM semantic review for contradictions rules can't catch.
+- **The Critic is hybrid.** Layer 1 is a deterministic rules database (testable,
+  auditable, and admin-authored in-app); layer 2 is an LLM semantic review for
+  contradictions rules can't catch.
 - **Self-correcting loop with a hard cap.** Critic rejections route back to the Parser
   with structured feedback; after 3 failed attempts the graph terminates at a
   `human_escalation` node instead of looping forever.
@@ -678,9 +679,10 @@ blocked" is one click from the block itself.
 
 ```bash
 curl -b cookies.txt http://localhost:8000/api/rules
-# → {"source": "compliance_rules.yaml",
+# → {"source": "compliance_rules.yaml", "active": 8,
 #    "rules": [{"id": "BP-001", "condition": "90 ≤ systolic_bp ≤ 200",
 #               "severity": "reject", "check_label": "Plausible range",
+#               "enabled": true, "updated_by": "admin@trialgate.local",
 #               "description": ..., "plain": ..., "keywords": [...]}]}
 ```
 
@@ -689,20 +691,58 @@ curl -b cookies.txt http://localhost:8000/api/rules
   restated — a page claiming "advisory" for a rule that blocks the run would be
   worse than no page, because a reviewer would believe it. A test trips two rules
   for real and compares the finding's severity against the published one.
-- **Served, not bundled.** `RULES_PATH` is deployment configuration, so the page
-  fetches the rules the running instance is actually enforcing and names the file
-  they came from — not whatever was in the repo when the frontend was built.
+- **Served, not bundled.** The rules are a table an admin can change at any
+  moment, so the page fetches what the running instance is actually enforcing —
+  not whatever was in the repo when the frontend was built.
 - **Both layers again.** The rationale renders as the rule's plain-language
   sentence or its regulatory wording, on the same toggle the findings use (#52),
   so a reviewer arriving from a plain finding doesn't hit a wall of citations.
 - **The LLM layer is listed too, and labelled.** Semantic findings cite
-  `LLM-SEM`, which has no row in the YAML; the listing describes that pass under
+  `LLM-SEM`, which has no row in the table; the listing describes that pass under
   the same id so the link resolves, marked as a model review rather than a fixed
   rule.
 
-Read-only, deliberately. An admin editor is the natural follow-up, but a rules
-file the app can rewrite needs a change trail of its own before a compliance
-artifact can rest on it.
+### Author the compliance rules (admin)
+
+Extending the Critic's deterministic layer used to mean editing YAML and
+redeploying. An admin now authors rules in the app — which is also what finally
+gives the `admin` role a job beyond listing accounts.
+
+```bash
+# Author a rule (admin only; a reviewer gets 403)
+curl -b admin.txt -X POST http://localhost:8000/api/rules \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"RENAL-002","check":"range","attribute":"egfr",
+       "description":"eGFR threshold outside plausible range",
+       "min_plausible":5,"max_plausible":150}'
+
+# Retire one — soft, always
+curl -b admin.txt -X PATCH http://localhost:8000/api/rules/BP-001/enabled \
+  -H 'Content-Type: application/json' -d '{"enabled":false}'
+```
+
+- **The YAML seeds; the table rules.** `app/rules/compliance_rules.yaml` populates
+  the table on first boot and stays in the repo as the documented default set.
+  From the moment the table has a row it is the source of truth and the file is
+  never read again — otherwise a redeploy would silently revert an admin's work.
+  `RULES_PATH` configures what a *fresh* instance starts with.
+- **Validated on write, never mid-screening.** The engine indexes straight into a
+  rule (`rule["min_plausible"]`), so a malformed row would be a crash inside
+  somebody's run. Every rule is checked against its check kind's contract at
+  authoring time: an inverted range, an unimplemented check, a keyword rule with
+  no keywords — each is a 422 while the form is still on screen.
+- **Retirement is soft, and that is a correctness property.** A finding cites a
+  rule id forever, so a retired rule keeps its row: the engine stops running it,
+  the viewer still lists it (marked retired), and a year-old finding still
+  resolves. There is no delete.
+- **Every change is attributed and indexed.** Rules carry `created_by` /
+  `updated_by`, and each mutation lands in the audit log (#98) as a `rule`
+  subject — an admin quietly widening a plausible range is exactly what an
+  auditor comes looking for later.
+- **A run is judged by one rule set.** The enabled rules are snapshotted into the
+  run's state when it enters the graph, so a rule authored mid-run cannot change
+  a verdict halfway through the Critic's parse→critic loop — and the checkpoint
+  records which rules the run was actually judged by.
 
 ### Read the metrics in-app
 
@@ -894,6 +934,7 @@ make lint        # ruff + eslint
 make format      # ruff format + prettier
 make typecheck   # mypy + tsc --noEmit
 make test        # pytest
+make test-pg     # the postgres store suite, against a throwaway container
 make check       # all of the above — what CI runs
 ```
 
@@ -924,6 +965,15 @@ the floor is one source of truth for both `make test` and CI.
   `httpx.AsyncClient` + `ASGITransport`. Edit-and-rerun is covered here rather
   than only at the service layer on purpose: rewinding a parked checkpoint back to
   the Critic is LangGraph behavior, and only the real graph can prove it works.
+- **Postgres stores** — the `Postgres*Store` classes against a real
+  `postgres:16` service container in CI, or `make test-pg` locally. Sqlite's twin
+  passing proves nothing about these: the two engines spell the same intent
+  differently (`ON CONFLICT DO NOTHING` vs `INSERT OR IGNORE`, `ADD COLUMN IF NOT
+  EXISTS` vs `PRAGMA table_info` introspection), and postgres refuses to assign a
+  `boolean` to an `integer` column where sqlite takes either — so a retirement
+  that works on the default backend can be a `DatatypeMismatch` on the production
+  one. Skipped unless `POSTGRES_TEST_DSN` is set, so a plain `make test` still
+  needs no database.
 
 #### Parser golden-set eval
 
@@ -1037,7 +1087,7 @@ backend/
       builder.py               # Graph assembly: nodes, edges, loop, HITL interrupt
       nodes/                   # router / parser / critic / matcher
     schemas/criteria.py        # Pydantic criteria contracts
-    rules/compliance_rules.yaml# Deterministic FDA-style boundary rules
+    rules/compliance_rules.yaml# Default rule set; seeds the rules table on first boot
     data/generate_ehr.py       # Seeded synthetic patient generator
     services/
       screening.py             # Screening use-cases (create/stream/approve/edit/state)
@@ -1051,7 +1101,7 @@ backend/
       audit.py                 # The org-wide index of human decisions: written, scoped, exportable
       provenance.py            # criterion source_text → character span in the protocol
       report.py                # Self-contained, printable HTML screening report
-      rules.py                 # The compliance rules database, rendered for reading
+      rules.py                 # The compliance rules: seeding, validation, authoring, reading
       metrics.py               # Custom Prometheus metric definitions (one home)
       metrics_summary.py       # Those metrics reduced for the in-app dashboard
       notifications.py         # Gate/escalation notifications (webhook + email, PHI-free)

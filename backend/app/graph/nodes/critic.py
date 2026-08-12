@@ -69,7 +69,11 @@ SEMANTIC_RULE_ID = "LLM-SEM"
 
 
 def load_rules() -> list[dict]:
-    """Load the compliance rules; a missing or malformed file is a DataStoreError.
+    """Load the compliance rules *file*; a missing or malformed one is a DataStoreError.
+
+    Since #97 this is the seed path only — `services/rules.seed_from_file` calls it
+    once, to populate an empty rules table on first boot. What the engine runs
+    thereafter comes from that table, by way of `ScreenerState.compliance_rules`.
 
     Settings validates existence at startup, but the file can still disappear
     or be corrupted while the server runs.
@@ -276,7 +280,19 @@ def summarize_compliance(findings: list[dict]) -> str:
 def critic_node(state: ScreenerState) -> dict:
     criteria = state["parsed_criteria"]
     assert criteria is not None, "critic runs after parser — parsed_criteria is set"
-    findings = run_deterministic_checks(criteria, state["raw_protocol_text"], load_rules())
+    # From the state, not the file (#97): rules are authored into a table now, and
+    # the snapshot was taken when the run entered the graph. See
+    # `ScreenerState.compliance_rules` for why a snapshot rather than a live read
+    # — and note that `load_rules` still exists, for seeding that table.
+    rules = state.get("compliance_rules") or []
+    if not rules:
+        # Layer 1 checking nothing is a real possibility now that the rules live in
+        # a table — an empty one, a seed that failed, every rule retired — and it
+        # is silent by nature: a run with no rules *passes*. Say so loudly rather
+        # than reporting a clean compliance review that never happened. Not fatal:
+        # the semantic layer still runs and the run still stops at the human gate.
+        log.warning("critic.no_deterministic_rules", attempt=state["parse_attempts"])
+    findings = run_deterministic_checks(criteria, state["raw_protocol_text"], rules)
     findings += run_llm_semantic_review(state)
 
     rejects = [f for f in findings if f["severity"] == "reject"]
