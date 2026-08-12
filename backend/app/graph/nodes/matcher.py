@@ -66,15 +66,26 @@ def _norm(text: str) -> str:
     return text.strip().lower()
 
 
-def _patient_terms(patient: dict) -> list[str]:
+def patient_terms(patient: dict) -> list[str]:
+    """Every term of a patient's record the categorical checks look at.
+
+    Public because reverse matching (#96) has to know which pairs a run's stored
+    term mappings leave unanswered, and that is exactly this list crossed with the
+    criteria — asking it of a second implementation of "what counts as a term"
+    would be how a patient's rematched verdict starts differing from the cohort's.
+    """
     terms: list[str] = []
     for field in ("diagnoses", "medications", "history"):
         terms.extend(patient.get(field, []))
     return terms
 
 
-def _fast_present(criterion_value: str, term: str) -> bool:
+def fast_present(criterion_value: str, term: str) -> bool:
     """Word-boundary fast path: is `criterion_value` a confident match for `term`?
+
+    Public for the same reason `patient_terms` is (#96): a pair this settles needs
+    no mapping, so reverse matching has to apply the very same test to tell a gap
+    in a run's stored mappings from a pair that was never going to need one.
 
     Both are already normalized. We require a word-boundary occurrence AND that it
     is not glued into a larger hyphen compound: "non-small cell lung cancer" must
@@ -143,9 +154,9 @@ def _categorical_presence(patient: dict, criterion: dict, verdicts: dict) -> tup
     """
     cval = _norm(criterion["value"])
     result: tuple[str, str | None] = ("absent", None)
-    for term in _patient_terms(patient):
+    for term in patient_terms(patient):
         tnorm = _norm(term)
-        if _fast_present(cval, tnorm):
+        if fast_present(cval, tnorm):
             return "present", term
         verdict = verdicts.get((cval, tnorm))
         if verdict == "match":
@@ -540,12 +551,12 @@ def build_verdict_cache(
     term_by_norm: dict[str, str] = {}
     # How many patients carry each normalized term — the multiplier a per-patient
     # implementation would have paid on every pair. Counted per patient, not per
-    # mention: `_patient_terms` concatenates three fields and one patient can list
+    # mention: `patient_terms` concatenates three fields and one patient can list
     # the same drug in two of them.
     patients_with_term: dict[str, int] = {}
     for p in patients:
         seen: set[str] = set()
-        for t in _patient_terms(p):
+        for t in patient_terms(p):
             tnorm = _norm(t)
             term_by_norm.setdefault(tnorm, t)
             if tnorm not in seen:
@@ -559,16 +570,16 @@ def build_verdict_cache(
     llm_bound = [
         c
         for c in categoricals
-        if any(not _fast_present(_norm(c["value"]), tnorm) for tnorm in term_by_norm)
+        if any(not fast_present(_norm(c["value"]), tnorm) for tnorm in term_by_norm)
     ]
     done = 0
     for c in categoricals:
         cval = _norm(c["value"])
-        # One `_fast_present` sweep per criterion, reused for both the candidate
+        # One `fast_present` sweep per criterion, reused for both the candidate
         # set and the cost figure: it is a regex scan per (criterion, term) pair,
         # and on a large cohort a second sweep for accounting alone would be tens
         # of thousands of extra scans per screening.
-        unsettled = [tnorm for tnorm in term_by_norm if not _fast_present(cval, tnorm)]
+        unsettled = [tnorm for tnorm in term_by_norm if not fast_present(cval, tnorm)]
         # Counted before the `continue` below: a criterion whose terms are all
         # already cached (the protocol quotes it twice) still had those
         # resolutions required by the cohort — they were simply served from the
@@ -600,6 +611,47 @@ def build_verdict_cache(
     if on_cost is not None:
         on_cost(TermMappingCost(resolutions=resolutions, llm_pairs=len(cache)))
     return cache
+
+
+def cohort_terms(patients: list[dict]) -> list[str]:
+    """Every normalized term the cohort put in front of the term mapper.
+
+    Sorted for a stable checkpoint: an unordered set would re-serialize
+    differently on every run and turn a diff of two checkpoints into noise.
+    """
+    return sorted({_norm(t) for p in patients for t in patient_terms(p)})
+
+
+def serialize_verdicts(cache: dict[tuple[str, str], str], terms: list[str]) -> dict:
+    """The verdict cache in a form a checkpoint can hold — and a later reader trust.
+
+    `{"terms": [...], "verdicts": [[criterion_value, term, verdict], ...]}`, all
+    normalized, tuple keys flattened because JSON has no tuple.
+
+    **Only non-"no_match" verdicts are kept**, which is lossless *given* `terms`.
+    `_categorical_presence` treats a cached "no_match" and a cache miss
+    identically — neither contributes presence — so a reader that knows which
+    terms were offered can tell the two apart where it matters and needs the
+    entry nowhere else. What `terms` buys is the distinction between "the mapper
+    was asked about this term and said no" and "this term was never put to it":
+    the first is an answer, the second is a gap, and a reverse match has to send
+    the second to a human rather than quietly read it as absence (#96).
+
+    The filter is not micro-optimization. "no_match" is the overwhelming majority
+    verdict — every criterion is asked about every unsettled term in the cohort,
+    and a protocol's six categorical criteria against two hundred distinct terms
+    is twelve hundred pairs of which a handful match. Storing them all would add
+    a five-figure JSON blob to every checkpoint to record, over and over, the
+    default.
+    """
+    return {
+        "terms": terms,
+        "verdicts": sorted(
+            [cval, term, verdict]
+            for (cval, term), verdict in cache.items()
+            if verdict != "no_match"
+        ),
+    }
 
 
 def load_patients() -> list[dict]:
@@ -669,6 +721,9 @@ def matcher_node(state: ScreenerState) -> dict:
     return {
         "matched_patients": evaluations,
         "match_summary": summarize_cohort(evaluations),
+        # What the ambiguous tail resolved to, kept so a later reader can score a
+        # patient this run never saw without asking a model again (#96).
+        "term_mappings": serialize_verdicts(verdicts, cohort_terms(patients)),
         "current_step": "done",
         "events": [
             event(

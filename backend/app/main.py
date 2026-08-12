@@ -57,7 +57,7 @@ from app.health import app_version, readiness
 from app.logging_config import bind_contextvars, clear_contextvars, configure_logging, get_logger
 from app.persistence import AuditStore, Persistence, RuleStore, ScreeningStore, open_persistence
 from app.schemas.criteria import CriteriaSchema
-from app.services import audit, rules, screening, simulation, sse
+from app.services import audit, patients, rules, screening, simulation, sse
 from app.services.concurrency import ConcurrencyLimiter, release_after
 from app.services.uploads import read_upload_capped, validate_content_type
 
@@ -943,6 +943,77 @@ async def download_cohort_export(
 # instead of in a filter over an already-read page. The two routes take the same
 # filters and apply the same scope, so an auditor's download is exactly the page
 # they were looking at.
+
+
+# --- The cohort, and the question asked backwards (#96) ---------------------
+#
+# Three read-only routes. The first two expose the synthetic EHR the Matcher has
+# always read but nobody could see; the third is reverse matching — one patient
+# put to every trial with approved criteria, which is the same deterministic
+# Matcher iterated over stored runs.
+#
+# All at the reviewer rung, the same one `/state` sits at. That route already
+# serves a run's whole cohort — every patient, every verdict, every explanation —
+# so nothing here is an authority a reader of the runs does not already hold; it
+# is the same data indexed by patient instead of by run.
+
+
+@app.get("/api/patients")
+@limiter.limit(lambda: settings.rate_limit_read)
+async def list_patients(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_reviewer)],
+    limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    q: Annotated[str | None, Query(max_length=200)] = None,
+) -> dict:
+    """The synthetic cohort, one page at a time (#96).
+
+    Returns the runs index's `{items, total, limit, offset}` envelope so a client
+    pages both the same way. Rows are summaries — counts, not the lists
+    themselves; the record is on the detail route (see `services/patients.py`).
+    `q` is a case-insensitive substring match on patient id or name.
+    """
+    return patients.list_patients(limit=limit, offset=offset, search=q)
+
+
+@app.get("/api/patients/{patient_id}")
+@limiter.limit(lambda: settings.rate_limit_read)
+async def get_patient(
+    request: Request,
+    patient_id: str,
+    principal: Annotated[Principal, Depends(require_reviewer)],
+) -> dict:
+    """One patient's record — labs, diagnoses, medications, history (#96).
+
+    `patient_id` is a plain path string rather than a checked `PT-\\d+` format,
+    for the reason `compare_screenings` gives about thread ids: the records file
+    is the authority on what exists, and validating the shape would turn an
+    unknown id's clear 404 into a 422 about characters.
+    """
+    return patients.get_patient(patient_id)
+
+
+@app.get("/api/patients/{patient_id}/trials")
+@limiter.limit(lambda: settings.rate_limit_read)
+async def match_patient_to_trials(
+    request: Request,
+    patient_id: str,
+    principal: Annotated[Principal, Depends(require_reviewer)],
+) -> dict:
+    """Which trials this patient qualifies for (#96) — the pipeline, transposed.
+
+    A GET because it is a read: the walk calls `aget_state` and nothing else, and
+    the answer for a given patient is a function of runs that already happened.
+    Hence the *read* rate-limit bucket and no concurrency slot — there is no graph
+    run to bound and no LLM call to make (`services/reverse.py` documents why the
+    categorical half needs none either).
+
+    Every verdict the run itself recorded is replayed rather than recomputed, so
+    what this says about a patient is what that run's cohort table says about
+    them, by construction rather than by two implementations agreeing.
+    """
+    return await screening.match_patient_to_trials(_store(), _graph(), patient_id)
 
 
 @app.get("/api/audit")

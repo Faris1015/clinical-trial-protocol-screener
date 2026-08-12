@@ -44,6 +44,18 @@ class ScreeningNotFoundError(ScreenerError):
     http_status = 404
 
 
+class PatientNotFoundError(ScreenerError):
+    """No patient in the synthetic cohort carries the requested id (#96).
+
+    A 404 rather than an empty record: the reverse-matching page is reached by a
+    link out of a run's cohort table, and a patient id that no longer resolves
+    means the EHR was regenerated under a run that had already scored it — which
+    a reader needs told, not shown as a patient with no history.
+    """
+
+    http_status = 404
+
+
 class ScreeningNotApprovableError(ScreenerError):
     """Approval was requested for a screening that isn't parked at the gate."""
 

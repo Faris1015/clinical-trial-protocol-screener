@@ -142,6 +142,21 @@ class ScreenerState(TypedDict):
     matched_patients: list[dict]
     match_summary: str
 
+    # The term mappings this run resolved (#96) — see `matcher.serialize_verdicts`
+    # for the shape and why it is stored filtered.
+    #
+    # Kept for the same reason #95 kept `observed` on quantitative verdicts: it is
+    # what makes the run's categorical half re-derivable without a model. Reverse
+    # matching (a patient against every approved run) scores patients the run never
+    # saw, and the ambiguous tail of a categorical criterion is exactly the part it
+    # cannot settle by itself. Without this the choice would be to call an LLM on a
+    # read-only page or to guess, and the second is worse.
+    #
+    # PHI-safe by the standard the rest of the checkpoint already meets: these are
+    # clinical *terms* drawn from the cohort's records, the same vocabulary
+    # `matched_patients` already quotes back in every explanation beside it.
+    term_mappings: dict
+
     # Observability
     events: Annotated[list[AgentEvent], operator.add]
     current_step: ScreeningStatus
@@ -211,6 +226,7 @@ def initial_state(
         criteria_edits=[],
         matched_patients=[],
         match_summary="",
+        term_mappings={},
         events=[],
         current_step="routing",
         llm_usage=[],

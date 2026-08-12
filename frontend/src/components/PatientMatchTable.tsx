@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -13,6 +14,7 @@ import {
 import { ViewModeToggle } from "@/components/view-mode-toggle";
 import { useViewMode } from "@/hooks/useViewMode";
 import { bucketOf, cohortVariant, type CohortBucket } from "@/lib/cohort";
+import { patientHref } from "@/lib/patients";
 import { cn } from "@/lib/utils";
 import type { CriterionResult, PatientEvaluation } from "@/types";
 
@@ -75,8 +77,18 @@ export function PatientMatchTable({
               const plain = !technical && Boolean(e.summary);
               return (
                 <TableRow key={e.patient_id} data-bucket={bucket}>
+                  {/* Through to the patient's own view (#96, AC 5) — the same
+                      verdict this row shows, beside every other trial they have
+                      been put to. The id is the link rather than the whole cell:
+                      it is what identifies the record, and it is the shortest
+                      target that still reads as one. */}
                   <TableCell className="align-top">
-                    <span className="font-mono text-xs">{e.patient_id}</span>
+                    <Link
+                      href={patientHref(e.patient_id)}
+                      className="hover:text-primary font-mono text-xs underline-offset-4 hover:underline"
+                    >
+                      {e.patient_id}
+                    </Link>
                     <span className="text-muted-foreground"> · </span>
                     {e.name}
                   </TableCell>

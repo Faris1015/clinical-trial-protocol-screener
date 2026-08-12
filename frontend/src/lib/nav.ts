@@ -2,6 +2,7 @@ import {
   BarChart3,
   ClipboardCheck,
   FilePlus2,
+  HeartPulse,
   History,
   Scale,
   ScrollText,
@@ -33,6 +34,10 @@ export type NavItem = {
 export const NAV_ITEMS: NavItem[] = [
   { href: "/", label: "New Screening", icon: FilePlus2 },
   { href: "/runs", label: "Past Runs", icon: History },
+  // No `minRole` (#96): the cohort and a patient's trial matches reach no further
+  // into patient data than a run's own cohort table already does, and that is on
+  // every run detail page a reviewer can open.
+  { href: "/patients", label: "Cohort", icon: HeartPulse },
   { href: "/review", label: "Review Queue", icon: ClipboardCheck },
   { href: "/rules", label: "Rules", icon: Scale },
   { href: "/metrics", label: "Metrics", icon: BarChart3 },

@@ -248,6 +248,77 @@ export function RulesSkeleton() {
 }
 
 /**
+ * One patient and their trials (#96) while the reverse match is fetched.
+ *
+ * Two cards, because one request fills both: the record — a grid of labs, then
+ * three rows of term chips — and the trials beneath it. Two trial rows rather
+ * than five: how many protocols a patient has been put to is the instance's
+ * history, and a tall placeholder that collapsed to one row would drag the fold
+ * up under the reader's cursor.
+ */
+export function PatientDetailSkeleton() {
+  return (
+    <Placeholder region="patient-detail-skeleton" label="Loading this patient's record…">
+      <div className="space-y-4">
+        <Card>
+          <CardHeader className="gap-2">
+            <div className="flex items-center justify-between gap-2">
+              <Skeleton className="h-5 w-44" />
+              <Skeleton className="h-5 w-24 rounded-4xl" />
+            </div>
+            <Skeleton className="h-3 w-20" />
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3 lg:grid-cols-4">
+              {[0, 1, 2, 3, 4, 5, 6, 7].map((lab) => (
+                <div key={lab} className="space-y-1">
+                  <Skeleton className="h-3 w-16" />
+                  <Skeleton className="h-4 w-10" />
+                </div>
+              ))}
+            </div>
+            {/* Diagnoses, medications, history — a heading and a row of chips each. */}
+            {[0, 1, 2].map((section) => (
+              <div key={section} className="space-y-2">
+                <Skeleton className="h-4 w-24" />
+                <div className="flex flex-wrap gap-1.5">
+                  {CHIP_WIDTHS.slice(section, section + 3).map((width) => (
+                    <Skeleton key={width} className={cn("h-5 rounded-4xl", width)} />
+                  ))}
+                </div>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="gap-2">
+            <Skeleton className="h-5 w-20" />
+            <div className="flex flex-wrap gap-1.5">
+              <Skeleton className="h-5 w-24 rounded-4xl" />
+              <Skeleton className="h-5 w-28 rounded-4xl" />
+              <Skeleton className="h-5 w-24 rounded-4xl" />
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {[0, 1].map((trial) => (
+              <div key={trial} className="space-y-2 rounded-md border p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <Skeleton className="h-4 w-56 max-w-full" />
+                  <Skeleton className="h-3 w-28" />
+                </div>
+                <Skeleton className="h-3 w-32" />
+                <Skeleton className="h-4 w-full" />
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      </div>
+    </Placeholder>
+  );
+}
+
+/**
  * The metrics summary (#58) while it fetches the domain counters.
  *
  * Shaped like the three panels: a titled card with a caption, then rows of

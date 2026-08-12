@@ -1007,3 +1007,104 @@ export type AuditPage = {
     to: string | null;
   };
 };
+
+// --- The cohort, and the question asked backwards (#96) ----------------------
+
+/**
+ * One row of the cohort index — `GET /api/patients`.
+ *
+ * Counts rather than the lists themselves: the index is a table of who exists,
+ * and shipping every diagnosis and medication for a hundred patients to render
+ * it would be most of the EHR fetched to draw a list of names. The record is one
+ * click away, which is where a reader who wants it is going anyway.
+ */
+export type PatientSummary = {
+  id: string;
+  name: string;
+  sex: string;
+  cohort: string;
+  /** Null when the record carries no age — the same gap the Matcher reads as
+   * "could not be checked" rather than as a failure. */
+  age: number | null;
+  diagnoses: number;
+  medications: number;
+  history: number;
+};
+
+export type PatientPage = {
+  items: PatientSummary[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
+/**
+ * One patient's whole record — `GET /api/patients/{id}`.
+ *
+ * `labs` is an open map because the attribute set is the EHR generator's, not
+ * this type's: a lab the generator adds should render as a row rather than be
+ * silently dropped by a closed interface. The Matcher reads it the same way.
+ */
+export type PatientRecord = {
+  id: string;
+  name: string;
+  sex: string;
+  cohort: string;
+  labs: Record<string, number | undefined>;
+  diagnoses: string[];
+  medications: string[];
+  history: string[];
+};
+
+/**
+ * How this patient fared against one trial — one row of
+ * `GET /api/patients/{id}/trials`.
+ *
+ * `source` is the one field worth reading twice. `"recorded"` means the run
+ * itself scored this patient and the verdict here *is* the row from its cohort
+ * table. `"rematched"` means the run never saw them — the records were
+ * regenerated, or the run predates them — so its criteria were applied to them
+ * here, reusing the term mappings that run resolved and calling no model. The
+ * two have different standing, and a coordinator deciding whether to act on a
+ * match is entitled to know which they are looking at.
+ *
+ * `unmapped` counts the categorical criteria a rematch could not settle from
+ * those stored mappings, and is always 0 for a recorded verdict. Any value above
+ * zero means the patient is in needs-review *because the question was never put
+ * to anything*, which is a different thing from a criterion that was checked and
+ * came back undecidable.
+ */
+export type TrialMatch = {
+  thread_id: string;
+  source_filename: string;
+  trial_title: string;
+  status: ScreeningStatus;
+  created_at: string;
+  bucket: CohortBucketName;
+  eligible: boolean;
+  needs_review: boolean;
+  summary: string;
+  criterion_results: CriterionResult[];
+  source: "recorded" | "rematched";
+  unmapped: number;
+};
+
+/** The bucket names the API sends — the server-side spelling of `CohortBucket`. */
+export type CohortBucketName = "eligible" | "review" | "ineligible";
+
+/**
+ * `GET /api/patients/{id}/trials` — the pipeline transposed.
+ *
+ * `scanned`/`total` state the window the answer was reached in: the walk reads
+ * the most recent runs, and a page reporting "2 eligible trials" without saying
+ * it looked at thirty of forty would be understating by an amount the reader
+ * cannot see.
+ */
+export type ReverseMatch = {
+  patient_id: string;
+  patient: PatientRecord;
+  trials: TrialMatch[];
+  counts: Record<CohortBucketName, number>;
+  scanned: number;
+  total: number;
+};

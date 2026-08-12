@@ -12,9 +12,9 @@ The LLM term-mapper is injected as a plain callable so these run offline.
 import app.graph.nodes.matcher as matcher_mod
 from app.exceptions import LLMUnavailableError
 from app.graph.nodes.matcher import (
-    _fast_present,
     build_verdict_cache,
     evaluate_patient,
+    fast_present,
 )
 from app.schemas.review import TermMapping, TermMatch
 from tests.fakes import FakeChatModel
@@ -59,23 +59,21 @@ def _make_mapper(rules: dict[tuple[str, str], str], calls: list):
 
 
 def test_fast_present_exact_whole_term():
-    assert _fast_present("warfarin", "warfarin") is True
+    assert fast_present("warfarin", "warfarin") is True
 
 
 def test_fast_present_specific_term_satisfies_general_criterion():
     # criterion is a prefix of a staged diagnosis, at a clean boundary
-    assert (
-        _fast_present("non-small cell lung cancer", "non-small cell lung cancer stage iv") is True
-    )
+    assert fast_present("non-small cell lung cancer", "non-small cell lung cancer stage iv") is True
 
 
 def test_fast_present_rejects_hyphen_compound():
     # THE regression: "small cell" must NOT fast-match inside "non-small cell ..."
-    assert _fast_present("small cell lung cancer", "non-small cell lung cancer stage iv") is False
+    assert fast_present("small cell lung cancer", "non-small cell lung cancer stage iv") is False
 
 
 def test_fast_present_absent():
-    assert _fast_present("multiple myeloma", "type 2 diabetes mellitus") is False
+    assert fast_present("multiple myeloma", "type 2 diabetes mellitus") is False
 
 
 # --- small cell / non-small cell resolved via the semantic path -------------
@@ -189,7 +187,7 @@ def test_malformed_mapping_degrades_to_needs_review():
 
 
 def test_empty_criterion_value_matches_no_one():
-    assert _fast_present("", "warfarin") is False
+    assert fast_present("", "warfarin") is False
 
 
 # --- Cache: one batch per criterion, not per patient ------------------------
@@ -272,7 +270,7 @@ def test_the_cache_reports_what_it_saved(monkeypatch):
 
 
 def test_a_term_listed_twice_by_one_patient_counts_once(monkeypatch):
-    """`_patient_terms` concatenates three record fields, so one patient can list
+    """`patient_terms` concatenates three record fields, so one patient can list
     the same drug twice. The saving is counted per patient asking the question,
     not per mention — otherwise a messy record would inflate the hit rate."""
     crit = _criteria(inclusion_categorical=[_cat("prior platinum chemotherapy")])

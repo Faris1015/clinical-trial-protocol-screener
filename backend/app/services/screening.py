@@ -51,8 +51,10 @@ from app.services import (
     metrics,
     metrics_summary,
     notifications,
+    patients,
     provenance,
     report,
+    reverse,
     rules,
     simulation,
     sse,
@@ -92,6 +94,7 @@ __all__ = [
     "get_screening_report",
     "get_screening_state",
     "list_screenings",
+    "match_patient_to_trials",
     "reject_screening",
     "resume_with_edited_criteria",
     "simulate_screening",
@@ -105,6 +108,17 @@ __all__ = [
 # run — and the payload states both this window and the instance's total, because a
 # sample that read as the whole history would be the one way this could mislead.
 COVERAGE_SAMPLE = 50
+
+# How many of the most recent *finished* runs reverse matching (#96) puts a
+# patient to. The same bounded-walk shape as COVERAGE_SAMPLE and for the same
+# reason — one checkpoint read per run, on a page a coordinator waits on — but a
+# larger window, because this one is answering a question *about* the runs rather
+# than sampling them for an aggregate. A trial the patient matches that fell
+# outside the window is a missed match, which is a worse failure than a slightly
+# stale percentage, so the window is set well above any realistic demo instance,
+# spent only on runs that can answer, and stated in the payload (`scanned`/`total`)
+# either way.
+REVERSE_MATCH_SAMPLE = 100
 
 
 class Snapshot(Protocol):
@@ -574,6 +588,90 @@ async def get_metrics_summary(
     aggregate = coverage.aggregate(coverages, total=page.total)
     log.info("screening.coverage_aggregated", runs=aggregate["runs"], score=aggregate["score"])
     return {**metrics_summary.summarize_metrics(), "coverage": aggregate}
+
+
+async def match_patient_to_trials(
+    store: ScreeningStore,
+    graph: ScreeningGraph,
+    patient_id: str,
+    *,
+    sample: int = REVERSE_MATCH_SAMPLE,
+) -> dict:
+    """One patient against every trial this instance has approved criteria for (#96).
+
+    The transpose of a screening: instead of one protocol scored over the cohort,
+    one patient scored over the protocols. `services/reverse.py` owns what a
+    verdict *is* — replayed from the run that already produced it, or re-derived
+    from that run's criteria and its stored term mappings — and this function owns
+    only which runs get asked.
+
+    The patient is resolved first, so an unknown id is a 404 before any checkpoint
+    is read rather than an empty result that reads as "this patient matches
+    nothing".
+
+    The walk is bounded (`sample`) and sequential, exactly like the coverage
+    aggregate above and for the same two reasons: it is one connection's worth of
+    cheap single-row reads, and holding a hundred `aget_state` calls in flight for
+    a read-only page would trade a page nobody waits on for contention every other
+    request pays for. The window is reported rather than implied.
+
+    It is also filtered to finished runs, which is what makes the window worth
+    having. `match_run` answers for a run that reached approved criteria and stays
+    silent for every other, so an unfiltered walk would spend its budget loading
+    checkpoints that cannot contribute — and on an instance with a backlog parked
+    at the gate, a run that *could* answer would be pushed out of the window by
+    runs that never can. A trial missed that way is a missed match, which is the
+    one failure this endpoint should not have.
+
+    Read-only throughout — `aget_state` and nothing else, no LLM call, no Critic
+    (see `services/reverse.py`). A coordinator asking what a patient qualifies for
+    changes no run.
+
+    One bad run costs its own row and nothing else, the same trade the coverage
+    walk makes: a corrupt checkpoint from some unrelated screening must not take
+    down a patient's whole answer. The guard covers the scoring as well as the
+    read, because a checkpoint can be unreadable in two ways — `aget_state` can
+    fail, and what it returns can be an extraction some older build wrote in a
+    shape the Matcher no longer recognizes. A skipped run drops out of `scanned`,
+    so the window narrows rather than the page quietly claiming it read everything.
+    """
+    patient = patients.get_patient(patient_id)
+    page = await store.list(limit=sample, offset=0, status="done")
+    trials: list[reverse.TrialMatch] = []
+    scanned = 0
+    for record in page.items:
+        try:
+            snapshot = await graph.aget_state({"configurable": {"thread_id": record.thread_id}})
+            # `jsonable_encoder` rather than the raw values: a criterion_result
+            # goes straight into the response, and the checkpoint can hold
+            # datetimes and Pydantic models the JSON encoder at the edge would
+            # refuse.
+            match = reverse.match_run(
+                patient,
+                jsonable_encoder(snapshot.values),
+                thread_id=record.thread_id,
+                source_filename=record.source_filename,
+                status=record.status,
+                created_at=record.created_at,
+            )
+        except Exception:  # noqa: BLE001 — one bad run must not fail the page
+            log.warning(
+                "screening.reverse_read_failed", failed_thread=record.thread_id, exc_info=True
+            )
+            continue
+        scanned += 1
+        if match is not None:
+            trials.append(match)
+
+    result = reverse.build_reverse_match(patient, trials, scanned=scanned, total=page.total)
+    log.info(
+        "screening.reverse_matched",
+        patient=patient_id,
+        trials=len(result["trials"]),
+        eligible=result["counts"]["eligible"],
+        scanned=scanned,
+    )
+    return {**result, "patient": patient}
 
 
 async def stream_screening(
