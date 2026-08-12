@@ -14,6 +14,7 @@ of a local model — a test is the only thing that keeps a later refactor from
 collapsing them.
 """
 
+from collections.abc import Mapping
 from typing import Any, cast
 
 import pytest
@@ -64,7 +65,9 @@ class _Runnable:
         self.result = result
         self.configs: list[Any] = []
 
-    def invoke(self, _input: object, config: object = None, **_kwargs: object) -> object:
+    def invoke(
+        self, _input: object, config: Mapping[str, Any] | None = None, **_kwargs: object
+    ) -> object:
         self.configs.append(config)
         return self.result
 
@@ -83,7 +86,9 @@ class _ReportingRunnable(_Runnable):
         self.completion = completion
         self.model = model
 
-    def invoke(self, _input: object, config: object = None, **_kwargs: object) -> object:
+    def invoke(
+        self, _input: object, config: Mapping[str, Any] | None = None, **_kwargs: object
+    ) -> object:
         from langchain_core.messages import AIMessage
         from langchain_core.outputs import ChatGeneration, LLMResult
 
@@ -97,7 +102,7 @@ class _ReportingRunnable(_Runnable):
             response_metadata={"model_name": self.model},
         )
         result = LLMResult(generations=[[ChatGeneration(message=message)]])
-        for handler in (config or {}).get("callbacks", []):  # type: ignore[union-attr]
+        for handler in (config or {}).get("callbacks", []):
             handler.on_llm_end(result)
         return self.result
 
@@ -275,9 +280,11 @@ def test_retries_accumulate_tokens_because_every_attempt_was_billed(monkeypatch)
             super().__init__(prompt=100, completion=10)
             self.attempts = 0
 
-        def invoke(self, input_: object, config: object = None, **kwargs: object) -> object:
+        def invoke(
+            self, _input: object, config: Mapping[str, Any] | None = None, **_kwargs: object
+        ) -> object:
             self.attempts += 1
-            result = super().invoke(input_, config, **kwargs)
+            result = super().invoke(_input, config, **_kwargs)
             if self.attempts < 3:
                 raise ConnectionError("refused")
             return result
