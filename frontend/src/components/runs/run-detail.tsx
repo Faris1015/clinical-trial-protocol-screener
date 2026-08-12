@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { AlertTriangle, ArrowLeft, Ban, ShieldCheck } from "lucide-react";
@@ -80,6 +80,24 @@ export function RunDetail() {
       active = false;
     };
   }, [threadId, reloadToken]);
+
+  // A `#revision-N` deep link from the audit index (#98) arrives before this page
+  // has anything to scroll to — the fragment is resolved by the browser on
+  // navigation, and the diff it names only exists once `/state` has landed. So the
+  // scroll is re-attempted here, after the render that creates the target.
+  //
+  // Once only, guarded by the ref rather than by the effect's deps: `state` is
+  // also replaced when a promoted what-if (#95) reloads the run, and re-honoring
+  // the fragment then would yank a reader who has scrolled down to the new cohort
+  // back up to a revision they arrived by an hour ago.
+  const honoredHash = useRef(false);
+  useEffect(() => {
+    if (!state || honoredHash.current) return;
+    const target = window.location.hash.slice(1);
+    if (!target) return;
+    honoredHash.current = true;
+    document.getElementById(target)?.scrollIntoView({ block: "start" });
+  }, [state]);
 
   const backLink = (
     <Link

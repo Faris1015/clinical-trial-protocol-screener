@@ -21,7 +21,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main
-from app.persistence import InMemoryScreeningStore
+from app.persistence import InMemoryAuditStore, InMemoryScreeningStore
 from app.services import coverage, report, screening
 from tests.auth_helpers import REVIEWER, sign_in
 
@@ -133,6 +133,17 @@ COHORT: list[dict[str, Any]] = [
     _evaluation("PT-3", {"PD-L1 TPS >= 50%": "unknown", "ecog": "fail"}),
     _evaluation("PT-4", {"PD-L1 TPS >= 50%": "unknown"}),
 ]
+
+
+def _audit() -> InMemoryAuditStore:
+    """A throwaway decision index (#98) for a test that is not about one.
+
+    Every path below now writes its decision to the org-wide index as well as to
+    the checkpoint. *What* it writes is asserted in `test_audit.py`; here the index
+    only has to exist, so each call gets a fresh one.
+    """
+    return InMemoryAuditStore()
+
 
 SCORED = {"parsed_criteria": CRITERIA, "matched_patients": COHORT}
 AT_THE_GATE = {"parsed_criteria": CRITERIA}
@@ -748,7 +759,7 @@ async def test_a_finished_run_denormalizes_its_coverage_into_the_index_row():
     frames = [
         frame
         async for frame in await screening.stream_screening(
-            store, TerminalGraph(FakeSnapshot(SCORED)), thread_id
+            store, _audit(), TerminalGraph(FakeSnapshot(SCORED)), thread_id
         )
     ]
     assert frames  # the terminal frame at least
@@ -776,7 +787,9 @@ async def test_a_rejected_run_keeps_the_coverage_that_may_have_justified_it():
     thread_id = await screening.create_screening(store, "p.md", PROTOCOL.encode())
     graph = TerminalGraph(FakeSnapshot(AT_THE_GATE, pending=("matcher",)))
 
-    await screening.reject_screening(store, graph, thread_id, REVIEWER, "Only 6 of 8 checkable.")
+    await screening.reject_screening(
+        store, _audit(), graph, thread_id, REVIEWER, "Only 6 of 8 checkable."
+    )
 
     page = await screening.list_screenings(store, limit=10, offset=0)
     row = page["items"][0]

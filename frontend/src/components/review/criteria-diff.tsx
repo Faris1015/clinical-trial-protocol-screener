@@ -30,7 +30,16 @@ export function CriteriaDiff({ edits }: { edits: CriteriaEdit[] }) {
       </CardHeader>
       <CardContent className="space-y-4">
         {revisions.map((edit) => (
-          <div key={edit.revision} className="space-y-2" data-revision={edit.revision}>
+          <div
+            key={edit.revision}
+            // The link target the audit index (#98) points a criteria-revision
+            // entry at: an auditor asking "what did they change?" lands on that
+            // revision's diff rather than at the top of a long replay. `scroll-mt`
+            // keeps the heading clear of the sticky top bar when it does.
+            id={`revision-${edit.revision}`}
+            className="scroll-mt-20 space-y-2"
+            data-revision={edit.revision}
+          >
             <p className="text-muted-foreground text-xs">
               Revision {edit.revision} · {edit.edited_by}
               {edit.edited_by_role ? ` (${edit.edited_by_role})` : ""}

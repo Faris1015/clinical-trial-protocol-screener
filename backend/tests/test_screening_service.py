@@ -21,7 +21,7 @@ from app.exceptions import (
     ScreeningNotFoundError,
     ScreeningNotRejectableError,
 )
-from app.persistence import InMemoryScreeningStore, ScreeningRecord
+from app.persistence import InMemoryAuditStore, InMemoryScreeningStore, ScreeningRecord
 from app.services import metrics, notifications, screening, sse
 from tests.auth_helpers import REVIEWER
 
@@ -29,6 +29,16 @@ from tests.auth_helpers import REVIEWER
 async def _first_row(store: InMemoryScreeningStore) -> ScreeningRecord:
     """The single screening these tests create — the store's list is paged now."""
     return (await store.list(limit=10, offset=0)).items[0]
+
+
+def _audit() -> InMemoryAuditStore:
+    """A throwaway decision index (#98) for a test that is not about one.
+
+    Every path below now writes its decision to the org-wide index as well as to
+    the checkpoint. *What* it writes is asserted in `test_audit.py`; here the index
+    only has to exist, so each call gets a fresh one.
+    """
+    return InMemoryAuditStore()
 
 
 def _frames(raw: list[str]) -> list[dict]:
@@ -46,7 +56,9 @@ async def _approve_frames(
     approver: Principal = REVIEWER,
 ) -> list[dict]:
     """Run an approval to completion and return its parsed SSE frames."""
-    frames = await _drain(await screening.approve_screening(store, graph, thread_id, approver))
+    frames = await _drain(
+        await screening.approve_screening(store, _audit(), graph, thread_id, approver)
+    )
     return _frames(frames)
 
 
@@ -294,7 +306,7 @@ async def test_terminal_frame_denormalizes_criteria_and_match_counts():
         ],
     }
     graph = StreamingGraph(updates=[], snapshot=FakeSnapshot(values=values))
-    await _drain(await screening.stream_screening(store, graph, thread_id))
+    await _drain(await screening.stream_screening(store, _audit(), graph, thread_id))
 
     row = await _first_row(store)
     assert (row.criteria_count, row.match_count) == (3, 1)
@@ -313,11 +325,13 @@ async def test_failure_after_a_successful_phase_keeps_the_counts():
             values={"current_step": "awaiting_approval", "parsed_criteria": parsed}
         ),
     )
-    await _drain(await screening.stream_screening(store, ok, thread_id))
+    await _drain(await screening.stream_screening(store, _audit(), ok, thread_id))
     assert (await _first_row(store)).criteria_count == 1
 
     await _drain(
-        await screening.stream_screening(store, RaisingGraph(RuntimeError("boom")), thread_id)
+        await screening.stream_screening(
+            store, _audit(), RaisingGraph(RuntimeError("boom")), thread_id
+        )
     )
     row = await _first_row(store)
     assert row.status == "failed"
@@ -330,7 +344,9 @@ async def test_failure_after_a_successful_phase_keeps_the_counts():
 async def test_stream_unknown_thread_raises_before_yielding():
     store = InMemoryScreeningStore()
     with pytest.raises(ScreeningNotFoundError):
-        await screening.stream_screening(store, StreamingGraph([], FakeSnapshot()), "nope")
+        await screening.stream_screening(
+            store, _audit(), StreamingGraph([], FakeSnapshot()), "nope"
+        )
 
 
 async def test_state_unknown_thread_raises():
@@ -349,7 +365,9 @@ async def test_stream_success_ends_with_end_frame_and_sets_status():
         updates=[{"matcher": {"current_step": "done"}}],
         snapshot=FakeSnapshot(values={"current_step": "done"}),
     )
-    frames = _frames(await _drain(await screening.stream_screening(store, graph, thread_id)))
+    frames = _frames(
+        await _drain(await screening.stream_screening(store, _audit(), graph, thread_id))
+    )
     assert frames[0] == {"node": "matcher", "update": {"current_step": "done"}}
     assert frames[-1] == {"node": sse.END}
     assert (await _first_row(store)).status == "done"
@@ -362,7 +380,9 @@ async def test_stream_interrupt_ends_with_interrupt_and_awaiting_status():
         updates=[{"critic": {"current_step": "awaiting_approval"}}],
         snapshot=FakeSnapshot(values={"current_step": "awaiting_approval"}, pending=("matcher",)),
     )
-    frames = _frames(await _drain(await screening.stream_screening(store, graph, thread_id)))
+    frames = _frames(
+        await _drain(await screening.stream_screening(store, _audit(), graph, thread_id))
+    )
     assert frames[-1] == {"node": sse.INTERRUPT}
     assert (await _first_row(store)).status == "awaiting_approval"
 
@@ -379,7 +399,9 @@ async def test_stream_absorbed_failure_becomes_error_frame():
             }
         ),
     )
-    frames = _frames(await _drain(await screening.stream_screening(store, graph, thread_id)))
+    frames = _frames(
+        await _drain(await screening.stream_screening(store, _audit(), graph, thread_id))
+    )
     assert frames[-1] == {"node": sse.ERROR, "message": "LLM backend unavailable"}
 
 
@@ -387,7 +409,9 @@ async def test_stream_domain_error_surfaces_detail_and_marks_failed():
     store = InMemoryScreeningStore()
     thread_id = await screening.create_screening(store, "p.md", b"x")
     graph = RaisingGraph(DataStoreError("rules file is corrupt"))
-    frames = _frames(await _drain(await screening.stream_screening(store, graph, thread_id)))
+    frames = _frames(
+        await _drain(await screening.stream_screening(store, _audit(), graph, thread_id))
+    )
     assert frames[-1]["node"] == sse.ERROR
     assert "rules file is corrupt" in frames[-1]["message"]
     assert (await _first_row(store)).status == "failed"
@@ -397,7 +421,9 @@ async def test_stream_unexpected_error_hides_detail():
     store = InMemoryScreeningStore()
     thread_id = await screening.create_screening(store, "p.md", b"x")
     graph = RaisingGraph(RuntimeError("secret internal detail"))
-    frames = _frames(await _drain(await screening.stream_screening(store, graph, thread_id)))
+    frames = _frames(
+        await _drain(await screening.stream_screening(store, _audit(), graph, thread_id))
+    )
     assert frames[-1]["node"] == sse.ERROR
     assert "secret internal detail" not in frames[-1]["message"]
 
@@ -472,7 +498,7 @@ async def test_approve_does_not_record_an_approver_when_not_at_the_gate():
     thread_id = await screening.create_screening(store, "p.md", b"x")
     graph = ResumeGraph(updates=[], after=FakeSnapshot(values={"current_step": "done"}), gate=())
     with pytest.raises(ScreeningNotApprovableError):
-        await screening.approve_screening(store, graph, thread_id, REVIEWER)
+        await screening.approve_screening(store, _audit(), graph, thread_id, REVIEWER)
     assert graph.recorded is None
 
 
@@ -482,7 +508,9 @@ async def test_approve_when_not_awaiting_raises_409_error():
     # Eager pre-check raises before any frame is yielded → becomes a 409, not a
     # mid-stream error.
     with pytest.raises(ScreeningNotApprovableError):
-        await screening.approve_screening(store, ApprovingGraph(pending=()), thread_id, REVIEWER)
+        await screening.approve_screening(
+            store, _audit(), ApprovingGraph(pending=()), thread_id, REVIEWER
+        )
 
 
 async def test_approve_of_a_run_parked_before_the_critic_is_rejected():
@@ -495,7 +523,7 @@ async def test_approve_of_a_run_parked_before_the_critic_is_rejected():
     thread_id = await screening.create_screening(store, "p.md", b"x")
     graph = ResumeGraph(updates=[], after=FakeSnapshot(), gate=("critic",))
     with pytest.raises(ScreeningNotApprovableError):
-        await screening.approve_screening(store, graph, thread_id, REVIEWER)
+        await screening.approve_screening(store, _audit(), graph, thread_id, REVIEWER)
     assert graph.recorded is None
 
 
@@ -522,7 +550,7 @@ async def _reject(
     thread_id: str,
     reason: str = "Not an oncology protocol — wrong document.",
 ) -> dict:
-    return await screening.reject_screening(store, graph, thread_id, REVIEWER, reason)
+    return await screening.reject_screening(store, _audit(), graph, thread_id, REVIEWER, reason)
 
 
 async def test_reject_at_the_gate_records_the_decision_and_terminates_the_run():
@@ -700,6 +728,7 @@ async def _rerun(
     frames = await _drain(
         await screening.resume_with_edited_criteria(
             store,
+            _audit(),
             graph,
             thread_id,
             criteria=criteria,
@@ -842,7 +871,13 @@ async def test_edit_of_a_rejected_run_still_raises():
     graph = ResumeGraph(updates=[], after=FakeSnapshot(), gate=(), values=_parked(step="rejected"))
     with pytest.raises(ScreeningNotEditableError):
         await screening.resume_with_edited_criteria(
-            store, graph, thread_id, criteria=_criteria(65), base_revision=0, editor=REVIEWER
+            store,
+            _audit(),
+            graph,
+            thread_id,
+            criteria=_criteria(65),
+            base_revision=0,
+            editor=REVIEWER,
         )
     assert graph.recorded is None
 
@@ -859,7 +894,13 @@ async def test_edit_of_a_run_with_no_extraction_raises():
     )
     with pytest.raises(ScreeningNotEditableError):
         await screening.resume_with_edited_criteria(
-            store, graph, thread_id, criteria=_criteria(65), base_revision=0, editor=REVIEWER
+            store,
+            _audit(),
+            graph,
+            thread_id,
+            criteria=_criteria(65),
+            base_revision=0,
+            editor=REVIEWER,
         )
     assert graph.recorded is None
 
@@ -876,7 +917,13 @@ async def test_edit_against_a_stale_revision_raises_and_writes_nothing():
     )
     with pytest.raises(CriteriaRevisionConflictError, match="revision 2"):
         await screening.resume_with_edited_criteria(
-            store, graph, thread_id, criteria=_criteria(65), base_revision=1, editor=REVIEWER
+            store,
+            _audit(),
+            graph,
+            thread_id,
+            criteria=_criteria(65),
+            base_revision=1,
+            editor=REVIEWER,
         )
     assert graph.recorded is None
 
@@ -901,7 +948,7 @@ async def test_edit_unknown_thread_raises_before_writing():
     graph = ResumeGraph(updates=[], after=FakeSnapshot(), values=_parked())
     with pytest.raises(ScreeningNotFoundError):
         await screening.resume_with_edited_criteria(
-            store, graph, "nope", criteria=_criteria(65), base_revision=0, editor=REVIEWER
+            store, _audit(), graph, "nope", criteria=_criteria(65), base_revision=0, editor=REVIEWER
         )
     assert graph.recorded is None
 
@@ -961,7 +1008,7 @@ async def test_a_run_parking_at_the_gate_notifies(notified):
             pending=("matcher",),
         ),
     )
-    await _drain(await screening.stream_screening(store, graph, thread_id))
+    await _drain(await screening.stream_screening(store, _audit(), graph, thread_id))
 
     (call,) = notified
     assert call["thread_id"] == thread_id
@@ -978,7 +1025,7 @@ async def test_an_escalated_run_notifies(notified):
         updates=[{"human_escalation": {"current_step": "escalated"}}],
         snapshot=FakeSnapshot(values={"current_step": "escalated", "source_filename": "p.md"}),
     )
-    await _drain(await screening.stream_screening(store, graph, thread_id))
+    await _drain(await screening.stream_screening(store, _audit(), graph, thread_id))
 
     (call,) = notified
     assert call["status"] == "escalated"
@@ -1017,7 +1064,9 @@ async def test_a_crashed_run_is_not_notified(notified):
     store = InMemoryScreeningStore()
     thread_id = await screening.create_screening(store, "p.md", b"x")
     await _drain(
-        await screening.stream_screening(store, RaisingGraph(RuntimeError("boom")), thread_id)
+        await screening.stream_screening(
+            store, _audit(), RaisingGraph(RuntimeError("boom")), thread_id
+        )
     )
     assert notified == []
 
@@ -1057,7 +1106,9 @@ async def test_a_dead_notification_channel_cannot_fail_a_good_run(monkeypatch):
         updates=[],
         snapshot=FakeSnapshot(values={"current_step": "awaiting_approval"}, pending=("matcher",)),
     )
-    frames = _frames(await _drain(await screening.stream_screening(store, graph, thread_id)))
+    frames = _frames(
+        await _drain(await screening.stream_screening(store, _audit(), graph, thread_id))
+    )
     assert frames[-1] == {"node": sse.INTERRUPT}
     assert (await _first_row(store)).status == "awaiting_approval"
 

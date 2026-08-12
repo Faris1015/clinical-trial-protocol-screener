@@ -37,8 +37,15 @@ jobs:
         # lock and fail on any diff. Reproducible because: Python 3.11 (matching
         # the runtime image), pinned pip-tools, and no --upgrade (existing pins
         # are preserved, so this only reacts to real pyproject changes).
+        #
+        # pip is pinned alongside pip-tools, not incidentally: pip-compile drives
+        # pip's *internals*, which carry no compatibility guarantee, so the
+        # runner's preinstalled pip is a silent input to a step whose whole point
+        # is reproducibility. Leaving it floating broke this step on every branch
+        # at once when the runner moved to pip 26 and `stdlib_pkgs` left
+        # `pip._internal.utils.compat`. Bump the two together, and only together.
         run: |
-          pip install pip-tools==7.5.3
+          pip install pip==26.2.1 pip-tools==7.6.1
           pip-compile --quiet --output-file=requirements.lock --strip-extras pyproject.toml
           if ! git diff --exit-code requirements.lock; then
             echo "::error file=backend/requirements.lock::requirements.lock is out of sync with pyproject.toml. Regenerate: cd backend && pip-compile --output-file=requirements.lock --strip-extras pyproject.toml"
@@ -90,7 +97,7 @@ jobs:
         run: |
           npm run build
           test -f out/index.html
-          for route in runs runs/view review review/edit rules metrics design; do
+          for route in runs runs/view review review/edit rules metrics audit design; do
             test -f "out/$route/index.html" || {
               echo "::error::out/$route/index.html missing — trailingSlash or the route is gone"
               exit 1

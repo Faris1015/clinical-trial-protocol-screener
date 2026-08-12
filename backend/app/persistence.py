@@ -1,6 +1,6 @@
 """Durable persistence for screenings (#2).
 
-Two things must survive a restart, crash, or deploy:
+Three things must survive a restart, crash, or deploy:
 
 1. **LangGraph execution state** — the checkpointer. A run parked at the
    human-approval gate can wait hours; losing it drops the screening.
@@ -8,17 +8,23 @@ Two things must survive a restart, crash, or deploy:
    denormalized criteria/match counts, plus the uploaded protocol text (the
    input a run streams from). This is what the runs index lists and what a
    delayed `/stream` rebuilds its input from.
+3. **The decision index** — every approval, rejection, criteria revision and
+   escalation, across every run, appended as it happens (#98). Its own table and
+   its own repository (``AuditStore``) rather than a column on the row above: a
+   screening has one status and many decisions, and the org-wide question an
+   auditor asks — *what did this person do last quarter* — is not a question
+   about any one run.
 
-Both live in the *same* database, selected by ``CHECKPOINT_BACKEND``:
+All three live in the *same* database, selected by ``CHECKPOINT_BACKEND``:
 
 - ``memory``   — process-local, lost on restart (tests only).
 - ``sqlite``   — durable single-node default.
 - ``postgres`` — multi-replica production target (deps in the ``postgres`` extra).
 
-Route handlers never touch SQL: they call the ``ScreeningStore`` repository.
-Nothing here is constructed at import — ``AsyncSqliteSaver`` captures the
-running loop in its constructor, so everything is built inside ``open_persistence``
-from the app's lifespan.
+Route handlers never touch SQL: they call the ``ScreeningStore`` /
+``AuditStore`` repositories. Nothing here is constructed at import —
+``AsyncSqliteSaver`` captures the running loop in its constructor, so everything
+is built inside ``open_persistence`` from the app's lifespan.
 """
 
 from __future__ import annotations
@@ -593,12 +599,313 @@ class PostgresScreeningStore(ScreeningStore):
         return ScreeningPage(items=[_record(r) for r in rows], total=total)
 
 
+# --- The decision index (#98) -----------------------------------------------
+
+
+@dataclass(frozen=True)
+class AuditDecision:
+    """One human decision, as it is handed to the index.
+
+    Written at the moment the decision is made (see ``services/audit.record``),
+    never derived by walking checkpoints at query time — which is what makes
+    ``GET /api/audit`` a bounded read over one indexed table rather than a load of
+    every run this instance has ever performed.
+
+    PHI-safe by construction, and structurally so: these eight fields are the
+    whole vocabulary, and none of them has anywhere for a patient to be. Staff
+    identity, the action, when, which run, and a sentence about the *protocol*.
+    ``services/audit.py`` documents the rule; ``tests/test_audit.py`` asserts it.
+
+    ``revision`` is the criteria revision a ``criteria_revised`` entry produced
+    and 0 for every other action — it is what lets an entry link to the specific
+    before/after diff in the run's checkpoint rather than to the run at large.
+    ``source_filename`` is denormalized from the screening row so the index reads
+    without a join: an auditor's first scan is by protocol name, and the row it
+    would join against can be deleted while the decision must not be.
+    """
+
+    thread_id: str
+    action: str
+    actor: str
+    actor_role: str
+    occurred_at: str
+    detail: str
+    revision: int = 0
+    source_filename: str = ""
+
+
+@dataclass(frozen=True)
+class AuditRecord(AuditDecision):
+    """A stored decision, plus the sequence number the index gave it.
+
+    ``id`` is assigned by the database, so it is monotonic in insertion order and
+    is what breaks a tie between two decisions sharing a timestamp — two reviewers
+    acting in the same millisecond must still have a total order, or a page
+    boundary can drop or repeat a row.
+    """
+
+    id: int = 0
+
+
+@dataclass(frozen=True)
+class AuditPage:
+    """One page of ``AuditStore.list`` results plus the total the filter matched."""
+
+    items: list[AuditRecord]
+    total: int
+
+
+@dataclass(frozen=True)
+class AuditFilter:
+    """The narrowing an audit query asks for. Every field is optional and ANDs.
+
+    ``since``/``until`` are inclusive bounds compared against ``occurred_at`` as
+    *strings*. That is sound rather than a shortcut: every stamp is written by
+    ``datetime.now(UTC).isoformat()``, so they share one format and one offset,
+    and ISO-8601 in a fixed format sorts lexicographically the way it sorts
+    chronologically. ``services/audit.parse_bound`` is what normalizes a caller's
+    date into that format, and the one place that rule is applied.
+    """
+
+    actor: str | None = None
+    action: str | None = None
+    thread_id: str | None = None
+    since: str | None = None
+    until: str | None = None
+
+
+class AuditStore(ABC):
+    """Thin async repository for the org-wide decision index. No ORM."""
+
+    @abstractmethod
+    async def setup(self) -> None:
+        """Create the table and its indexes if absent. Idempotent."""
+
+    @abstractmethod
+    async def record(self, decision: AuditDecision) -> None:
+        """Append one decision. Never updates, never deletes — this is a ledger."""
+
+    @abstractmethod
+    async def list(
+        self, *, limit: int, offset: int, filters: AuditFilter | None = None
+    ) -> AuditPage:
+        """One page of decisions, newest first, plus the total matching the filter."""
+
+
+def _audit_filters(filters: AuditFilter, placeholder: str) -> tuple[str, list[str]]:
+    """The shared WHERE clause for ``AuditStore.list`` and its COUNT twin.
+
+    Exact matches on actor/action/thread_id and a closed range on ``occurred_at``.
+    No LIKE anywhere: every one of these is an identifier a caller either has or
+    does not, and a substring match on an actor would let ``ana@`` return
+    ``susana@``'s decisions to someone scoped away from them.
+    """
+    clauses: list[str] = []
+    params: list[str] = []
+    for column, value in (
+        ("actor", filters.actor),
+        ("action", filters.action),
+        ("thread_id", filters.thread_id),
+    ):
+        if value:
+            clauses.append(f"{column} = {placeholder}")
+            params.append(value)
+    if filters.since:
+        clauses.append(f"occurred_at >= {placeholder}")
+        params.append(filters.since)
+    if filters.until:
+        clauses.append(f"occurred_at <= {placeholder}")
+        params.append(filters.until)
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    return where, params
+
+
+# Newest first, with the sequence number as the tiebreaker — see `AuditRecord.id`.
+_AUDIT_ORDER = " ORDER BY occurred_at DESC, id DESC"
+
+_AUDIT_COLUMNS = (
+    "id, thread_id, action, actor, actor_role, occurred_at, detail, revision, source_filename"
+)
+
+_INSERT_AUDIT_COLUMNS = (
+    "thread_id, action, actor, actor_role, occurred_at, detail, revision, source_filename"
+)
+
+# The `id` column is the one piece of DDL the two engines spell differently.
+_CREATE_AUDIT_TABLE = """
+CREATE TABLE IF NOT EXISTS audit_events (
+    id              {pk},
+    thread_id       TEXT NOT NULL,
+    action          TEXT NOT NULL,
+    actor           TEXT NOT NULL,
+    actor_role      TEXT NOT NULL,
+    occurred_at     TEXT NOT NULL,
+    detail          TEXT NOT NULL,
+    revision        INTEGER NOT NULL DEFAULT 0,
+    source_filename TEXT NOT NULL DEFAULT ''
+)
+"""
+
+# One index per way the page is asked for. The first is the default ordering and
+# every unfiltered page view; the other two are the filters an auditor actually
+# narrows by — a person, or a run — and without them each is a full scan of a
+# table that only ever grows. Both statements work on either engine.
+_CREATE_AUDIT_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS idx_audit_events_occurred_at "
+    "ON audit_events(occurred_at DESC, id DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_events_actor ON audit_events(actor, occurred_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_events_thread ON audit_events(thread_id, occurred_at)",
+)
+
+
+def _audit_record(row: Sequence[Any]) -> AuditRecord:
+    """One `_AUDIT_COLUMNS` row → a record. Shared by both SQL stores."""
+    return AuditRecord(
+        id=row[0],
+        thread_id=row[1],
+        action=row[2],
+        actor=row[3],
+        actor_role=row[4],
+        occurred_at=row[5],
+        detail=row[6],
+        revision=row[7],
+        source_filename=row[8],
+    )
+
+
+def _audit_values(decision: AuditDecision) -> tuple[Any, ...]:
+    """The insert parameters for one decision, in `_INSERT_AUDIT_COLUMNS` order."""
+    return (
+        decision.thread_id,
+        decision.action,
+        decision.actor,
+        decision.actor_role,
+        decision.occurred_at,
+        decision.detail,
+        decision.revision,
+        decision.source_filename,
+    )
+
+
+class InMemoryAuditStore(AuditStore):
+    """List-backed index for tests — no durability, no I/O, no event loop needed."""
+
+    def __init__(self) -> None:
+        self._rows: list[AuditRecord] = []
+
+    async def setup(self) -> None:
+        return None
+
+    async def record(self, decision: AuditDecision) -> None:
+        # `len + 1` reproduces the SQL stores' 1-based autoincrement, so a test
+        # asserting on ids reads the same on either backend.
+        self._rows.append(AuditRecord(**vars(decision), id=len(self._rows) + 1))
+
+    async def list(
+        self, *, limit: int, offset: int, filters: AuditFilter | None = None
+    ) -> AuditPage:
+        criteria = filters or AuditFilter()
+        rows = [row for row in self._rows if _matches(row, criteria)]
+        # Mirrors `_AUDIT_ORDER`: newest first, sequence number breaking the tie.
+        rows.sort(key=lambda row: (row.occurred_at, row.id), reverse=True)
+        return AuditPage(items=rows[offset : offset + limit], total=len(rows))
+
+
+def _matches(row: AuditRecord, filters: AuditFilter) -> bool:
+    """The in-memory twin of `_audit_filters` — the same ANDed exact matches."""
+    return not (
+        (filters.actor and row.actor != filters.actor)
+        or (filters.action and row.action != filters.action)
+        or (filters.thread_id and row.thread_id != filters.thread_id)
+        or (filters.since and row.occurred_at < filters.since)
+        or (filters.until and row.occurred_at > filters.until)
+    )
+
+
+class SqliteAuditStore(AuditStore):
+    """aiosqlite-backed index, sharing the store's connection.
+
+    Sharing is safe and deliberate: every statement here is a single autocommit
+    INSERT or SELECT, exactly like ``SqliteScreeningStore``'s, so there is no
+    multi-statement transaction for the two to interleave inside (see
+    ``_open_sqlite`` for why that connection is in autocommit mode at all). A
+    third connection to the same file would only add another writer to contend
+    for the WAL's single write lock.
+    """
+
+    def __init__(self, conn: aiosqlite.Connection) -> None:
+        self._conn = conn
+
+    async def setup(self) -> None:
+        await self._conn.execute(_CREATE_AUDIT_TABLE.format(pk="INTEGER PRIMARY KEY AUTOINCREMENT"))
+        for statement in _CREATE_AUDIT_INDEXES:
+            await self._conn.execute(statement)
+        await self._conn.commit()
+
+    async def record(self, decision: AuditDecision) -> None:
+        await self._conn.execute(
+            f"INSERT INTO audit_events ({_INSERT_AUDIT_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            _audit_values(decision),
+        )
+        await self._conn.commit()
+
+    async def list(
+        self, *, limit: int, offset: int, filters: AuditFilter | None = None
+    ) -> AuditPage:
+        where, params = _audit_filters(filters or AuditFilter(), "?")
+        async with self._conn.execute(
+            f"SELECT COUNT(*) FROM audit_events{where}", tuple(params)
+        ) as cur:
+            total = (await cur.fetchone())[0]  # type: ignore[index]
+        async with self._conn.execute(
+            f"SELECT {_AUDIT_COLUMNS} FROM audit_events{where}{_AUDIT_ORDER} LIMIT ? OFFSET ?",
+            (*params, limit, offset),
+        ) as cur:
+            rows = await cur.fetchall()
+        return AuditPage(items=[_audit_record(row) for row in rows], total=total)
+
+
+class PostgresAuditStore(AuditStore):
+    """psycopg-backed index for production. Same schema, ``%s`` placeholders."""
+
+    def __init__(self, conn: AsyncConnection) -> None:
+        self._conn = conn
+
+    async def setup(self) -> None:
+        await self._conn.execute(_CREATE_AUDIT_TABLE.format(pk="BIGSERIAL PRIMARY KEY"))
+        for statement in _CREATE_AUDIT_INDEXES:
+            await self._conn.execute(statement)
+        await self._conn.commit()
+
+    async def record(self, decision: AuditDecision) -> None:
+        await self._conn.execute(
+            f"INSERT INTO audit_events ({_INSERT_AUDIT_COLUMNS}) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            _audit_values(decision),
+        )
+        await self._conn.commit()
+
+    async def list(
+        self, *, limit: int, offset: int, filters: AuditFilter | None = None
+    ) -> AuditPage:
+        where, params = _audit_filters(filters or AuditFilter(), "%s")
+        cur = await self._conn.execute(f"SELECT COUNT(*) FROM audit_events{where}", tuple(params))
+        row = await cur.fetchone()
+        total = row[0] if row else 0
+        cur = await self._conn.execute(
+            f"SELECT {_AUDIT_COLUMNS} FROM audit_events{where}{_AUDIT_ORDER} LIMIT %s OFFSET %s",
+            (*params, limit, offset),
+        )
+        rows = await cur.fetchall()
+        return AuditPage(items=[_audit_record(r) for r in rows], total=total)
+
+
 # --- Lifecycle --------------------------------------------------------------
 
 
 @dataclass
 class Persistence:
-    """Bundles the checkpointer and the metadata store with their lifecycle.
+    """Bundles the checkpointer and both stores with their lifecycle.
 
     Built once per process in the app lifespan; ``aclose`` releases every
     connection on shutdown.
@@ -607,6 +914,7 @@ class Persistence:
     backend: str
     checkpointer: BaseCheckpointSaver
     store: ScreeningStore
+    audit: AuditStore
     _closers: list[Callable[[], Awaitable[None]]]
 
     async def aclose(self) -> None:
@@ -622,8 +930,10 @@ async def open_persistence(settings: Settings) -> Persistence:
     if backend == "memory":
         checkpointer: BaseCheckpointSaver = MemorySaver()
         store: ScreeningStore = InMemoryScreeningStore()
+        audit: AuditStore = InMemoryAuditStore()
         await store.setup()
-        return Persistence(backend, checkpointer, store, [])
+        await audit.setup()
+        return Persistence(backend, checkpointer, store, audit, [])
 
     if backend == "sqlite":
         return await _open_sqlite(settings)
@@ -669,8 +979,12 @@ async def _open_sqlite(settings: Settings) -> Persistence:
     await checkpointer.setup()
     store = SqliteScreeningStore(store_conn)
     await store.setup()
+    # Shares `store_conn` — see SqliteAuditStore for why that is the right number
+    # of writers rather than one too few.
+    audit = SqliteAuditStore(store_conn)
+    await audit.setup()
 
-    return Persistence("sqlite", checkpointer, store, [saver_conn.close, store_conn.close])
+    return Persistence("sqlite", checkpointer, store, audit, [saver_conn.close, store_conn.close])
 
 
 async def _open_postgres(settings: Settings) -> Persistence:
@@ -689,5 +1003,7 @@ async def _open_postgres(settings: Settings) -> Persistence:
     await checkpointer.setup()
     store = PostgresScreeningStore(store_conn)
     await store.setup()
+    audit = PostgresAuditStore(store_conn)
+    await audit.setup()
 
-    return Persistence("postgres", checkpointer, store, [saver_conn.close, store_conn.close])
+    return Persistence("postgres", checkpointer, store, audit, [saver_conn.close, store_conn.close])
