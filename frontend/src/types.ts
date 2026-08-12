@@ -895,3 +895,48 @@ export type ScreeningState = {
    */
   screening: Screening | null;
 };
+
+/**
+ * One entry in the org-wide decision index (#98) — `GET /api/audit`.
+ *
+ * `label` is `action` in the form a human reads; both travel so a filter can key
+ * on the enum while the table prints the name. `revision` is non-zero only for a
+ * `criteria_revised` entry, and it is what addresses that revision's before/after
+ * diff on the run's own page.
+ */
+export type AuditEntry = {
+  id: number;
+  thread_id: string;
+  action: AuditAction | string;
+  label: string;
+  actor: string;
+  actor_role: string;
+  occurred_at: string;
+  detail: string;
+  revision: number;
+  source_filename: string;
+};
+
+/** The decisions the index carries. A future action still renders — see `lib/audit`. */
+export type AuditAction = "approved" | "rejected" | "criteria_revised" | "escalated";
+
+/**
+ * `GET /api/audit` — one page of the index plus the filter that was applied.
+ *
+ * `scope` is what the server actually narrowed by, not what was asked for: a
+ * reviewer is scoped to their own decisions server-side (#98 AC 7), and echoing
+ * it back is how the page can say so without inferring it from the role.
+ */
+export type AuditPage = {
+  items: AuditEntry[];
+  total: number;
+  limit: number;
+  offset: number;
+  scope: {
+    actor: string | null;
+    action: string | null;
+    thread_id: string | null;
+    from: string | null;
+    to: string | null;
+  };
+};

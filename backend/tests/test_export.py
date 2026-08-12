@@ -281,9 +281,9 @@ def test_a_criterion_label_that_would_execute_as_a_formula_is_defused():
 def test_a_negative_number_is_left_as_a_number():
     """`-` leads the formula list, so exempting numerics is what keeps a real lab
     value from arriving in the spreadsheet as text."""
-    assert export._csv_cell("-3.2") == "-3.2"
-    assert export._csv_cell("-") == "'-"
-    assert export._csv_cell("-cmd") == "'-cmd"
+    assert export.csv_cell("-3.2") == "-3.2"
+    assert export.csv_cell("-") == "'-"
+    assert export.csv_cell("-cmd") == "'-cmd"
 
 
 # --- Buckets agree with every other reader ----------------------------------

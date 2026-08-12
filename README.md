@@ -500,6 +500,47 @@ curl -b cookies.txt http://localhost:8000/api/screenings/<thread_id>/state
   resolved server-side, so the exported report below prints the same trail rather
   than a second implementation of it.
 
+### Org-wide audit log
+
+The timeline above answers *what happened in this run*. The question an auditor
+asks first is the other one — *who approved, rejected, revised or escalated
+anything, across every run, in this window* — and no per-run view can answer it.
+**Audit Log** is that index: every approval, rejection, criteria revision and
+escalation, newest first, filterable by staff member, decision, run and date
+range, and downloadable as CSV or JSON.
+
+```bash
+curl -b cookies.txt "http://localhost:8000/api/audit?action=rejected&from=2026-07-01&to=2026-07-31"
+# → {"items": [{"id": 214, "action": "rejected", "label": "Rejected",
+#               "actor": "lead@example.com", "actor_role": "reviewer",
+#               "occurred_at": "2026-07-18T09:41:02.518Z", "revision": 0,
+#               "thread_id": "…", "source_filename": "NSCLC-2b.pdf",
+#               "detail": "Rejected the protocol as unscreenable — …"}, ...],
+#    "total": 7, "limit": 25, "offset": 0, "scope": {"actor": null, ...}}
+curl -b cookies.txt "http://localhost:8000/api/audit/export?format=csv" -OJ
+```
+
+- **Written as decisions happen, not scanned for.** Every other view in this app
+  derives from a checkpoint, which is the right default — but answering "every
+  decision in July" that way means loading every checkpoint the instance has ever
+  written. So each decision is appended to its own indexed table at the moment it
+  is made, and the query is a bounded read.
+- **The checkpoint stays the record.** A decision is written into graph state
+  first and indexed after; a failed index write is logged with the whole decision
+  rather than raised, because failing an approval that has already happened would
+  ask the client to retry what the graph has already done.
+- **PHI-safe by construction.** An entry is eight fields — staff identity, the
+  action, a timestamp, the run and protocol, a revision number, and one sentence
+  about the *protocol*. Nothing in `app/services/audit.py` reads
+  `matched_patients`, and the audit store cannot reach a checkpoint at all. A test
+  asserts it against a run with a scored cohort.
+- **Scoped in the query, not in the page.** An admin reads the whole org; a
+  reviewer reads their own decisions, enforced in the SQL. The response echoes the
+  scope it applied, so the page can say which of the two it is showing.
+- **Every entry links back.** To the run — and for a criteria revision, straight
+  to that revision's before/after diff, so "what did they change?" is one click
+  rather than a scroll.
+
 ### Per-criterion cohort attrition
 
 The cohort table answers *who* is eligible. The question a coordinator actually
@@ -1007,6 +1048,7 @@ backend/
       simulation.py            # What-if: re-score the cohort under moved thresholds
       checkpoint.py            # Reading a checkpoint defensively — the shared guards
       timeline.py              # The event log as an audit trail: retries, gate, attribution
+      audit.py                 # The org-wide index of human decisions: written, scoped, exportable
       provenance.py            # criterion source_text → character span in the protocol
       report.py                # Self-contained, printable HTML screening report
       rules.py                 # The compliance rules database, rendered for reading
@@ -1028,6 +1070,7 @@ frontend/
     components/provenance/     # Criteria beside the protocol, with source highlighting
     components/rules/          # The compliance rules viewer findings link into
     components/metrics/        # In-app funnel, rejection breakdown, loop depth
+    components/audit/          # The org-wide decision log, filtered and exportable
     components/batch/          # Batch upload progress, one row per protocol
     lib/batch.ts               # The batch's stream queue and phase mapping
     components/report-download.tsx # Export a run as a self-contained HTML report

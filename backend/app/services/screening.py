@@ -41,6 +41,7 @@ from app.graph.state import ScreeningStatus, event, initial_state
 from app.logging_config import bind_contextvars, get_logger
 from app.services import (
     attrition,
+    audit,
     checkpoint,
     cohort,
     comparison,
@@ -70,7 +71,7 @@ if TYPE_CHECKING:
     from langgraph.checkpoint.base import BaseCheckpointSaver
     from langgraph.graph.state import CompiledStateGraph
 
-    from app.persistence import ScreeningStore
+    from app.persistence import AuditStore, ScreeningStore
 
 log = get_logger("screening")
 
@@ -207,7 +208,9 @@ def _summary_columns(values: dict[str, Any]) -> dict[str, int]:
     }
 
 
-async def _record_outcome(store: ScreeningStore, thread_id: str, snapshot: Snapshot) -> str:
+async def _record_outcome(
+    store: ScreeningStore, audit_store: AuditStore, thread_id: str, snapshot: Snapshot
+) -> str:
     """Denormalize the finished (or parked) run into the store's summary columns,
     returning the status it recorded.
 
@@ -216,10 +219,37 @@ async def _record_outcome(store: ScreeningStore, thread_id: str, snapshot: Snaps
     The status is handed back rather than recomputed by the caller, so the row the
     index shows and the notification a reviewer gets (#60) can never disagree
     about the phase.
+
+    An escalation is indexed here (#98) rather than in `human_escalation_node`,
+    because the node is a synchronous graph callback with no store in scope — and
+    because this is the one place that runs exactly once per graph run, which is
+    what keeps a run that escalates twice (an edit-and-rerun the Critic gives up on
+    again) from being recorded once and a run that escalates once from being
+    recorded twice.
     """
     status = _status_from_snapshot(snapshot)
     await store.set_status(thread_id, status, **_summary_columns(snapshot.values))
+    if status == "escalated":
+        await audit.record(
+            audit_store,
+            "escalated",
+            thread_id,
+            # No principal: the Critic gave up, and naming whichever reviewer
+            # eventually picks the run up would attribute a decision to someone who
+            # had not yet seen it.
+            actor=None,
+            detail=(
+                "Escalated for human review after "
+                f"{_int(snapshot.values.get('parse_attempts'))} parse attempts"
+            ),
+            source_filename=str(snapshot.values.get("source_filename") or ""),
+        )
     return status
+
+
+def _int(value: Any) -> int:
+    """A checkpoint counter as an int, defensively — 0 for anything unreadable."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
 async def _notify_if_parked(thread_id: str, status: str, snapshot: Snapshot) -> None:
@@ -264,6 +294,7 @@ def _terminal_frame(snapshot: Snapshot) -> str:
 
 async def _graph_frames(
     store: ScreeningStore,
+    audit_store: AuditStore,
     graph: ScreeningGraph,
     thread_id: str,
     config: RunnableConfig,
@@ -298,7 +329,7 @@ async def _graph_frames(
             for node, update in chunk.items():
                 yield sse.update_frame(node, jsonable_encoder(update))
         snapshot = await graph.aget_state(config)
-        status = await _record_outcome(store, thread_id, snapshot)
+        status = await _record_outcome(store, audit_store, thread_id, snapshot)
         await _notify_if_parked(thread_id, status, snapshot)
         yield _terminal_frame(snapshot)
         log.info(f"screening.{operation}_finished")
@@ -545,7 +576,7 @@ async def get_metrics_summary(
 
 
 async def stream_screening(
-    store: ScreeningStore, graph: ScreeningGraph, thread_id: str
+    store: ScreeningStore, audit_store: AuditStore, graph: ScreeningGraph, thread_id: str
 ) -> AsyncIterator[str]:
     """Validate the thread, then return an SSE frame iterator for the graph run.
 
@@ -560,13 +591,20 @@ async def stream_screening(
     log.info("screening.stream_started")
     state = initial_state(screening_input.raw_protocol_text, screening_input.source_filename)
     return _graph_frames(
-        store, graph, thread_id, config, state, stream_mode="updates", operation="stream"
+        store,
+        audit_store,
+        graph,
+        thread_id,
+        config,
+        state,
+        stream_mode="updates",
+        operation="stream",
     )
 
 
 async def _record_approver(
     graph: ScreeningGraph, config: RunnableConfig, approver: Principal
-) -> None:
+) -> str:
     """Stamp the approver into the parked checkpoint before it resumes (#50).
 
     `aupdate_state` merges values into the *current* checkpoint without moving
@@ -574,13 +612,17 @@ async def _record_approver(
     `astream(None, ...)` resume below still enters the matcher — which now sees
     `approved_by` in its state. `events` carries an append reducer, so the audit
     entry joins the same log the frontend renders rather than replacing it.
+
+    Returns the stamp it wrote, so the org-wide index (#98) can be written with
+    the same instant the checkpoint carries rather than one a round trip later.
     """
+    approved_at = datetime.now(UTC).isoformat()
     await graph.aupdate_state(
         config,
         {
             "approved_by": approver.email,
             "approved_by_role": approver.role,
-            "approved_at": datetime.now(UTC).isoformat(),
+            "approved_at": approved_at,
             "events": [
                 event(
                     "human",
@@ -590,10 +632,15 @@ async def _record_approver(
             ],
         },
     )
+    return approved_at
 
 
 async def approve_screening(
-    store: ScreeningStore, graph: ScreeningGraph, thread_id: str, approver: Principal
+    store: ScreeningStore,
+    audit_store: AuditStore,
+    graph: ScreeningGraph,
+    thread_id: str,
+    approver: Principal,
 ) -> AsyncIterator[str]:
     """Resume past the human-in-the-loop gate and STREAM the matcher over SSE.
 
@@ -620,12 +667,26 @@ async def approve_screening(
     """
     config = await _require_thread(store, thread_id)
     bind_contextvars(thread_id=thread_id)
-    if "matcher" not in (await graph.aget_state(config)).next:
+    snapshot = await graph.aget_state(config)
+    if "matcher" not in snapshot.next:
         raise ScreeningNotApprovableError("screening is not awaiting approval")
-    await _record_approver(graph, config, approver)
+    approved_at = await _record_approver(graph, config, approver)
     # Server-side counterpart to the in-state event: who cleared the gate, in the
     # same correlated log stream as the rest of the run.
     log.info("screening.approved", approved_by=approver.email, approver_role=approver.role)
+    # And the org-wide counterpart (#98), indexed after the checkpoint write that
+    # made the decision durable — an approval that is on the record but missing
+    # from the index is recoverable; the reverse would be a claim about a decision
+    # the run never received.
+    await audit.record(
+        audit_store,
+        "approved",
+        thread_id,
+        actor=approver,
+        detail="Cleared the approval gate — patient matching authorized",
+        occurred_at=approved_at,
+        source_filename=str(snapshot.values.get("source_filename") or ""),
+    )
     # None input resumes from the interrupt_before=["matcher"] checkpoint. Two
     # stream modes: "updates" carries the matcher's terminal node result; "custom"
     # carries its mid-flight progress (see the matcher's _progress_emitter) so the
@@ -633,6 +694,7 @@ async def approve_screening(
     # idle-timeout reaper from killing a working run.
     return _graph_frames(
         store,
+        audit_store,
         graph,
         thread_id,
         config,
@@ -644,6 +706,7 @@ async def approve_screening(
 
 async def reject_screening(
     store: ScreeningStore,
+    audit_store: AuditStore,
     graph: ScreeningGraph,
     thread_id: str,
     reviewer: Principal,
@@ -741,6 +804,20 @@ async def reject_screening(
         reason_chars=len(reason),
         from_gate=at_gate,
     )
+    # The reason travels into the org-wide index (#98) rather than only its length,
+    # unlike the log line above: a rejection is the one decision whose *why* is the
+    # record, and an audit entry saying only "rejected" would send the reader back
+    # to the run to find out what this endpoint already knows. It is the same
+    # protocol-about free text the run's own trail already carries (#91).
+    await audit.record(
+        audit_store,
+        "rejected",
+        thread_id,
+        actor=reviewer,
+        detail=f"Rejected the protocol as unscreenable — {reason}",
+        occurred_at=rejected_at,
+        source_filename=str(snapshot.values.get("source_filename") or ""),
+    )
     return {
         "thread_id": thread_id,
         "status": "rejected",
@@ -805,6 +882,7 @@ def _stale_cohort(values: dict[str, Any]) -> dict[str, Any]:
 
 async def resume_with_edited_criteria(
     store: ScreeningStore,
+    audit_store: AuditStore,
     graph: ScreeningGraph,
     thread_id: str,
     *,
@@ -860,6 +938,7 @@ async def resume_with_edited_criteria(
     changes = criteria_edits.diff_criteria(previous, criteria)
     revision = current_revision + 1
     summary = criteria_edits.summarize(changes)
+    record = criteria_edits.edit_record(revision, editor, changes)
     # Empty unless this run had already scored a cohort — the case #95's promoted
     # what-if introduced. Spread first so the explicit keys below always win, and
     # its event appended after the edit's so the timeline reads cause then cost.
@@ -872,7 +951,7 @@ async def resume_with_edited_criteria(
             "criteria_revision": revision,
             # Appended, not replaced: `criteria_edits` and `events` both carry the
             # operator.add reducer, so revision N's diff joins revision N-1's.
-            "criteria_edits": [criteria_edits.edit_record(revision, editor, changes)],
+            "criteria_edits": [record],
             # The Critic's previous verdict described the extraction that just got
             # replaced, so it must not survive into the re-run: a stale `passed`
             # would route straight back to the gate, and stale feedback would be
@@ -899,11 +978,27 @@ async def resume_with_edited_criteria(
         revision=revision,
         changes=len(changes),
     )
+    # Indexed with the revision number (#98), which is what lets an entry link to
+    # *this* diff rather than to the run: the before/after lives in the checkpoint's
+    # `criteria_edits` and is addressed by revision. The detail counts the changes
+    # rather than listing them, the same reading `summarize` exists to give the
+    # run's own event log.
+    await audit.record(
+        audit_store,
+        "criteria_revised",
+        thread_id,
+        actor=editor,
+        detail=f"Revised the extracted criteria — {summary}",
+        revision=revision,
+        occurred_at=record["edited_at"],
+        source_filename=str(values.get("source_filename") or ""),
+    )
     # `as_node="parser"` leaves the graph's next task at the Critic (the parser's
     # own outgoing edge), so a None input resumes there — the same resume the
     # approve path uses, one node earlier.
     return _graph_frames(
         store,
+        audit_store,
         graph,
         thread_id,
         config,

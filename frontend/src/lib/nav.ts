@@ -1,4 +1,12 @@
-import { BarChart3, ClipboardCheck, FilePlus2, History, Scale, Users } from "lucide-react";
+import {
+  BarChart3,
+  ClipboardCheck,
+  FilePlus2,
+  History,
+  Scale,
+  ScrollText,
+  Users,
+} from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { Role } from "@/lib/api";
 
@@ -28,6 +36,11 @@ export const NAV_ITEMS: NavItem[] = [
   { href: "/review", label: "Review Queue", icon: ClipboardCheck },
   { href: "/rules", label: "Rules", icon: Scale },
   { href: "/metrics", label: "Metrics", icon: BarChart3 },
+  // No `minRole` (#98): an admin reads the whole org's decisions and a reviewer
+  // reads their own, so both have something behind the door. The scoping is the
+  // API's, applied in the query — hiding the entry from reviewers would take away
+  // a page they are entitled to rather than protect anything.
+  { href: "/audit", label: "Audit Log", icon: ScrollText },
   { href: "/admin", label: "Accounts", icon: Users, minRole: "admin" },
 ];
 

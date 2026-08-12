@@ -1,9 +1,10 @@
 """FastAPI app: HTTP edge for TrialGate — routing, error contract, logging.
 
 Routes are thin translators: they read the request, resolve the wired
-dependencies (store, graph), and hand off to `app.services.screening`, which
-owns all screening business logic. Nothing here builds state, invokes the
-graph, or formats SSE frames directly.
+dependencies (store, audit index, graph), and hand off to
+`app.services.screening` — or, for the org-wide decision index (#98),
+`app.services.audit` — which own all business logic. Nothing here builds state,
+invokes the graph, or formats SSE frames directly.
 
 Error contract: domain exceptions (app/exceptions.py) map to status codes in
 one handler — clients get a JSON body, never a stack trace. The SSE stream
@@ -54,9 +55,9 @@ from app.exceptions import (
 )
 from app.health import app_version, readiness
 from app.logging_config import bind_contextvars, clear_contextvars, configure_logging, get_logger
-from app.persistence import Persistence, ScreeningStore, open_persistence
+from app.persistence import AuditStore, Persistence, ScreeningStore, open_persistence
 from app.schemas.criteria import CriteriaSchema
-from app.services import rules, screening, simulation, sse
+from app.services import audit, rules, screening, simulation, sse
 from app.services.concurrency import ConcurrencyLimiter, release_after
 from app.services.uploads import read_upload_capped, validate_content_type
 
@@ -134,6 +135,11 @@ graph: CompiledStateGraph | None = None
 def _store() -> ScreeningStore:
     assert _persistence is not None, "persistence not initialized — is the app started?"
     return _persistence.store
+
+
+def _audit() -> AuditStore:
+    assert _persistence is not None, "persistence not initialized — is the app started?"
+    return _persistence.audit
 
 
 def _graph() -> CompiledStateGraph:
@@ -567,7 +573,7 @@ async def stream_screening(
     # freed in release_after's finally, even if the client disconnects.
     active_screenings.acquire()
     try:
-        frames = await screening.stream_screening(_store(), _graph(), thread_id)
+        frames = await screening.stream_screening(_store(), _audit(), _graph(), thread_id)
     except BaseException:
         active_screenings.release()
         raise
@@ -595,7 +601,9 @@ async def approve_screening(
     # here is released on that path too.
     active_screenings.acquire()
     try:
-        frames = await screening.approve_screening(_store(), _graph(), thread_id, principal)
+        frames = await screening.approve_screening(
+            _store(), _audit(), _graph(), thread_id, principal
+        )
     except BaseException:
         active_screenings.release()
         raise
@@ -650,7 +658,7 @@ async def reject_screening(
     write bucket all the same, since it does persist.
     """
     return await screening.reject_screening(
-        _store(), _graph(), thread_id, principal, rejection.reason
+        _store(), _audit(), _graph(), thread_id, principal, rejection.reason
     )
 
 
@@ -698,6 +706,7 @@ async def edit_criteria(
     try:
         frames = await screening.resume_with_edited_criteria(
             _store(),
+            _audit(),
             _graph(),
             thread_id,
             criteria=edits.criteria.model_dump(),
@@ -907,6 +916,104 @@ async def download_cohort_export(
             # `export_filename` emits only [A-Za-z0-9._-] (it runs the stored name
             # back through `sanitize_filename`), so the quoted form needs no
             # further escaping and cannot inject a header.
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'",
+        },
+    )
+
+
+# --- The decision index (#98) -----------------------------------------------
+#
+# Guarded at the reviewer rung and scoped *inside* the service by role, rather
+# than admin-gated at the door: a reviewer may read their own decisions (AC 7),
+# and enforcing that in `services/audit.visible_actor` keeps the scope in the SQL
+# instead of in a filter over an already-read page. The two routes take the same
+# filters and apply the same scope, so an auditor's download is exactly the page
+# they were looking at.
+
+
+@app.get("/api/audit")
+@limiter.limit(lambda: settings.rate_limit_read)
+async def list_audit_decisions(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_reviewer)],
+    limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    actor: Annotated[str | None, Query(max_length=320)] = None,
+    action: Annotated[str | None, Query(max_length=64)] = None,
+    thread_id: Annotated[str | None, Query(max_length=200)] = None,
+    date_from: Annotated[str | None, Query(alias="from", max_length=64)] = None,
+    date_to: Annotated[str | None, Query(alias="to", max_length=64)] = None,
+) -> dict:
+    """Every human decision across every run, newest first (#98).
+
+    Returns `{items, total, limit, offset, scope}` — the runs index's envelope, so
+    a client pages both the same way, plus the filter that was actually applied.
+
+    `from`/`to` are aliased because `from` is a Python keyword; they take a bare
+    calendar day or a full ISO-8601 instant, and a bare day covers all of it (see
+    `services/audit.parse_bound`). `action` is validated in the service rather
+    than declared as a `Literal` here so the export route rejects an unknown value
+    with the same message, and `thread_id` is a length-capped string rather than a
+    checked format for the reason `compare_screenings` documents.
+    """
+    return await audit.list_decisions(
+        _audit(),
+        principal,
+        limit=limit,
+        offset=offset,
+        actor=actor,
+        action=action,
+        thread_id=thread_id,
+        since=date_from,
+        until=date_to,
+    )
+
+
+@app.get("/api/audit/export")
+@limiter.limit(lambda: settings.rate_limit_read)
+async def download_audit_export(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_reviewer)],
+    format: Annotated[Literal["csv", "json"], Query()] = "csv",
+    actor: Annotated[str | None, Query(max_length=320)] = None,
+    action: Annotated[str | None, Query(max_length=64)] = None,
+    thread_id: Annotated[str | None, Query(max_length=200)] = None,
+    date_from: Annotated[str | None, Query(alias="from", max_length=64)] = None,
+    date_to: Annotated[str | None, Query(alias="to", max_length=64)] = None,
+) -> Response:
+    """The filtered index as a file for an external auditor (#98, AC 6).
+
+    Takes the index route's filters verbatim and applies the same role scope, so
+    what an auditor downloads is the page they were looking at rather than a
+    second, wider query.
+
+    The cohort export's response headers, for the cohort export's reasons: this
+    file carries a reviewer's free-typed rejection reasons and filenames that came
+    off uploads, so `attachment` keeps it from rendering as a page in our own
+    origin, `nosniff` stops a CSV being sniffed as HTML, and the CSP costs a
+    reference-free file nothing. Unlike the cohort's, it carries no patient data —
+    which is the property `services/audit.py` is built around, not a coincidence of
+    this endpoint.
+    """
+    filename, body = await audit.export_decisions(
+        _audit(),
+        principal,
+        format,
+        actor=actor,
+        action=action,
+        thread_id=thread_id,
+        since=date_from,
+        until=date_to,
+    )
+    return Response(
+        content=body,
+        media_type=_EXPORT_MEDIA_TYPES[format],
+        headers={
+            # The name is built from a date and a literal stem (see
+            # `audit.export_decisions`), so it emits only [A-Za-z0-9.-] and the
+            # quoted form cannot inject a header.
             "Content-Disposition": f'attachment; filename="{filename}"',
             "X-Content-Type-Options": "nosniff",
             "Content-Security-Policy": "default-src 'none'",

@@ -177,6 +177,34 @@ class InvalidComparisonError(ScreenerError):
     http_status = 422
 
 
+class InvalidAuditFilterError(ScreenerError):
+    """The audit index was asked for a narrowing it cannot honor (#98).
+
+    An unknown action, an unreadable date, or a range whose start is after its
+    end. Refused rather than dropped: silently ignoring a filter returns a page
+    *wider* than the one requested, and an auditor reading it would take an
+    unscoped answer for a scoped one.
+    """
+
+    http_status = 422
+
+
+class AuditExportTooLargeError(ScreenerError):
+    """An audit export was asked for more decisions than one file may carry (#98).
+
+    Refused rather than truncated. A CSV has nowhere to state that it holds only
+    the newest N rows — a trailing note row would corrupt the parse the file
+    exists to feed — so a silently short export would leave an auditor unable to
+    tell a complete answer from a partial one. Narrowing the date range is the
+    way through, and the message says the count so the caller knows by how much.
+
+    413 rather than 422: the filter is well-formed, the *response* is what would
+    be too large.
+    """
+
+    http_status = 413
+
+
 class TooManyActiveScreeningsError(ScreenerError):
     """Every concurrency slot is in use; the caller should retry shortly."""
 

@@ -34,7 +34,7 @@ lose verdicts silently.
 **Excel is a formula engine, and this data is untrusted.** Every label and
 sentence in the export came out of an uploaded document by way of an LLM. A cell
 beginning `=`, `+`, `-`, `@`, tab or CR is executed as a formula on open in both
-Excel and Sheets, so `_csv_cell` prefixes those with an apostrophe — the one
+Excel and Sheets, so `csv_cell` prefixes those with an apostrophe — the one
 mitigation both applications honor. Numbers are exempted, so a legitimate `-3.2`
 stays a number rather than becoming text. This is the same class of decision as
 `report._esc`: applied at every cell, with no other way to build a row.
@@ -83,7 +83,7 @@ _FORMULA_LEADERS = ("=", "+", "-", "@", "\t", "\r")
 # Spelled as an escape rather than as the literal character: U+FEFF is
 # zero-width, and a reader of this source could not tell a present one from an
 # absent one, nor an editor be trusted not to strip it.
-_BOM = "\ufeff"
+BOM = "\ufeff"
 
 # What both exports say for a criterion the run holds no verdict on for a patient.
 # Empty would read as "passed silently" in a spreadsheet column of `pass`, and as
@@ -111,8 +111,13 @@ def _strings(values: Mapping[str, Any], key: str) -> list[str]:
     return [_text(entry) for entry in value]
 
 
-def _csv_cell(value: Any) -> str:
+def csv_cell(value: Any) -> str:
     """One cell, defused against spreadsheet formula injection.
+
+    Public, with `BOM`, because the audit export (#98) writes a CSV from data of
+    exactly the same provenance — a reviewer's typed rejection reason, an uploaded
+    protocol's filename — and a mitigation that lived in two files would eventually
+    be improved in one of them.
 
     See the module docstring. The apostrophe is data — a reader who opens the file
     in a text editor sees it — which is the accepted cost of the only mitigation
@@ -307,21 +312,21 @@ def render_csv(payload: Mapping[str, Any]) -> str:
     # free text" — a protocol sentence with a comma in it must not split a row.
     buffer = io.StringIO(newline="")
     writer = csv.writer(buffer, lineterminator="\r\n")
-    writer.writerow([*_PATIENT_COLUMNS, *(_csv_cell(column.label) for column in columns)])
+    writer.writerow([*_PATIENT_COLUMNS, *(csv_cell(column.label) for column in columns)])
     for evaluation in evaluations:
         bucket = cohort.bucket_of(evaluation)
         verdicts = _verdicts(evaluation, layout.by_label)
         writer.writerow(
             [
-                _csv_cell(evaluation.get("patient_id")),
-                _csv_cell(evaluation.get("name")),
+                csv_cell(evaluation.get("patient_id")),
+                csv_cell(evaluation.get("name")),
                 bucket,
                 cohort.BUCKET_LABELS.get(bucket, bucket),
-                _csv_cell(evaluation.get("summary")),
-                *(_csv_cell(verdicts.get(column.key, _ABSENT).status) for column in columns),
+                csv_cell(evaluation.get("summary")),
+                *(csv_cell(verdicts.get(column.key, _ABSENT).status) for column in columns),
             ]
         )
-    return _BOM + buffer.getvalue()
+    return BOM + buffer.getvalue()
 
 
 # --- JSON -------------------------------------------------------------------
