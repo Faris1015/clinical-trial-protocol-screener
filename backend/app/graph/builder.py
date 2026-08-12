@@ -20,6 +20,7 @@ from app.graph.nodes.parser import parser_node, parser_router
 from app.graph.nodes.router import route_input, router_node
 from app.graph.state import ScreenerState, event
 from app.logging_config import get_logger
+from app.services import usage
 from app.services.metrics import agent_node_duration_seconds, record_node_metrics
 
 log = get_logger("graph")
@@ -28,12 +29,24 @@ NodeFn = TypeVar("NodeFn", bound=Callable[[ScreenerState], dict])
 
 
 def _instrument(name: str, fn: NodeFn) -> NodeFn:
-    """Wrap a node so every run logs its start, duration, and outcome.
+    """Wrap a node so every run logs its start, duration, and outcome — and so
+    every LLM call it makes is attributed to it (#101).
 
     Server-side counterpart to the in-state event log: the `request_id` and
     `thread_id` bound by the API layer ride along via contextvars, so these
     lines join a single screening's story. Node bodies still log their own
     domain detail (retries, critic rejections) at the appropriate level.
+
+    The `usage.collecting(name)` scope is why node bodies need no cost plumbing
+    either: `services/llm.py` files each call against whichever node scope is
+    open, and the collected calls are folded into the node's state update on the
+    way out. Attribution therefore comes from the graph's own node table, so a
+    token can never be labelled with a node the graph did not run.
+
+    A node that raises drops its calls from the checkpoint — LangGraph discards
+    the update of a node that failed, so there is nothing to attach them to. They
+    are not lost from the *metrics*, which `services/llm.py` records at the call
+    itself; only the run's durable record omits work whose result was thrown away.
     """
 
     def wrapped(state: ScreenerState) -> dict:
@@ -42,22 +55,28 @@ def _instrument(name: str, fn: NodeFn) -> NodeFn:
         node_log = get_logger("graph").bind(node=name)
         node_log.info("node.start")
         started = time.perf_counter()
-        try:
-            result = fn(state)
-        except Exception:
+        with usage.collecting(name) as llm_calls:
+            try:
+                result = fn(state)
+            except Exception:
+                elapsed = time.perf_counter() - started
+                # Record the duration of the failed run too, so a node that reliably
+                # errors still shows its latency; the terminal outcome isn't counted
+                # here — the exception propagates and is resolved upstream.
+                agent_node_duration_seconds.labels(agent=name).observe(elapsed)
+                node_log.error("node.error", duration_ms=round(elapsed * 1000, 1), exc_info=True)
+                raise
             elapsed = time.perf_counter() - started
-            # Record the duration of the failed run too, so a node that reliably
-            # errors still shows its latency; the terminal outcome isn't counted
-            # here — the exception propagates and is resolved upstream.
-            agent_node_duration_seconds.labels(agent=name).observe(elapsed)
-            node_log.error("node.error", duration_ms=round(elapsed * 1000, 1), exc_info=True)
-            raise
-        elapsed = time.perf_counter() - started
+        # Merged before `record_node_metrics`, so a terminal frame observes this
+        # node's spend along with everything the run had already recorded.
+        if llm_calls:
+            result = {**result, "llm_usage": llm_calls}
         record_node_metrics(name, state, result, elapsed)
         node_log.info(
             "node.finish",
             duration_ms=round(elapsed * 1000, 1),
             outcome=result.get("current_step"),
+            llm_calls=len(llm_calls),
         )
         return result
 

@@ -698,6 +698,15 @@ curl -b cookies.txt http://localhost:8000/api/metrics/summary
   captions ("1", "6–10", "more than 10") arrive resolved — reading a Prometheus
   histogram is knowledge about the exposition format, and it belongs beside the
   metric definitions rather than in a component.
+- **What it costs, and what caching saved (#101).** Beside the three panels above:
+  the median cost of one screening split by agent, per-node p50/p95 latency, and
+  the Matcher's term-mapping cache hit rate. That last figure is the project's
+  central architectural claim stated as a number — mappings are resolved once per
+  *screening*, not once per patient, so the rate climbs with cohort size instead of
+  sitting flat. Percentiles are estimated from histogram buckets and the footer
+  says so; an instance whose models have no configured price shows real tokens and
+  no dollars at all, because "free of invoice" and "did no work" are different
+  claims.
 - **Every rule id links into the rules viewer.** "RENAL-001 blocks more protocols
   than anything else" is one click from what RENAL-001 actually requires.
 
@@ -813,10 +822,19 @@ node latencies, Critic rejection rates, and LLM latency end-to-end.
 | `llm_call_duration_seconds` | histogram | `provider` (`ollama`/`anthropic`) | LLM call latency distribution |
 | `llm_call_failures_total` | counter | `provider` | LLM calls that exhausted retries |
 | `notifications_total` | counter | `channel` (`webhook`/`email`), `outcome` (`sent`/`failed`) | Whether gate/escalation notifications are actually landing |
+| `llm_tokens_total` | counter | `node`, `provider`, `kind` (`prompt`/`completion`) | Where the tokens go — which agent spends them |
+| `llm_cost_usd_total` | counter | `node`, `provider` | Estimated spend by agent (0 for an unpriced model) |
+| `screening_cost_usd` | histogram | — | What one screening costs — the median cost per run |
+| `screening_node_cost_usd` | histogram | `node` | One agent's share of one screening's cost |
+| `term_mapping_resolutions_total` | counter | — | Criterion/term questions the cohorts required |
+| `term_mapping_llm_pairs_total` | counter | — | Distinct pairs that actually reached a model — the cache's misses |
 
 Nodes are instrumented through the graph's `_instrument` decorator and LLM calls
 through the single `invoke_with_retry` door, so agent bodies stay free of metrics
-plumbing. Definitions live in one place — [`app/services/metrics.py`](backend/app/services/metrics.py).
+plumbing. That decorator is also what attributes a token to an agent: it opens a
+per-node accounting scope around the node body, so the `node` label on a cost
+counter is the graph's own node name and cannot drift from the one
+`agent_node_duration_seconds` uses. Definitions live in one place — [`app/services/metrics.py`](backend/app/services/metrics.py).
 Recording is unconditional: `METRICS_ENABLED=false` unmounts `/metrics`, but the
 counters are still collected, so the [in-app summary](#read-the-metrics-in-app)
 above works on an instance nothing is scraping.

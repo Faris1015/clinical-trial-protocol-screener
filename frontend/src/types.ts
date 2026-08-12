@@ -596,11 +596,123 @@ export type CoverageAggregate = {
   phrases: CoveragePhrase[];
 };
 
+/** One node's share of one run's LLM bill (#101). */
+export type RunNodeUsage = {
+  node: string;
+  /** LLM calls this node made — the figure the matcher's caching claim is pinned to. */
+  calls: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  tokens: number;
+  cost_micro_usd: number;
+  cost_usd: number;
+};
+
+/**
+ * One run's whole LLM bill (#101), from its checkpoint.
+ *
+ * `nodes` omits nodes that made no call, so a run parked at the gate has no
+ * Matcher row — "this has not happened yet" rather than a zero that reads as
+ * "this was free". `priced` is false when no model in the run had a price, which
+ * is what lets the panel say "no cost" (a local model) instead of "$0.00".
+ * `estimated_calls` is how many calls had their tokens estimated rather than
+ * reported by the provider — the stub reports nothing, so its runs are all
+ * estimated.
+ */
+export type RunUsage = {
+  calls: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  tokens: number;
+  cost_micro_usd: number;
+  cost_usd: number;
+  estimated_calls: number;
+  priced: boolean;
+  nodes: RunNodeUsage[];
+};
+
+/**
+ * One node's share of the LLM bill (#101), instance-wide.
+ *
+ * `total_cost_usd` is every dollar this node has cost since the instance came up;
+ * `median_cost_usd` is what it costs on one screening, estimated from the
+ * per-screening histogram and therefore null until a run has reached this node.
+ * `screenings` is that histogram's count — the population the median describes,
+ * which for the Matcher is approved runs rather than all runs.
+ */
+export type NodeCost = {
+  node: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  tokens: number;
+  total_cost_usd: number;
+  median_cost_usd: number | null;
+  screenings: number;
+};
+
+/**
+ * What the models cost this instance, and what one screening costs (#101).
+ *
+ * `calls_priced` is false on a deployment whose models have no entry in the price
+ * table — a local Ollama, or the load-test stub. Those report real tokens at
+ * exactly zero dollars, and the page has to say *why* it shows no money rather
+ * than printing "$0.00" as though the figure were a measurement of spend.
+ *
+ * The two percentiles are estimated from histogram buckets (see
+ * `MetricsSummary.estimated_percentiles`) and are null when nothing has been
+ * observed, or when the value falls in the open-ended top bucket where there is
+ * no bound to interpolate towards.
+ */
+export type CostSummary = {
+  /** Terminal runs whose cost was observed — the median's denominator. */
+  screenings: number;
+  /** Whether any call was priced at all; false on a local-only instance. */
+  calls_priced: boolean;
+  prompt_tokens: number;
+  completion_tokens: number;
+  tokens: number;
+  total_cost_usd: number;
+  median_cost_usd: number | null;
+  p95_cost_usd: number | null;
+  /**
+   * The exact mean, from the histogram's own sum — the companion to the
+   * estimated median. Both are served because they fail differently: the median
+   * shrugs off one pathological run, the mean is right to the micro-dollar.
+   */
+  mean_cost_usd: number | null;
+  nodes: NodeCost[];
+};
+
+/** One node's wall-clock percentiles (#101), estimated from its duration histogram. */
+export type NodeLatency = {
+  node: string;
+  /** Node executions timed — including the runs that ended in an error. */
+  runs: number;
+  p50_seconds: number | null;
+  p95_seconds: number | null;
+};
+
+/**
+ * The Matcher's term-mapping cache (#101) — the architectural claim as a number.
+ *
+ * `resolutions` is how many `(criterion, term)` questions the cohorts screened so
+ * far required; `llm_pairs` is how many actually reached a model. The gap is what
+ * resolving once per screening (rather than once per patient) saved, so the rate
+ * climbs with cohort size instead of sitting flat. `hit_rate` is null before
+ * anything has been resolved — a share of nothing is not 100%.
+ */
+export type TermMappingCache = {
+  resolutions: number;
+  llm_pairs: number;
+  served_from_cache: number;
+  hit_rate: number | null;
+};
+
 /**
  * `GET /api/metrics/summary` — the domain metrics as an in-app summary (#58),
- * plus the coverage aggregate (#93).
+ * plus the coverage aggregate (#93) and the cost accounting (#101).
  *
- * The first three panels are read off the same collectors `/metrics` serializes, so
+ * The counter-backed panels are read off the same collectors `/metrics` serializes, so
  * the page and a scrape cannot disagree. The counters live in the serving process's
  * memory and reset with it, which is why `since` travels: these are the runs this
  * instance has seen, not an all-time total. `coverage` is the exception — it comes
@@ -637,6 +749,18 @@ export type MetricsSummary = {
    * build renders the three counter panels rather than failing on a missing key.
    */
   coverage?: CoverageAggregate;
+  /**
+   * Whether the percentile figures below are histogram estimates rather than
+   * exact quantiles. Always true today; carried in the payload so the page states
+   * it rather than hard-coding a claim about how the API works.
+   */
+  estimated_percentiles?: boolean;
+  /** Tokens and money (#101). Optional so an older payload renders the rest. */
+  cost?: CostSummary;
+  /** Per-node p50/p95 wall-clock (#101), one row per node the registry has timed. */
+  latency?: NodeLatency[];
+  /** What the Matcher's per-screening term-mapping cache saved (#101). */
+  term_mapping?: TermMappingCache;
 };
 
 /**
@@ -757,6 +881,13 @@ export type ScreeningState = {
    * `values.matched_patients`. Optional for the same reason the two above are.
    */
   coverage?: Coverage;
+  /**
+   * This run's LLM bill (#101), derived by the API from `values.llm_usage` —
+   * tokens and estimated cost, split by the node that spent them. Optional for
+   * the same reason the three above are: a run checkpointed by a build that
+   * predates the accounting has no `llm_usage`, and the page renders without it.
+   */
+  usage?: RunUsage;
   /**
    * The same metadata row the runs index shows. Present even when the run has
    * no checkpoint yet (uploaded but never streamed), which is exactly when

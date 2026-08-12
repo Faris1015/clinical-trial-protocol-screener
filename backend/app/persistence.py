@@ -63,6 +63,13 @@ class ScreeningRecord:
     and a row can still say *"14 of 20"* rather than only *"70%"*. Both are 0 for
     a run whose parse never landed, which is how the index tells "nothing to
     score" from "nothing was checkable".
+
+    ``llm_tokens``/``llm_cost_micro_usd`` are the run's LLM bill (#101),
+    denormalized by the same writer for the same reason. Cost is stored in
+    *micro-USD as an integer* rather than as a float: a screening costs cents, and
+    ``services.usage.usd`` is the one conversion back to dollars — so the runs
+    index, the run detail view and the exported figure are one derivation read
+    several times. Both are 0 for a run that made no LLM call.
     """
 
     thread_id: str
@@ -73,6 +80,8 @@ class ScreeningRecord:
     match_count: int = 0
     coverage_checkable: int = 0
     coverage_criteria: int = 0
+    llm_tokens: int = 0
+    llm_cost_micro_usd: int = 0
 
 
 @dataclass(frozen=True)
@@ -176,6 +185,8 @@ class ScreeningStore(ABC):
         match_count: int | None = None,
         coverage_checkable: int | None = None,
         coverage_criteria: int | None = None,
+        llm_tokens: int | None = None,
+        llm_cost_micro_usd: int | None = None,
     ) -> None:
         """Update the denormalized run summary.
 
@@ -221,6 +232,8 @@ class InMemoryScreeningStore(ScreeningStore):
             "match_count": 0,
             "coverage_checkable": 0,
             "coverage_criteria": 0,
+            "llm_tokens": 0,
+            "llm_cost_micro_usd": 0,
         }
 
     async def exists(self, thread_id: str) -> bool:
@@ -248,6 +261,8 @@ class InMemoryScreeningStore(ScreeningStore):
             row["match_count"],
             row["coverage_checkable"],
             row["coverage_criteria"],
+            row["llm_tokens"],
+            row["llm_cost_micro_usd"],
         )
 
     async def get_record(self, thread_id: str) -> ScreeningRecord | None:
@@ -263,6 +278,8 @@ class InMemoryScreeningStore(ScreeningStore):
         match_count: int | None = None,
         coverage_checkable: int | None = None,
         coverage_criteria: int | None = None,
+        llm_tokens: int | None = None,
+        llm_cost_micro_usd: int | None = None,
     ) -> None:
         row = self._rows.get(thread_id)
         if row is None:
@@ -276,6 +293,8 @@ class InMemoryScreeningStore(ScreeningStore):
             "match_count": match_count,
             "coverage_checkable": coverage_checkable,
             "coverage_criteria": coverage_criteria,
+            "llm_tokens": llm_tokens,
+            "llm_cost_micro_usd": llm_cost_micro_usd,
         }
         for column, value in updates.items():
             if value is not None:
@@ -314,7 +333,9 @@ CREATE TABLE IF NOT EXISTS screenings (
     criteria_count      INTEGER NOT NULL DEFAULT 0,
     match_count         INTEGER NOT NULL DEFAULT 0,
     coverage_checkable  INTEGER NOT NULL DEFAULT 0,
-    coverage_criteria   INTEGER NOT NULL DEFAULT 0
+    coverage_criteria   INTEGER NOT NULL DEFAULT 0,
+    llm_tokens          INTEGER NOT NULL DEFAULT 0,
+    llm_cost_micro_usd  INTEGER NOT NULL DEFAULT 0
 )
 """
 
@@ -329,6 +350,8 @@ _ADDED_COLUMNS = (
     ("match_count", "INTEGER NOT NULL DEFAULT 0"),
     ("coverage_checkable", "INTEGER NOT NULL DEFAULT 0"),
     ("coverage_criteria", "INTEGER NOT NULL DEFAULT 0"),
+    ("llm_tokens", "INTEGER NOT NULL DEFAULT 0"),
+    ("llm_cost_micro_usd", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 # Every list query orders by created_at DESC. Without this the table is only
@@ -342,7 +365,7 @@ _CREATE_INDEX = (
 
 _LIST_COLUMNS = (
     "thread_id, source_filename, status, created_at, criteria_count, match_count, "
-    "coverage_checkable, coverage_criteria"
+    "coverage_checkable, coverage_criteria, llm_tokens, llm_cost_micro_usd"
 )
 
 
@@ -352,7 +375,9 @@ def _record(row: Sequence[Any]) -> ScreeningRecord:
     Typed as a Sequence rather than a tuple so it accepts both drivers' row
     objects (aiosqlite's `Row`, psycopg's tuple) without a cast at each call.
     """
-    return ScreeningRecord(row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7])
+    return ScreeningRecord(
+        row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8], row[9]
+    )
 
 
 class SqliteScreeningStore(ScreeningStore):
@@ -415,6 +440,8 @@ class SqliteScreeningStore(ScreeningStore):
         match_count: int | None = None,
         coverage_checkable: int | None = None,
         coverage_criteria: int | None = None,
+        llm_tokens: int | None = None,
+        llm_cost_micro_usd: int | None = None,
     ) -> None:
         # COALESCE keeps a NULL argument from clobbering a stored count, so this
         # stays a single statement for both "status only" and "status + counts".
@@ -423,9 +450,20 @@ class SqliteScreeningStore(ScreeningStore):
             "criteria_count = COALESCE(?, criteria_count), "
             "match_count = COALESCE(?, match_count), "
             "coverage_checkable = COALESCE(?, coverage_checkable), "
-            "coverage_criteria = COALESCE(?, coverage_criteria) "
+            "coverage_criteria = COALESCE(?, coverage_criteria), "
+            "llm_tokens = COALESCE(?, llm_tokens), "
+            "llm_cost_micro_usd = COALESCE(?, llm_cost_micro_usd) "
             "WHERE thread_id = ?",
-            (status, criteria_count, match_count, coverage_checkable, coverage_criteria, thread_id),
+            (
+                status,
+                criteria_count,
+                match_count,
+                coverage_checkable,
+                coverage_criteria,
+                llm_tokens,
+                llm_cost_micro_usd,
+                thread_id,
+            ),
         )
         await self._conn.commit()
 
@@ -508,15 +546,28 @@ class PostgresScreeningStore(ScreeningStore):
         match_count: int | None = None,
         coverage_checkable: int | None = None,
         coverage_criteria: int | None = None,
+        llm_tokens: int | None = None,
+        llm_cost_micro_usd: int | None = None,
     ) -> None:
         await self._conn.execute(
             "UPDATE screenings SET status = %s, "
             "criteria_count = COALESCE(%s, criteria_count), "
             "match_count = COALESCE(%s, match_count), "
             "coverage_checkable = COALESCE(%s, coverage_checkable), "
-            "coverage_criteria = COALESCE(%s, coverage_criteria) "
+            "coverage_criteria = COALESCE(%s, coverage_criteria), "
+            "llm_tokens = COALESCE(%s, llm_tokens), "
+            "llm_cost_micro_usd = COALESCE(%s, llm_cost_micro_usd) "
             "WHERE thread_id = %s",
-            (status, criteria_count, match_count, coverage_checkable, coverage_criteria, thread_id),
+            (
+                status,
+                criteria_count,
+                match_count,
+                coverage_checkable,
+                coverage_criteria,
+                llm_tokens,
+                llm_cost_micro_usd,
+                thread_id,
+            ),
         )
         await self._conn.commit()
 

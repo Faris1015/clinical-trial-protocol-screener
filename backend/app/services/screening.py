@@ -51,6 +51,7 @@ from app.services import (
     simulation,
     sse,
     timeline,
+    usage,
 )
 from app.services.pdf import extract_eligibility_text
 from app.services.uploads import (
@@ -184,13 +185,20 @@ def _summary_columns(values: dict[str, Any]) -> dict[str, int]:
     coverage payload's own `structured` figure rather than a second count of the
     same four buckets — the index's "Criteria" column and its "Coverage" column
     have to be two readings of one extraction (#93).
+
+    The LLM bill (#101) is denormalized the same way and from the same snapshot,
+    so the cost a row reports and the cost its detail view breaks down by node
+    are one reduction of one checkpoint.
     """
     screenability = coverage.build_coverage(values)
+    bill = usage.build_usage(values)
     return {
         "criteria_count": screenability["structured"],
         "match_count": _match_count(values),
         "coverage_checkable": screenability["checkable"],
         "coverage_criteria": screenability["criteria"],
+        "llm_tokens": bill["tokens"],
+        "llm_cost_micro_usd": bill["cost_micro_usd"],
     }
 
 
@@ -466,6 +474,13 @@ async def list_screenings(
                     criteria=r.coverage_criteria,
                     score=coverage.score_of(r.coverage_checkable, r.coverage_criteria),
                 ),
+                # The run's LLM bill (#101), rebuilt from the row's two
+                # denormalized columns for the same reason coverage is — a page
+                # view must not load a checkpoint per row. Dollars come from
+                # `usage.usd`, the one conversion out of micro-USD, so a row here
+                # and the panel on the run's own page are one formula read twice.
+                "llm_tokens": r.llm_tokens,
+                "llm_cost_usd": usage.usd(r.llm_cost_micro_usd),
             }
             for r in page.items
         ],
@@ -709,7 +724,7 @@ async def reject_screening(
     await store.set_status(thread_id, "rejected", **_summary_columns(snapshot.values))
     # Counted only now — after the checkpoint and the store agree — so the funnel
     # can never report a rejection that isn't on the record.
-    metrics.record_rejection()
+    metrics.record_rejection(snapshot.values)
     # Server-side counterpart to the in-state event, in the same correlated stream
     # as the approval it replaces. The reason itself is in the checkpoint and the
     # event log; only its size is logged, following the same rule the upload path
@@ -922,6 +937,12 @@ async def get_screening_state(store: ScreeningStore, graph: ScreeningGraph, thre
     run parked awaiting approval is a run whose checkpoint this endpoint already
     describes. A reviewer sees "we could only check 14 of 20 criteria" while the
     decision is still theirs.
+
+    `usage` is the fourth (#101): what this run's LLM calls consumed and cost,
+    split by node. It reads only `values["llm_usage"]`, which the graph appends
+    to as it runs, so it costs nothing beyond the checkpoint already loaded and
+    is empty for a run that never reached the Parser. It is the per-run half of
+    the cost accounting whose instance-wide half is on the metrics summary.
     """
     config = await _require_thread(store, thread_id)
     bind_contextvars(thread_id=thread_id)
@@ -934,6 +955,7 @@ async def get_screening_state(store: ScreeningStore, graph: ScreeningGraph, thre
         "timeline": timeline.build_timeline(values),
         "attrition": attrition.build_attrition(values),
         "coverage": coverage.build_coverage(values),
+        "usage": usage.build_usage(values),
         # `_require_thread` just passed, so the row is there; guard anyway rather
         # than assert, since the two reads aren't in one transaction.
         "screening": {

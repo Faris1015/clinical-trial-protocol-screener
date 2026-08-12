@@ -262,7 +262,7 @@ class _ScriptedLLM:
     def with_structured_output(self, _schema: object) -> "_ScriptedLLM":
         return self
 
-    def invoke(self, _messages: object) -> dict:
+    def invoke(self, _messages: object, *_args: object, **_kwargs: object) -> dict:
         return VALID_CRITERIA
 
 
@@ -378,6 +378,9 @@ def test_list_screenings_returns_metadata_without_protocol_text(client):
         "match_count",
         # The screenability score (#93), rebuilt from the row's own columns.
         "coverage",
+        # The run's LLM bill (#101), rebuilt the same way.
+        "llm_tokens",
+        "llm_cost_usd",
     }
     assert set(row["coverage"]) == {"checkable", "criteria", "score"}
     assert row["source_filename"] == "trial.md"
