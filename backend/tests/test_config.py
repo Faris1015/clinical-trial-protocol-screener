@@ -38,6 +38,11 @@ def clean_env(monkeypatch):
         "NOTIFY_SMTP_HOST",
         "NOTIFY_TIMEOUT_SECONDS",
         "NOTIFY_BASE_URL",
+        "NOTIFY_STALE_AFTER_SECONDS",
+        "NOTIFY_REMINDER_INTERVAL_SECONDS",
+        "NOTIFY_REMINDER_CHECK_INTERVAL_SECONDS",
+        "NOTIFY_DIGEST_ENABLED",
+        "NOTIFY_DIGEST_INTERVAL_SECONDS",
     ):
         monkeypatch.delenv(var, raising=False)
     get_settings.cache_clear()
@@ -187,3 +192,27 @@ def test_notify_smtp_host_without_recipients_is_not_a_channel(monkeypatch):
     monkeypatch.setenv("NOTIFY_SMTP_HOST", "smtp.example.com")
     with pytest.raises(ValueError, match="requires a channel"):
         Settings(_env_file=None)
+
+
+def test_stale_reminder_and_digest_defaults():
+    s = Settings(_env_file=None)
+    assert s.notify_stale_after_seconds == 86400
+    assert s.notify_reminder_interval_seconds == 86400
+    assert s.notify_reminder_check_interval_seconds == 300
+    assert s.notify_digest_enabled is False
+    assert s.notify_digest_interval_seconds == 86400
+
+
+def test_stale_reminder_and_digest_env_overrides(monkeypatch):
+    monkeypatch.setenv("NOTIFY_STALE_AFTER_SECONDS", "3600")
+    monkeypatch.setenv("NOTIFY_REMINDER_INTERVAL_SECONDS", "7200")
+    monkeypatch.setenv("NOTIFY_REMINDER_CHECK_INTERVAL_SECONDS", "60")
+    monkeypatch.setenv("NOTIFY_DIGEST_ENABLED", "true")
+    monkeypatch.setenv("NOTIFY_DIGEST_INTERVAL_SECONDS", "43200")
+    s = Settings(_env_file=None)
+    assert s.notify_stale_after_seconds == 3600
+    assert s.notify_reminder_interval_seconds == 7200
+    assert s.notify_reminder_check_interval_seconds == 60
+    assert s.notify_digest_enabled is True
+    assert s.notify_digest_interval_seconds == 43200
+

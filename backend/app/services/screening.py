@@ -244,6 +244,8 @@ async def _record_outcome(
     """
     status = _status_from_snapshot(snapshot)
     await store.set_status(thread_id, status, **_summary_columns(snapshot.values))
+    if status in ("awaiting_approval", "escalated"):
+        await store.mark_gate_entered(thread_id, datetime.now(UTC).isoformat())
     if status == "escalated":
         await audit.record(
             audit_store,
@@ -532,6 +534,8 @@ async def list_screenings(
                 # and the panel on the run's own page are one formula read twice.
                 "llm_tokens": r.llm_tokens,
                 "llm_cost_usd": usage.usd(r.llm_cost_micro_usd),
+                "gate_entered_at": r.gate_entered_at,
+                "last_reminder_at": r.last_reminder_at,
             }
             for r in page.items
         ],

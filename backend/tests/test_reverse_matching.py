@@ -21,6 +21,7 @@ invented its own checkpoint could pass against a Matcher that had stopped
 producing that shape at all.
 """
 
+import builtins
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -473,6 +474,21 @@ class FakeStore(ScreeningStore):
 
     async def get_record(self, *_a: Any, **_k: Any) -> None:
         raise AssertionError("reverse matching reads the runs index, nothing else")
+
+    async def list_parked(self) -> builtins.list[ScreeningRecord]:
+        raise AssertionError("reverse matching reads the runs index, nothing else")
+
+    async def mark_gate_entered(self, *_a: Any, **_k: Any) -> None:
+        raise AssertionError("reverse matching must not write to the store")
+
+    async def mark_reminder_sent(self, *_a: Any, **_k: Any) -> None:
+        raise AssertionError("reverse matching must not write to the store")
+
+    async def get_meta(self, *_a: Any, **_k: Any) -> str | None:
+        raise AssertionError("reverse matching does not read meta")
+
+    async def set_meta(self, *_a: Any, **_k: Any) -> None:
+        raise AssertionError("reverse matching must not write to the store")
 
 
 def _record(thread_id: str, created_at: str = "2026-01-01T00:00:00+00:00") -> ScreeningRecord:

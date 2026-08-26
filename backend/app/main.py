@@ -16,6 +16,7 @@ the signature and the handler holds the Principal it needs for the audit trail. 
 test asserts that coverage, so a new route can't ship unguarded by omission.
 """
 
+import asyncio
 import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -57,7 +58,7 @@ from app.health import app_version, readiness
 from app.logging_config import bind_contextvars, clear_contextvars, configure_logging, get_logger
 from app.persistence import AuditStore, Persistence, RuleStore, ScreeningStore, open_persistence
 from app.schemas.criteria import CriteriaSchema
-from app.services import audit, patients, rules, screening, simulation, sse
+from app.services import audit, notifications, patients, rules, screening, simulation, sse
 from app.services.concurrency import ConcurrencyLimiter, release_after
 from app.services.uploads import read_upload_capped, validate_content_type
 
@@ -164,9 +165,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     seeded = await rules.seed_from_file(_persistence.rules)
     graph = screening.build_screening_graph(_persistence.checkpointer)
     log.info("app.started", checkpoint_backend=_persistence.backend, rules_seeded=seeded)
+    worker_task: asyncio.Task | None = None
+    if settings.notify_enabled and (
+        settings.notify_webhook_configured or settings.notify_email_configured
+    ):
+        worker_task = asyncio.create_task(
+            notifications.reminder_worker(_persistence.store, settings)
+        )
     try:
         yield
     finally:
+        if worker_task is not None:
+            worker_task.cancel()
+            try:
+                await worker_task
+            except asyncio.CancelledError:
+                pass
         await _persistence.aclose()
         _persistence = None
         graph = None

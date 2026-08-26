@@ -381,6 +381,9 @@ def test_list_screenings_returns_metadata_without_protocol_text(client):
         # The run's LLM bill (#101), rebuilt the same way.
         "llm_tokens",
         "llm_cost_usd",
+        # Gate and reminder timestamps (#103).
+        "gate_entered_at",
+        "last_reminder_at",
     }
     assert set(row["coverage"]) == {"checkable", "criteria", "score"}
     assert row["source_filename"] == "trial.md"
@@ -646,3 +649,116 @@ async def test_sqlite_backfill_never_touches_a_rule_entry(tmp_path):
         assert row.thread_id == ""
     finally:
         await p.aclose()
+
+
+# --- Stale Reminders and Meta Table Persistence (#103) -----------------------
+
+
+async def test_sqlite_screening_store_parked_runs_and_reminders(tmp_path):
+    p = await open_persistence(_sqlite_settings(tmp_path))
+    try:
+        # Create runs with various statuses
+        await p.store.create("t1", "p1.pdf", "text1")
+        await p.store.set_status("t1", "routing")
+
+        await p.store.create("t2", "p2.pdf", "text2")
+        await p.store.set_status("t2", "awaiting_approval")
+        await p.store.mark_gate_entered("t2", "2026-01-01T10:00:00+00:00")
+
+        await p.store.create("t3", "p3.pdf", "text3")
+        await p.store.set_status("t3", "done")
+
+        await p.store.create("t4", "p4.pdf", "text4")
+        await p.store.set_status("t4", "escalated")
+        await p.store.mark_gate_entered("t4", "2026-01-01T11:00:00+00:00")
+
+        parked = await p.store.list_parked()
+        assert len(parked) == 2
+        thread_ids = [r.thread_id for r in parked]
+        assert "t2" in thread_ids
+        assert "t4" in thread_ids
+        assert "t1" not in thread_ids
+        assert "t3" not in thread_ids
+
+        # Test mark_reminder_sent
+        await p.store.mark_reminder_sent("t2", "2026-01-01T12:00:00+00:00")
+        r2 = await p.store.get_record("t2")
+        assert r2 is not None
+        assert r2.gate_entered_at == "2026-01-01T10:00:00+00:00"
+        assert r2.last_reminder_at == "2026-01-01T12:00:00+00:00"
+
+        # Test re-entering gate clears last_reminder_at
+        await p.store.mark_gate_entered("t2", "2026-01-01T13:00:00+00:00")
+        r2_updated = await p.store.get_record("t2")
+        assert r2_updated is not None
+        assert r2_updated.gate_entered_at == "2026-01-01T13:00:00+00:00"
+        assert r2_updated.last_reminder_at is None
+
+        # Test meta store
+        assert (await p.store.get_meta("last_digest_at")) is None
+        await p.store.set_meta("last_digest_at", "2026-01-01T08:00:00+00:00")
+        assert (await p.store.get_meta("last_digest_at")) == "2026-01-01T08:00:00+00:00"
+        # Test update (upsert)
+        await p.store.set_meta("last_digest_at", "2026-01-02T08:00:00+00:00")
+        assert (await p.store.get_meta("last_digest_at")) == "2026-01-02T08:00:00+00:00"
+    finally:
+        await p.aclose()
+
+
+async def test_sqlite_migration_adds_gate_columns_and_meta_table(tmp_path):
+    """An existing database missing gate_entered_at, last_reminder_at, or app_meta
+    must migrate smoothly without data loss during setup()."""
+    import aiosqlite
+
+    db_path = tmp_path / "legacy.db"
+    # Create legacy table schema without gate columns
+    async with aiosqlite.connect(db_path) as conn:
+        await conn.execute(
+            """
+            CREATE TABLE screenings (
+                thread_id         TEXT PRIMARY KEY,
+                source_filename   TEXT NOT NULL,
+                raw_protocol_text TEXT NOT NULL,
+                status            TEXT NOT NULL,
+                created_at        TEXT NOT NULL,
+                criteria_count    INTEGER NOT NULL DEFAULT 0,
+                match_count       INTEGER NOT NULL DEFAULT 0,
+                coverage_checkable INTEGER NOT NULL DEFAULT 0,
+                coverage_criteria INTEGER NOT NULL DEFAULT 0,
+                llm_tokens        INTEGER NOT NULL DEFAULT 0,
+                llm_cost_micro_usd INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        await conn.execute(
+            "INSERT INTO screenings "
+            "(thread_id, source_filename, raw_protocol_text, status, created_at) "
+            "VALUES ('legacy-run', 'legacy.pdf', 'text', 'awaiting_approval', '2026-01-01T00:00:00+00:00')"
+        )
+        await conn.commit()
+
+    settings = Settings(
+        _env_file=None,
+        checkpoint_backend="sqlite",
+        sqlite_path=db_path,
+    )
+    p = await open_persistence(settings)
+    try:
+        rec = await p.store.get_record("legacy-run")
+        assert rec is not None
+        assert rec.thread_id == "legacy-run"
+        assert rec.gate_entered_at is None
+        assert rec.last_reminder_at is None
+
+        # Can write and read meta
+        await p.store.set_meta("test_key", "test_val")
+        assert (await p.store.get_meta("test_key")) == "test_val"
+
+        # Can update gate timestamps
+        await p.store.mark_gate_entered("legacy-run", "2026-01-01T02:00:00+00:00")
+        rec2 = await p.store.get_record("legacy-run")
+        assert rec2 is not None
+        assert rec2.gate_entered_at == "2026-01-01T02:00:00+00:00"
+    finally:
+        await p.aclose()
+

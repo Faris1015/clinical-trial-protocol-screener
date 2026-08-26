@@ -43,6 +43,11 @@ def clean_notify_env(monkeypatch):
         "NOTIFY_SMTP_STARTTLS",
         "NOTIFY_TIMEOUT_SECONDS",
         "NOTIFY_BASE_URL",
+        "NOTIFY_STALE_AFTER_SECONDS",
+        "NOTIFY_REMINDER_INTERVAL_SECONDS",
+        "NOTIFY_REMINDER_CHECK_INTERVAL_SECONDS",
+        "NOTIFY_DIGEST_ENABLED",
+        "NOTIFY_DIGEST_INTERVAL_SECONDS",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -432,9 +437,199 @@ async def test_one_dead_channel_does_not_block_the_other(monkeypatch, smtp):
         await asyncio.sleep(60)
 
     monkeypatch.setattr(notifications, "_send_webhook", never_returns)
-    settings = _email_settings(
-        notify_webhook_url="https://hooks.example.com/T000/B000",
-        notify_timeout_seconds=0.05,
-    )
     await notifications.notify_gate(settings, thread_id="abc", status="awaiting_approval")
     assert len(smtp) == 1
+
+
+# --- Stale Reminders and Scheduled Digest (#103) -----------------------------
+
+
+async def test_stale_reminder_webhook_payload_and_text(webhook):
+    await notifications.notify_stale_reminder(
+        _settings(),
+        thread_id="run-123",
+        status="awaiting_approval",
+        source_filename="oncology-protocol.pdf",
+        criteria_count=12,
+    )
+    assert len(webhook) == 1
+    url, body = webhook[0]
+    assert url == "https://hooks.example.com/T000/B000"
+    assert "TrialGate [Reminder]: \"oncology-protocol.pdf\" is still awaiting approval" in body["text"]
+    assert "https://trialgate.example.com/runs/view/?id=run-123" in body["text"]
+    assert body["event"] == {
+        "thread_id": "run-123",
+        "status": "awaiting_approval",
+        "source_filename": "oncology-protocol.pdf",
+        "criteria_count": 12,
+        "url": "https://trialgate.example.com/runs/view/?id=run-123",
+        "reminder": True,
+    }
+
+
+async def test_stale_reminder_email_format(smtp):
+    await notifications.notify_stale_reminder(
+        _email_settings(),
+        thread_id="run-456",
+        status="escalated",
+        source_filename="pediatric-trial.pdf",
+        criteria_count=5,
+    )
+    assert len(smtp) == 1
+    msg = smtp[0]
+    assert msg["Subject"] == 'TrialGate [Reminder]: "pediatric-trial.pdf" is still escalated for human review'
+    body = msg.get_content()
+    assert "Run:      run-456" in body
+    assert "Protocol: pediatric-trial.pdf" in body
+    assert "Criteria: 5 extracted" in body
+
+
+async def test_digest_webhook_and_email(webhook, smtp):
+    from app.persistence import ScreeningRecord
+
+    records = [
+        ScreeningRecord(
+            thread_id="t1",
+            source_filename="trial1.pdf",
+            status="awaiting_approval",
+            created_at="2026-01-01T00:00:00+00:00",
+            criteria_count=8,
+        ),
+        ScreeningRecord(
+            thread_id="t2",
+            source_filename="trial2.pdf",
+            status="escalated",
+            created_at="2026-01-01T01:00:00+00:00",
+            criteria_count=4,
+        ),
+    ]
+    settings = _email_settings(
+        notify_webhook_url="https://hooks.example.com/T000/B000",
+        notify_digest_enabled=True,
+    )
+    await notifications.notify_digest(settings, records)
+    assert len(webhook) == 1
+    assert len(smtp) == 1
+
+    wh_body = webhook[0][1]
+    assert "TrialGate Digest: 2 runs awaiting human review" in wh_body["text"]
+    assert '• "trial1.pdf" is awaiting approval' in wh_body["text"]
+    assert '• "trial2.pdf" is escalated for human review' in wh_body["text"]
+    assert wh_body["event"]["count"] == 2
+
+    mail_msg = smtp[0]
+    assert mail_msg["Subject"] == "TrialGate Digest: 2 runs awaiting human review"
+    mail_body = mail_msg.get_content()
+    assert "Protocol: trial1.pdf" in mail_body
+    assert "Protocol: trial2.pdf" in mail_body
+
+
+async def test_check_and_send_reminders_evaluates_stale_and_intervals(webhook):
+    from datetime import UTC, datetime, timedelta
+
+    from app.persistence import InMemoryScreeningStore
+
+    store = InMemoryScreeningStore()
+    settings = _settings(
+        notify_stale_after_seconds=3600,  # 1 hour
+        notify_reminder_interval_seconds=7200,  # 2 hours
+    )
+
+    t0 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+
+    # Run 1: done -> should not receive reminder
+    await store.create("t1", "p1.pdf", "text1")
+    await store.set_status("t1", "done")
+
+    # Run 2: parked 30 mins ago -> not stale yet (threshold is 1 hr)
+    await store.create("t2", "p2.pdf", "text2")
+    await store.set_status("t2", "awaiting_approval")
+    await store.mark_gate_entered("t2", (t0 - timedelta(minutes=30)).isoformat())
+
+    # Run 3: parked 2 hours ago -> stale, should receive reminder
+    await store.create("t3", "p3.pdf", "text3")
+    await store.set_status("t3", "escalated")
+    await store.mark_gate_entered("t3", (t0 - timedelta(hours=2)).isoformat())
+
+    sent = await notifications.check_and_send_reminders(store, settings, now=t0)
+    assert sent == 1
+    assert len(webhook) == 1
+    assert webhook[0][1]["event"]["thread_id"] == "t3"
+
+    # Verify last_reminder_at was recorded
+    r3 = await store.get_record("t3")
+    assert r3 is not None
+    assert r3.last_reminder_at == t0.isoformat()
+
+    # Second check 30 minutes later: run 3 is still in 2-hour reminder interval cooldown
+    t1 = t0 + timedelta(minutes=30)
+    sent_again = await notifications.check_and_send_reminders(store, settings, now=t1)
+    # But now run 2 is 1 hour old! So run 2 receives its first reminder, run 3 is throttled.
+    assert sent_again == 1
+    assert len(webhook) == 2
+    assert webhook[1][1]["event"]["thread_id"] == "t2"
+
+    # Third check 2.5 hours after t0: run 3 is now past 2h interval -> receives reminder again
+    t2 = t0 + timedelta(hours=2, minutes=30)
+    sent_third = await notifications.check_and_send_reminders(store, settings, now=t2)
+    assert sent_third == 1
+    assert len(webhook) == 3
+    assert webhook[2][1]["event"]["thread_id"] == "t3"
+
+
+async def test_check_and_send_digest_cadence_and_persistence(webhook):
+    from datetime import UTC, datetime, timedelta
+
+    from app.persistence import InMemoryScreeningStore
+
+    store = InMemoryScreeningStore()
+    settings = _settings(
+        notify_digest_enabled=True,
+        notify_digest_interval_seconds=86400,  # 24 hours
+    )
+
+    t0 = datetime(2026, 1, 1, 8, 0, 0, tzinfo=UTC)
+
+    # Empty store -> digest not sent
+    sent = await notifications.check_and_send_digest(store, settings, now=t0)
+    assert sent is False
+    assert len(webhook) == 0
+
+    # Add a parked run
+    await store.create("t1", "p1.pdf", "text1")
+    await store.set_status("t1", "awaiting_approval")
+    await store.mark_gate_entered("t1", t0.isoformat())
+
+    # Now digest should be sent
+    sent = await notifications.check_and_send_digest(store, settings, now=t0)
+    assert sent is True
+    assert len(webhook) == 1
+    assert (await store.get_meta("last_digest_at")) == t0.isoformat()
+
+    # Same day 4 hours later -> within 24h interval, should not send again
+    t1 = t0 + timedelta(hours=4)
+    sent_again = await notifications.check_and_send_digest(store, settings, now=t1)
+    assert sent_again is False
+    assert len(webhook) == 1
+
+    # Next day -> interval elapsed, should send
+    t2 = t0 + timedelta(hours=25)
+    sent_next_day = await notifications.check_and_send_digest(store, settings, now=t2)
+    assert sent_next_day is True
+    assert len(webhook) == 2
+    assert (await store.get_meta("last_digest_at")) == t2.isoformat()
+
+
+async def test_reminder_worker_loop_and_cancellation():
+    import asyncio
+    from app.persistence import InMemoryScreeningStore
+
+    store = InMemoryScreeningStore()
+    settings = _settings(notify_reminder_check_interval_seconds=0.01)
+
+    task = asyncio.create_task(notifications.reminder_worker(store, settings))
+    await asyncio.sleep(0.05)
+    assert not task.done()
+    task.cancel()
+    await task
+

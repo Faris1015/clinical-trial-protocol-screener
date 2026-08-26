@@ -174,6 +174,22 @@ class Settings(BaseSettings):
     # to turn a thread_id into a link a reviewer can click. Unset omits the link
     # rather than guessing a host.
     notify_base_url: str | None = None
+    # --- Stale-gate reminders and digest (#103) ---
+    # After a run has waited this long at the gate or in escalation, it is stale.
+    # Zero disables stale marking and reminder dispatch (the initial #60 notify
+    # still fires once when a run first parks).
+    notify_stale_after_seconds: float = Field(86400.0, ge=0)
+    # Minimum wall time between stale reminders for the same run. A redeployed
+    # instance reads `last_reminder_at` from the store rather than re-chasing.
+    notify_reminder_interval_seconds: float = Field(86400.0, gt=0)
+    # How often the background task scans for stale runs and digests. Cheap enough
+    # to poll every few minutes; reminders themselves obey the interval above.
+    notify_reminder_check_interval_seconds: float = Field(300.0, gt=0)
+    # Optional scheduled digest of everything still awaiting a human.
+    notify_digest_enabled: bool = False
+    # Wall time between digest sends. Persisted in app_meta so a restart does not
+    # immediately re-send.
+    notify_digest_interval_seconds: float = Field(86400.0, gt=0)
 
     # --- Pipeline ---
     max_parse_attempts: int = Field(3, ge=1, le=10)
