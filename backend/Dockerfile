@@ -55,7 +55,7 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=3s --start-period=15s --retries=3 \
     CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health').status==200 else 1)"
 
-ENTRYPOINT ["docker-entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 # Bind $PORT when the platform injects one (Render, Cloud Run, HF Spaces),
 # defaulting to 8000 so compose and Fly (which fix the port at 8000) are
 # unchanged. Shell form + exec so uvicorn still replaces the shell as PID 1.

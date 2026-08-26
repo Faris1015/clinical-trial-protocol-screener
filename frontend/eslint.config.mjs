@@ -6,7 +6,7 @@ import next from "eslint-config-next/core-web-vitals";
 
 export default tseslint.config(
   // Build output and the Next-generated ambient types are not ours to lint.
-  { ignores: [".next", "out", "node_modules", "next-env.d.ts"] },
+  { ignores: [".next", "out", "dist", "node_modules", "next-env.d.ts"] },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   ...next,

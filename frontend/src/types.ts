@@ -438,6 +438,13 @@ export type Screening = {
    * from an older build renders the rest of the table.
    */
   coverage?: CoverageSummary;
+  /**
+   * When the run entered a human stop (awaiting_approval or escalated) (#103).
+   * Null for runs that never parked.
+   */
+  gate_entered_at?: string | null;
+  /** When a stale reminder was last dispatched for this run (#103). */
+  last_reminder_at?: string | null;
 };
 
 /**

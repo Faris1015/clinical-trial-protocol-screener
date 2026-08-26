@@ -35,6 +35,7 @@ everything is built inside ``open_persistence`` from the app's lifespan.
 
 from __future__ import annotations
 
+import builtins
 import json
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
@@ -95,6 +96,13 @@ class ScreeningRecord:
     coverage_criteria: int = 0
     llm_tokens: int = 0
     llm_cost_micro_usd: int = 0
+    # When the run last entered a human stop (#103). Denormalized so gate age can
+    # render on the runs index without loading checkpoints. Null for runs that
+    # never parked, or rows written before this column shipped.
+    gate_entered_at: str | None = None
+    # When a stale reminder last left the process for this run. Persisted so a
+    # redeployed instance does not re-notify runs it already chased.
+    last_reminder_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -224,12 +232,35 @@ class ScreeningStore(ABC):
         combine with AND.
         """
 
+    @abstractmethod
+    async def list_parked(self) -> builtins.list[ScreeningRecord]:
+        """Every run waiting on a human — ``awaiting_approval`` or ``escalated``."""
+
+    @abstractmethod
+    async def mark_gate_entered(self, thread_id: str, entered_at: str) -> None:
+        """Record (or refresh) when a run entered a human stop (#103).
+
+        Clears ``last_reminder_at`` so a re-parked run starts a fresh reminder
+        schedule rather than inheriting the previous wait's cadence.
+        """
+
+    @abstractmethod
+    async def mark_reminder_sent(self, thread_id: str, sent_at: str) -> None:
+        """Persist that a stale reminder was dispatched for this run."""
+
+    @abstractmethod
+    async def get_meta(self, key: str) -> str | None: ...
+
+    @abstractmethod
+    async def set_meta(self, key: str, value: str) -> None: ...
+
 
 class InMemoryScreeningStore(ScreeningStore):
     """Dict-backed store for tests — no durability, no I/O, no event loop needed."""
 
     def __init__(self) -> None:
         self._rows: dict[str, dict] = {}
+        self._meta: dict[str, str] = {}
 
     async def setup(self) -> None:
         return None
@@ -247,6 +278,8 @@ class InMemoryScreeningStore(ScreeningStore):
             "coverage_criteria": 0,
             "llm_tokens": 0,
             "llm_cost_micro_usd": 0,
+            "gate_entered_at": None,
+            "last_reminder_at": None,
         }
 
     async def exists(self, thread_id: str) -> bool:
@@ -276,6 +309,8 @@ class InMemoryScreeningStore(ScreeningStore):
             row["coverage_criteria"],
             row["llm_tokens"],
             row["llm_cost_micro_usd"],
+            row.get("gate_entered_at"),
+            row.get("last_reminder_at"),
         )
 
     async def get_record(self, thread_id: str) -> ScreeningRecord | None:
@@ -335,6 +370,28 @@ class InMemoryScreeningStore(ScreeningStore):
         page = rows[offset : offset + limit]
         return ScreeningPage(items=[self._as_record(r) for r in page], total=len(rows))
 
+    async def list_parked(self) -> builtins.list[ScreeningRecord]:
+        rows = [r for r in self._rows.values() if r["status"] in ("awaiting_approval", "escalated")]
+        rows.sort(key=lambda r: r["created_at"], reverse=True)
+        return [self._as_record(r) for r in rows]
+
+    async def mark_gate_entered(self, thread_id: str, entered_at: str) -> None:
+        row = self._rows.get(thread_id)
+        if row is not None:
+            row["gate_entered_at"] = entered_at
+            row["last_reminder_at"] = None
+
+    async def mark_reminder_sent(self, thread_id: str, sent_at: str) -> None:
+        row = self._rows.get(thread_id)
+        if row is not None:
+            row["last_reminder_at"] = sent_at
+
+    async def get_meta(self, key: str) -> str | None:
+        return self._meta.get(key)
+
+    async def set_meta(self, key: str, value: str) -> None:
+        self._meta[key] = value
+
 
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS screenings (
@@ -348,11 +405,20 @@ CREATE TABLE IF NOT EXISTS screenings (
     coverage_checkable  INTEGER NOT NULL DEFAULT 0,
     coverage_criteria   INTEGER NOT NULL DEFAULT 0,
     llm_tokens          INTEGER NOT NULL DEFAULT 0,
-    llm_cost_micro_usd  INTEGER NOT NULL DEFAULT 0
+    llm_cost_micro_usd  INTEGER NOT NULL DEFAULT 0,
+    gate_entered_at     TEXT,
+    last_reminder_at    TEXT
 )
 """
 
-# Columns added after the table first shipped (#51, then #93). CREATE TABLE IF
+_CREATE_META_TABLE = """
+CREATE TABLE IF NOT EXISTS app_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+)
+"""
+
+# Columns added after the table first shipped (#51, then #93, then #103). CREATE TABLE IF
 # NOT EXISTS is a no-op on a database created by an earlier version, so every
 # store's setup() also has to add anything missing — otherwise upgrading a
 # deployment with an existing sqlite file or postgres database breaks every query
@@ -365,6 +431,8 @@ _ADDED_COLUMNS = (
     ("coverage_criteria", "INTEGER NOT NULL DEFAULT 0"),
     ("llm_tokens", "INTEGER NOT NULL DEFAULT 0"),
     ("llm_cost_micro_usd", "INTEGER NOT NULL DEFAULT 0"),
+    ("gate_entered_at", "TEXT"),
+    ("last_reminder_at", "TEXT"),
 )
 
 # Every list query orders by created_at DESC. Without this the table is only
@@ -378,7 +446,8 @@ _CREATE_INDEX = (
 
 _LIST_COLUMNS = (
     "thread_id, source_filename, status, created_at, criteria_count, match_count, "
-    "coverage_checkable, coverage_criteria, llm_tokens, llm_cost_micro_usd"
+    "coverage_checkable, coverage_criteria, llm_tokens, llm_cost_micro_usd, "
+    "gate_entered_at, last_reminder_at"
 )
 
 
@@ -389,7 +458,18 @@ def _record(row: Sequence[Any]) -> ScreeningRecord:
     objects (aiosqlite's `Row`, psycopg's tuple) without a cast at each call.
     """
     return ScreeningRecord(
-        row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8], row[9]
+        row[0],
+        row[1],
+        row[2],
+        row[3],
+        row[4],
+        row[5],
+        row[6],
+        row[7],
+        row[8],
+        row[9],
+        row[10] if len(row) > 10 else None,
+        row[11] if len(row) > 11 else None,
     )
 
 
@@ -402,6 +482,7 @@ class SqliteScreeningStore(ScreeningStore):
 
     async def setup(self) -> None:
         await self._conn.execute(_CREATE_TABLE)
+        await self._conn.execute(_CREATE_META_TABLE)
         # sqlite has no ADD COLUMN IF NOT EXISTS, so ask what's already there.
         async with self._conn.execute("PRAGMA table_info(screenings)") as cur:
             existing = {row[1] for row in await cur.fetchall()}
@@ -501,6 +582,43 @@ class SqliteScreeningStore(ScreeningStore):
             rows = await cur.fetchall()
         return ScreeningPage(items=[_record(r) for r in rows], total=total)
 
+    async def list_parked(self) -> builtins.list[ScreeningRecord]:
+        async with self._conn.execute(
+            f"SELECT {_LIST_COLUMNS} FROM screenings "
+            "WHERE status IN ('awaiting_approval', 'escalated') "
+            "ORDER BY created_at DESC"
+        ) as cur:
+            rows = await cur.fetchall()
+        return [_record(r) for r in rows]
+
+    async def mark_gate_entered(self, thread_id: str, entered_at: str) -> None:
+        await self._conn.execute(
+            "UPDATE screenings SET gate_entered_at = ?, last_reminder_at = NULL "
+            "WHERE thread_id = ?",
+            (entered_at, thread_id),
+        )
+        await self._conn.commit()
+
+    async def mark_reminder_sent(self, thread_id: str, sent_at: str) -> None:
+        await self._conn.execute(
+            "UPDATE screenings SET last_reminder_at = ? WHERE thread_id = ?",
+            (sent_at, thread_id),
+        )
+        await self._conn.commit()
+
+    async def get_meta(self, key: str) -> str | None:
+        async with self._conn.execute("SELECT value FROM app_meta WHERE key = ?", (key,)) as cur:
+            row = await cur.fetchone()
+        return row[0] if row else None
+
+    async def set_meta(self, key: str, value: str) -> None:
+        await self._conn.execute(
+            "INSERT INTO app_meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        await self._conn.commit()
+
 
 class PostgresScreeningStore(ScreeningStore):
     """psycopg-backed store for production. Same schema, ``%s`` placeholders."""
@@ -510,6 +628,7 @@ class PostgresScreeningStore(ScreeningStore):
 
     async def setup(self) -> None:
         await self._conn.execute(_CREATE_TABLE)
+        await self._conn.execute(_CREATE_META_TABLE)
         for column, ddl in _ADDED_COLUMNS:
             # Postgres has the IF NOT EXISTS form, so no introspection needed.
             await self._conn.execute(
@@ -604,6 +723,43 @@ class PostgresScreeningStore(ScreeningStore):
         )
         rows = await cur.fetchall()
         return ScreeningPage(items=[_record(r) for r in rows], total=total)
+
+    async def list_parked(self) -> builtins.list[ScreeningRecord]:
+        cur = await self._conn.execute(
+            f"SELECT {_LIST_COLUMNS} FROM screenings "
+            "WHERE status IN ('awaiting_approval', 'escalated') "
+            "ORDER BY created_at DESC"
+        )
+        rows = await cur.fetchall()
+        return [_record(r) for r in rows]
+
+    async def mark_gate_entered(self, thread_id: str, entered_at: str) -> None:
+        await self._conn.execute(
+            "UPDATE screenings SET gate_entered_at = %s, last_reminder_at = NULL "
+            "WHERE thread_id = %s",
+            (entered_at, thread_id),
+        )
+        await self._conn.commit()
+
+    async def mark_reminder_sent(self, thread_id: str, sent_at: str) -> None:
+        await self._conn.execute(
+            "UPDATE screenings SET last_reminder_at = %s WHERE thread_id = %s",
+            (sent_at, thread_id),
+        )
+        await self._conn.commit()
+
+    async def get_meta(self, key: str) -> str | None:
+        cur = await self._conn.execute("SELECT value FROM app_meta WHERE key = %s", (key,))
+        row = await cur.fetchone()
+        return row[0] if row else None
+
+    async def set_meta(self, key: str, value: str) -> None:
+        await self._conn.execute(
+            "INSERT INTO app_meta (key, value) VALUES (%s, %s) "
+            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+            (key, value),
+        )
+        await self._conn.commit()
 
 
 # --- The decision index (#98) -----------------------------------------------

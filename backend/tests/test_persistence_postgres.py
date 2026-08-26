@@ -58,7 +58,7 @@ async def _clean() -> None:
 
     conn = await AsyncConnection.connect(DSN, autocommit=True)
     try:
-        for table in ("compliance_rules", "audit_events", "screenings"):
+        for table in ("compliance_rules", "audit_events", "screenings", "app_meta"):
             await conn.execute(f"DROP TABLE IF EXISTS {table}")
     finally:
         await conn.close()
@@ -290,3 +290,53 @@ async def test_setup_migrates_and_backfills_a_pre_existing_audit_table():
         assert again.subject_id == "run-legacy"
     finally:
         await persistence.aclose()
+
+
+# --- Stale Reminders and Meta Table Persistence (#103) -----------------------
+
+
+async def test_postgres_screening_store_parked_runs_and_meta(pg):
+    # Create runs with various statuses
+    await pg.store.create("t1", "p1.pdf", "text1")
+    await pg.store.set_status("t1", "routing")
+
+    await pg.store.create("t2", "p2.pdf", "text2")
+    await pg.store.set_status("t2", "awaiting_approval")
+    await pg.store.mark_gate_entered("t2", "2026-01-01T10:00:00+00:00")
+
+    await pg.store.create("t3", "p3.pdf", "text3")
+    await pg.store.set_status("t3", "done")
+
+    await pg.store.create("t4", "p4.pdf", "text4")
+    await pg.store.set_status("t4", "escalated")
+    await pg.store.mark_gate_entered("t4", "2026-01-01T11:00:00+00:00")
+
+    parked = await pg.store.list_parked()
+    assert len(parked) == 2
+    thread_ids = [r.thread_id for r in parked]
+    assert "t2" in thread_ids
+    assert "t4" in thread_ids
+    assert "t1" not in thread_ids
+    assert "t3" not in thread_ids
+
+    # Test mark_reminder_sent
+    await pg.store.mark_reminder_sent("t2", "2026-01-01T12:00:00+00:00")
+    r2 = await pg.store.get_record("t2")
+    assert r2 is not None
+    assert r2.gate_entered_at == "2026-01-01T10:00:00+00:00"
+    assert r2.last_reminder_at == "2026-01-01T12:00:00+00:00"
+
+    # Test re-entering gate clears last_reminder_at
+    await pg.store.mark_gate_entered("t2", "2026-01-01T13:00:00+00:00")
+    r2_updated = await pg.store.get_record("t2")
+    assert r2_updated is not None
+    assert r2_updated.gate_entered_at == "2026-01-01T13:00:00+00:00"
+    assert r2_updated.last_reminder_at is None
+
+    # Test meta store
+    assert (await pg.store.get_meta("last_digest_at")) is None
+    await pg.store.set_meta("last_digest_at", "2026-01-01T08:00:00+00:00")
+    assert (await pg.store.get_meta("last_digest_at")) == "2026-01-01T08:00:00+00:00"
+    # Test update (upsert)
+    await pg.store.set_meta("last_digest_at", "2026-01-02T08:00:00+00:00")
+    assert (await pg.store.get_meta("last_digest_at")) == "2026-01-02T08:00:00+00:00"
