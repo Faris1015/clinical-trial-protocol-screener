@@ -371,9 +371,7 @@ class InMemoryScreeningStore(ScreeningStore):
         return ScreeningPage(items=[self._as_record(r) for r in page], total=len(rows))
 
     async def list_parked(self) -> builtins.list[ScreeningRecord]:
-        rows = [
-            r for r in self._rows.values() if r["status"] in ("awaiting_approval", "escalated")
-        ]
+        rows = [r for r in self._rows.values() if r["status"] in ("awaiting_approval", "escalated")]
         rows.sort(key=lambda r: r["created_at"], reverse=True)
         return [self._as_record(r) for r in rows]
 
@@ -609,9 +607,7 @@ class SqliteScreeningStore(ScreeningStore):
         await self._conn.commit()
 
     async def get_meta(self, key: str) -> str | None:
-        async with self._conn.execute(
-            "SELECT value FROM app_meta WHERE key = ?", (key,)
-        ) as cur:
+        async with self._conn.execute("SELECT value FROM app_meta WHERE key = ?", (key,)) as cur:
             row = await cur.fetchone()
         return row[0] if row else None
 
@@ -753,9 +749,7 @@ class PostgresScreeningStore(ScreeningStore):
         await self._conn.commit()
 
     async def get_meta(self, key: str) -> str | None:
-        cur = await self._conn.execute(
-            "SELECT value FROM app_meta WHERE key = %s", (key,)
-        )
+        cur = await self._conn.execute("SELECT value FROM app_meta WHERE key = %s", (key,))
         row = await cur.fetchone()
         return row[0] if row else None
 

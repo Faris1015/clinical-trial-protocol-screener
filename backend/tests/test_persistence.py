@@ -733,7 +733,6 @@ async def test_sqlite_migration_adds_gate_columns_and_meta_table(tmp_path):
         await conn.execute(
             "INSERT INTO screenings "
             "(thread_id, source_filename, raw_protocol_text, status, created_at) "
-            "VALUES ('legacy-run', 'legacy.pdf', 'text', 'awaiting_approval', '2026-01-01T00:00:00+00:00')"
         )
         await conn.commit()
 
@@ -761,4 +760,3 @@ async def test_sqlite_migration_adds_gate_columns_and_meta_table(tmp_path):
         assert rec2.gate_entered_at == "2026-01-01T02:00:00+00:00"
     finally:
         await p.aclose()
-

@@ -437,6 +437,10 @@ async def test_one_dead_channel_does_not_block_the_other(monkeypatch, smtp):
         await asyncio.sleep(60)
 
     monkeypatch.setattr(notifications, "_send_webhook", never_returns)
+    settings = _email_settings(
+        notify_webhook_url="https://hooks.example.com/T000/B000",
+        notify_timeout_seconds=0.05,
+    )
     await notifications.notify_gate(settings, thread_id="abc", status="awaiting_approval")
     assert len(smtp) == 1
 
@@ -455,7 +459,9 @@ async def test_stale_reminder_webhook_payload_and_text(webhook):
     assert len(webhook) == 1
     url, body = webhook[0]
     assert url == "https://hooks.example.com/T000/B000"
-    assert "TrialGate [Reminder]: \"oncology-protocol.pdf\" is still awaiting approval" in body["text"]
+    assert (
+        'TrialGate [Reminder]: "oncology-protocol.pdf" is still awaiting approval' in body["text"]
+    )
     assert "https://trialgate.example.com/runs/view/?id=run-123" in body["text"]
     assert body["event"] == {
         "thread_id": "run-123",
@@ -477,8 +483,11 @@ async def test_stale_reminder_email_format(smtp):
     )
     assert len(smtp) == 1
     msg = smtp[0]
-    assert msg["Subject"] == 'TrialGate [Reminder]: "pediatric-trial.pdf" is still escalated for human review'
-    body = msg.get_content()
+    assert (
+        msg["subject"]
+        == 'TrialGate [Reminder]: "pediatric-trial.pdf" is still escalated for human review'
+    )
+    body = msg["body"]
     assert "Run:      run-456" in body
     assert "Protocol: pediatric-trial.pdf" in body
     assert "Criteria: 5 extracted" in body
@@ -518,8 +527,8 @@ async def test_digest_webhook_and_email(webhook, smtp):
     assert wh_body["event"]["count"] == 2
 
     mail_msg = smtp[0]
-    assert mail_msg["Subject"] == "TrialGate Digest: 2 runs awaiting human review"
-    mail_body = mail_msg.get_content()
+    assert mail_msg["subject"] == "TrialGate Digest: 2 runs awaiting human review"
+    mail_body = mail_msg["body"]
     assert "Protocol: trial1.pdf" in mail_body
     assert "Protocol: trial2.pdf" in mail_body
 
@@ -569,8 +578,8 @@ async def test_check_and_send_reminders_evaluates_stale_and_intervals(webhook):
     assert len(webhook) == 2
     assert webhook[1][1]["event"]["thread_id"] == "t2"
 
-    # Third check 2.5 hours after t0: run 3 is now past 2h interval -> receives reminder again
-    t2 = t0 + timedelta(hours=2, minutes=30)
+    # Third check 2h15m after t0: run 3 is past 2h interval, run 2 is 1h45m into 2h cooldown
+    t2 = t0 + timedelta(hours=2, minutes=15)
     sent_third = await notifications.check_and_send_reminders(store, settings, now=t2)
     assert sent_third == 1
     assert len(webhook) == 3
@@ -622,6 +631,7 @@ async def test_check_and_send_digest_cadence_and_persistence(webhook):
 
 async def test_reminder_worker_loop_and_cancellation():
     import asyncio
+
     from app.persistence import InMemoryScreeningStore
 
     store = InMemoryScreeningStore()
@@ -632,4 +642,3 @@ async def test_reminder_worker_loop_and_cancellation():
     assert not task.done()
     task.cancel()
     await task
-

@@ -340,4 +340,3 @@ async def test_postgres_screening_store_parked_runs_and_meta(pg):
     # Test update (upsert)
     await pg.store.set_meta("last_digest_at", "2026-01-02T08:00:00+00:00")
     assert (await pg.store.get_meta("last_digest_at")) == "2026-01-02T08:00:00+00:00"
-

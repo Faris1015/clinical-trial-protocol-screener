@@ -215,4 +215,3 @@ def test_stale_reminder_and_digest_env_overrides(monkeypatch):
     assert s.notify_reminder_check_interval_seconds == 60
     assert s.notify_digest_enabled is True
     assert s.notify_digest_interval_seconds == 43200
-
