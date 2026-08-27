@@ -533,6 +533,9 @@ def _fetch_from_store(
         return {}
     if hasattr(store, "get_cached"):
         return store.get_cached(pairs, model_id)
+    cached = store.get_cached(pairs, model_id)
+    if cached:
+        return cached
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -551,6 +554,7 @@ def _save_to_store(store: TermStore, records: Sequence[TermRecord]) -> None:
     if hasattr(store, "set_cached"):
         store.set_cached(records)
         return
+    store.set_cached(records)
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:

@@ -1613,6 +1613,16 @@ class TermStore(ABC):
     async def count(self, *, model_id: str | None = None) -> int:
         """Total cached term mappings stored."""
 
+    def get_cached(
+        self, pairs: Sequence[tuple[str, str]], model_id: str
+    ) -> dict[tuple[str, str], str]:
+        """Synchronous read for sync node callers (default empty)."""
+        return {}
+
+    def set_cached(self, records: Sequence[TermRecord]) -> None:
+        """Synchronous write for sync node callers (default no-op)."""
+        return None
+
 
 _CREATE_TERM_MAPPINGS_TABLE = """
 CREATE TABLE IF NOT EXISTS term_mappings (
@@ -1889,6 +1899,7 @@ class PostgresTermStore(TermStore):
             deleted = cur.rowcount
         await self._conn.commit()
         return deleted
+        return int(deleted) if deleted is not None else 0
 
     async def count(self, *, model_id: str | None = None) -> int:
         if model_id is not None:
@@ -1900,6 +1911,7 @@ class PostgresTermStore(TermStore):
             cur = await self._conn.execute("SELECT COUNT(*) FROM term_mappings")
             row = await cur.fetchone()
         return row[0] if row else 0
+        return int(row[0]) if row else 0
 
 
 # --- Lifecycle --------------------------------------------------------------

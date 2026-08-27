@@ -58,7 +58,8 @@ async def _clean() -> None:
 
     conn = await AsyncConnection.connect(DSN, autocommit=True)
     try:
-        for table in ("compliance_rules", "audit_events", "screenings", "app_meta", "term_mappings"):
+        tables = ("compliance_rules", "audit_events", "screenings", "app_meta", "term_mappings")
+        for table in tables:
             await conn.execute(f"DROP TABLE IF EXISTS {table}")
     finally:
         await conn.close()
@@ -377,7 +378,9 @@ async def test_postgres_term_store_lifecycle(pg):
     }
 
     # Upsert: overwrite with updated verdict
-    updated = [TermRecord("nsclc", "mass in lung", "pg-model-1", "match", "2026-01-02T00:00:00+00:00")]
+    updated = [
+        TermRecord("nsclc", "mass in lung", "pg-model-1", "match", "2026-01-02T00:00:00+00:00")
+    ]
     await pg.terms.set_many(updated)
     rec_updated = await pg.terms.get("nsclc", "mass in lung", "pg-model-1")
     assert rec_updated is not None

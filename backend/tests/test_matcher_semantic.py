@@ -447,6 +447,21 @@ def test_durable_cache_backend_outage_degrades_gracefully():
     failing a run."""
 
     class BrokenTermStore:
+    from app.persistence import TermStore
+
+    class BrokenTermStore(TermStore):
+        async def setup(self) -> None:
+            pass
+
+        async def get(self, criterion_value: str, patient_term: str, model_id: str):
+            raise RuntimeError("Database connection lost")
+
+        async def purge(self, *, model_id: str | None = None) -> int:
+            raise RuntimeError("Database connection lost")
+
+        async def count(self, *, model_id: str | None = None) -> int:
+            raise RuntimeError("Database connection lost")
+
         async def get_many(self, pairs, model_id):
             raise RuntimeError("Database connection lost")
 
@@ -472,6 +487,7 @@ def test_durable_cache_backend_outage_degrades_gracefully():
         _make_mapper(rules, calls),
         store=store,
         model_id="test-model",  # type: ignore[arg-type]
+        model_id="test-model",
     )
     assert cache[("prior platinum chemotherapy", "carboplatin")] == "match"
     assert len(calls) == 1

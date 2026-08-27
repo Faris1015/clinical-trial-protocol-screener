@@ -58,6 +58,7 @@ from app.services import (
     rules,
     simulation,
     sse,
+    terms,
     timeline,
     usage,
 )
@@ -74,7 +75,7 @@ if TYPE_CHECKING:
     from langgraph.checkpoint.base import BaseCheckpointSaver
     from langgraph.graph.state import CompiledStateGraph
 
-    from app.persistence import AuditStore, RuleStore, ScreeningStore
+    from app.persistence import AuditStore, RuleStore, ScreeningStore, TermStore
 
 log = get_logger("screening")
 
