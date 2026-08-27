@@ -549,6 +549,7 @@ def _fetch_from_store(
 def _save_to_store(store: TermStore, records: Sequence[TermRecord]) -> None:
     if not records:
         return
+    store.set_cached(records)
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
