@@ -446,7 +446,6 @@ def test_durable_cache_backend_outage_degrades_gracefully():
     tier, so a cache backend outage degrades to in-process behaviour rather than
     failing a run."""
 
-    class BrokenTermStore:
     from app.persistence import TermStore
 
     class BrokenTermStore(TermStore):
@@ -486,7 +485,6 @@ def test_durable_cache_backend_outage_degrades_gracefully():
         [patient],
         _make_mapper(rules, calls),
         store=store,
-        model_id="test-model",  # type: ignore[arg-type]
         model_id="test-model",
     )
     assert cache[("prior platinum chemotherapy", "carboplatin")] == "match"

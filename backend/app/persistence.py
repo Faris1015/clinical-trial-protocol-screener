@@ -1898,7 +1898,6 @@ class PostgresTermStore(TermStore):
             cur = await self._conn.execute("DELETE FROM term_mappings")
             deleted = cur.rowcount
         await self._conn.commit()
-        return deleted
         return int(deleted) if deleted is not None else 0
 
     async def count(self, *, model_id: str | None = None) -> int:
@@ -1910,7 +1909,6 @@ class PostgresTermStore(TermStore):
         else:
             cur = await self._conn.execute("SELECT COUNT(*) FROM term_mappings")
             row = await cur.fetchone()
-        return row[0] if row else 0
         return int(row[0]) if row else 0
 
 

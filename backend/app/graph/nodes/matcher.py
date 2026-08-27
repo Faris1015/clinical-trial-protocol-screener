@@ -531,8 +531,6 @@ def _fetch_from_store(
 ) -> dict[tuple[str, str], str]:
     if not pairs:
         return {}
-    if hasattr(store, "get_cached"):
-        return store.get_cached(pairs, model_id)
     cached = store.get_cached(pairs, model_id)
     if cached:
         return cached
@@ -550,9 +548,6 @@ def _fetch_from_store(
 
 def _save_to_store(store: TermStore, records: Sequence[TermRecord]) -> None:
     if not records:
-        return
-    if hasattr(store, "set_cached"):
-        store.set_cached(records)
         return
     store.set_cached(records)
     try:
