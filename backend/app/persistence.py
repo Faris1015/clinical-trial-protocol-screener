@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import builtins
 import json
+import sqlite3
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -1558,6 +1559,349 @@ class PostgresRuleStore(RuleStore):
         return (row[0] + 1) if row and row[0] is not None else 0
 
 
+# --- Cross-run term mapping cache (#105) ------------------------------------
+
+
+@dataclass(frozen=True)
+class TermRecord:
+    """One persisted clinical terminology mapping verdict (#105).
+
+    Keyed by `(criterion_value, patient_term, model_id)` where criterion_value
+    and patient_term are normalized (stripped and lowercased). Model_id ensures
+    that a model swap does not silently reuse another model's clinical judgement.
+
+    `verdict` holds 'match', 'no_match', or 'uncertain'. 'uncertain' verdicts
+    are cached too so ambiguous pairs are not re-queried from the LLM on every run.
+    `created_at` provides a timestamp for cache auditability and invalidation.
+    """
+
+    criterion_value: str
+    patient_term: str
+    model_id: str
+    verdict: str
+    created_at: str
+
+
+class TermStore(ABC):
+    """Thin async repository for durable cross-run term mappings (#105). No ORM."""
+
+    @abstractmethod
+    async def setup(self) -> None:
+        """Create the table if absent. Idempotent."""
+
+    @abstractmethod
+    async def get(
+        self, criterion_value: str, patient_term: str, model_id: str
+    ) -> TermRecord | None:
+        """One cached mapping by (criterion, term, model)."""
+
+    @abstractmethod
+    async def get_many(
+        self, pairs: Sequence[tuple[str, str]], model_id: str
+    ) -> dict[tuple[str, str], str]:
+        """Cached verdicts for candidate (criterion_value, patient_term) pairs."""
+
+    @abstractmethod
+    async def set_many(self, records: Sequence[TermRecord]) -> None:
+        """Persist term mapping records into durable storage."""
+
+    @abstractmethod
+    async def purge(self, *, model_id: str | None = None) -> int:
+        """Purge cached term mappings. Returns how many rows were removed."""
+
+    @abstractmethod
+    async def count(self, *, model_id: str | None = None) -> int:
+        """Total cached term mappings stored."""
+
+
+_CREATE_TERM_MAPPINGS_TABLE = """
+CREATE TABLE IF NOT EXISTS term_mappings (
+    criterion_value TEXT NOT NULL,
+    patient_term    TEXT NOT NULL,
+    model_id        TEXT NOT NULL,
+    verdict         TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    PRIMARY KEY (criterion_value, patient_term, model_id)
+)
+"""
+
+
+class InMemoryTermStore(TermStore):
+    """Dict-backed term mapping cache for tests — no durability, no I/O."""
+
+    def __init__(self) -> None:
+        self._rows: dict[tuple[str, str, str], TermRecord] = {}
+
+    async def setup(self) -> None:
+        return None
+
+    def get_cached(
+        self, pairs: Sequence[tuple[str, str]], model_id: str
+    ) -> dict[tuple[str, str], str]:
+        """Synchronous read for in-memory / testing callers."""
+        results = {}
+        for cval, term in pairs:
+            record = self._rows.get((cval, term, model_id))
+            if record is not None:
+                results[(cval, term)] = record.verdict
+        return results
+
+    def set_cached(self, records: Sequence[TermRecord]) -> None:
+        """Synchronous write for in-memory / testing callers."""
+        for r in records:
+            self._rows[(r.criterion_value, r.patient_term, r.model_id)] = r
+
+    async def get(
+        self, criterion_value: str, patient_term: str, model_id: str
+    ) -> TermRecord | None:
+        return self._rows.get((criterion_value, patient_term, model_id))
+
+    async def get_many(
+        self, pairs: Sequence[tuple[str, str]], model_id: str
+    ) -> dict[tuple[str, str], str]:
+        return self.get_cached(pairs, model_id)
+
+    async def set_many(self, records: Sequence[TermRecord]) -> None:
+        self.set_cached(records)
+
+    async def purge(self, *, model_id: str | None = None) -> int:
+        if model_id is None:
+            total = len(self._rows)
+            self._rows.clear()
+            return total
+        to_delete = [k for k in self._rows if k[2] == model_id]
+        for k in to_delete:
+            del self._rows[k]
+        return len(to_delete)
+
+    async def count(self, *, model_id: str | None = None) -> int:
+        if model_id is None:
+            return len(self._rows)
+        return sum(1 for k in self._rows if k[2] == model_id)
+
+
+class SqliteTermStore(TermStore):
+    """aiosqlite-backed term mapping cache, sharing the store's autocommit connection."""
+
+    def __init__(self, conn: aiosqlite.Connection, db_path: str = "") -> None:
+        self._conn = conn
+        self._db_path = db_path
+
+    async def setup(self) -> None:
+        await self._conn.execute(_CREATE_TERM_MAPPINGS_TABLE)
+        await self._conn.commit()
+
+    def get_cached(
+        self, pairs: Sequence[tuple[str, str]], model_id: str
+    ) -> dict[tuple[str, str], str]:
+        """Synchronous read for sync node callers."""
+        if not pairs or not self._db_path:
+            return {}
+        results: dict[tuple[str, str], str] = {}
+        pair_list = list(pairs)
+        with sqlite3.connect(self._db_path, timeout=30.0) as sync_conn:
+            for i in range(0, len(pair_list), 100):
+                chunk = pair_list[i : i + 100]
+                placeholders = " OR ".join(
+                    ["(criterion_value = ? AND patient_term = ?)"] * len(chunk)
+                )
+                params: list[str] = []
+                for cval, term in chunk:
+                    params.extend([cval, term])
+                params.append(model_id)
+                query = (
+                    f"SELECT criterion_value, patient_term, verdict FROM term_mappings "
+                    f"WHERE ({placeholders}) AND model_id = ?"
+                )
+                cur = sync_conn.execute(query, tuple(params))
+                for row in cur.fetchall():
+                    results[(row[0], row[1])] = row[2]
+        return results
+
+    def set_cached(self, records: Sequence[TermRecord]) -> None:
+        """Synchronous write for sync node callers."""
+        if not records or not self._db_path:
+            return
+        with sqlite3.connect(self._db_path, timeout=30.0) as sync_conn:
+            sync_conn.executemany(
+                "INSERT INTO term_mappings "
+                "(criterion_value, patient_term, model_id, verdict, created_at) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(criterion_value, patient_term, model_id) DO UPDATE SET "
+                "verdict = excluded.verdict, created_at = excluded.created_at",
+                [
+                    (r.criterion_value, r.patient_term, r.model_id, r.verdict, r.created_at)
+                    for r in records
+                ],
+            )
+            sync_conn.commit()
+
+    async def get(
+        self, criterion_value: str, patient_term: str, model_id: str
+    ) -> TermRecord | None:
+        async with self._conn.execute(
+            "SELECT criterion_value, patient_term, model_id, verdict, created_at "
+            "FROM term_mappings WHERE criterion_value = ? AND patient_term = ? AND model_id = ?",
+            (criterion_value, patient_term, model_id),
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            return None
+        return TermRecord(row[0], row[1], row[2], row[3], row[4])
+
+    async def get_many(
+        self, pairs: Sequence[tuple[str, str]], model_id: str
+    ) -> dict[tuple[str, str], str]:
+        if not pairs:
+            return {}
+        results: dict[tuple[str, str], str] = {}
+        pair_list = list(pairs)
+        for i in range(0, len(pair_list), 100):
+            chunk = pair_list[i : i + 100]
+            placeholders = " OR ".join(["(criterion_value = ? AND patient_term = ?)"] * len(chunk))
+            params: list[str] = []
+            for cval, term in chunk:
+                params.extend([cval, term])
+            params.append(model_id)
+            query = (
+                f"SELECT criterion_value, patient_term, verdict FROM term_mappings "
+                f"WHERE ({placeholders}) AND model_id = ?"
+            )
+            async with self._conn.execute(query, tuple(params)) as cur:
+                rows = await cur.fetchall()
+                for row in rows:
+                    results[(row[0], row[1])] = row[2]
+        return results
+
+    async def set_many(self, records: Sequence[TermRecord]) -> None:
+        if not records:
+            return
+        await self._conn.executemany(
+            "INSERT INTO term_mappings "
+            "(criterion_value, patient_term, model_id, verdict, created_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(criterion_value, patient_term, model_id) DO UPDATE SET "
+            "verdict = excluded.verdict, created_at = excluded.created_at",
+            [
+                (r.criterion_value, r.patient_term, r.model_id, r.verdict, r.created_at)
+                for r in records
+            ],
+        )
+        await self._conn.commit()
+
+    async def purge(self, *, model_id: str | None = None) -> int:
+        if model_id is not None:
+            async with self._conn.execute(
+                "DELETE FROM term_mappings WHERE model_id = ?", (model_id,)
+            ) as cur:
+                deleted = cur.rowcount
+        else:
+            async with self._conn.execute("DELETE FROM term_mappings") as cur:
+                deleted = cur.rowcount
+        await self._conn.commit()
+        return deleted
+
+    async def count(self, *, model_id: str | None = None) -> int:
+        if model_id is not None:
+            async with self._conn.execute(
+                "SELECT COUNT(*) FROM term_mappings WHERE model_id = ?", (model_id,)
+            ) as cur:
+                row = await cur.fetchone()
+        else:
+            async with self._conn.execute("SELECT COUNT(*) FROM term_mappings") as cur:
+                row = await cur.fetchone()
+        return row[0] if row else 0
+
+
+class PostgresTermStore(TermStore):
+    """psycopg-backed term mapping cache for production. Same schema, %s placeholders."""
+
+    def __init__(self, conn: AsyncConnection) -> None:
+        self._conn = conn
+
+    async def setup(self) -> None:
+        await self._conn.execute(_CREATE_TERM_MAPPINGS_TABLE)
+        await self._conn.commit()
+
+    async def get(
+        self, criterion_value: str, patient_term: str, model_id: str
+    ) -> TermRecord | None:
+        cur = await self._conn.execute(
+            "SELECT criterion_value, patient_term, model_id, verdict, created_at "
+            "FROM term_mappings WHERE criterion_value = %s AND patient_term = %s AND model_id = %s",
+            (criterion_value, patient_term, model_id),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        return TermRecord(row[0], row[1], row[2], row[3], row[4])
+
+    async def get_many(
+        self, pairs: Sequence[tuple[str, str]], model_id: str
+    ) -> dict[tuple[str, str], str]:
+        if not pairs:
+            return {}
+        results: dict[tuple[str, str], str] = {}
+        pair_list = list(pairs)
+        for i in range(0, len(pair_list), 100):
+            chunk = pair_list[i : i + 100]
+            placeholders = " OR ".join(
+                ["(criterion_value = %s AND patient_term = %s)"] * len(chunk)
+            )
+            params: list[str] = []
+            for cval, term in chunk:
+                params.extend([cval, term])
+            params.append(model_id)
+            query = (
+                f"SELECT criterion_value, patient_term, verdict FROM term_mappings "
+                f"WHERE ({placeholders}) AND model_id = %s"
+            )
+            cur = await self._conn.execute(query, tuple(params))
+            rows = await cur.fetchall()
+            for row in rows:
+                results[(row[0], row[1])] = row[2]
+        return results
+
+    async def set_many(self, records: Sequence[TermRecord]) -> None:
+        if not records:
+            return
+        await self._conn.executemany(
+            "INSERT INTO term_mappings "
+            "(criterion_value, patient_term, model_id, verdict, created_at) "
+            "VALUES (%s, %s, %s, %s, %s) "
+            "ON CONFLICT (criterion_value, patient_term, model_id) DO UPDATE SET "
+            "verdict = EXCLUDED.verdict, created_at = EXCLUDED.created_at",
+            [
+                (r.criterion_value, r.patient_term, r.model_id, r.verdict, r.created_at)
+                for r in records
+            ],
+        )
+        await self._conn.commit()
+
+    async def purge(self, *, model_id: str | None = None) -> int:
+        if model_id is not None:
+            cur = await self._conn.execute(
+                "DELETE FROM term_mappings WHERE model_id = %s", (model_id,)
+            )
+            deleted = cur.rowcount
+        else:
+            cur = await self._conn.execute("DELETE FROM term_mappings")
+            deleted = cur.rowcount
+        await self._conn.commit()
+        return deleted
+
+    async def count(self, *, model_id: str | None = None) -> int:
+        if model_id is not None:
+            cur = await self._conn.execute(
+                "SELECT COUNT(*) FROM term_mappings WHERE model_id = %s", (model_id,)
+            )
+            row = await cur.fetchone()
+        else:
+            cur = await self._conn.execute("SELECT COUNT(*) FROM term_mappings")
+            row = await cur.fetchone()
+        return row[0] if row else 0
+
+
 # --- Lifecycle --------------------------------------------------------------
 
 
@@ -1574,6 +1918,7 @@ class Persistence:
     store: ScreeningStore
     audit: AuditStore
     rules: RuleStore
+    terms: TermStore
     _closers: list[Callable[[], Awaitable[None]]]
 
     async def aclose(self) -> None:
@@ -1591,10 +1936,12 @@ async def open_persistence(settings: Settings) -> Persistence:
         store: ScreeningStore = InMemoryScreeningStore()
         audit: AuditStore = InMemoryAuditStore()
         rules: RuleStore = InMemoryRuleStore()
+        terms: TermStore = InMemoryTermStore()
         await store.setup()
         await audit.setup()
         await rules.setup()
-        return Persistence(backend, checkpointer, store, audit, rules, [])
+        await terms.setup()
+        return Persistence(backend, checkpointer, store, audit, rules, terms, [])
 
     if backend == "sqlite":
         return await _open_sqlite(settings)
@@ -1646,9 +1993,11 @@ async def _open_sqlite(settings: Settings) -> Persistence:
     await audit.setup()
     rules = SqliteRuleStore(store_conn)
     await rules.setup()
+    terms = SqliteTermStore(store_conn, db_path=path)
+    await terms.setup()
 
     return Persistence(
-        "sqlite", checkpointer, store, audit, rules, [saver_conn.close, store_conn.close]
+        "sqlite", checkpointer, store, audit, rules, terms, [saver_conn.close, store_conn.close]
     )
 
 
@@ -1683,7 +2032,9 @@ async def _open_postgres(settings: Settings) -> Persistence:
     await audit.setup()
     rules = PostgresRuleStore(store_conn)
     await rules.setup()
+    terms = PostgresTermStore(store_conn)
+    await terms.setup()
 
     return Persistence(
-        "postgres", checkpointer, store, audit, rules, [saver_conn.close, store_conn.close]
+        "postgres", checkpointer, store, audit, rules, terms, [saver_conn.close, store_conn.close]
     )
