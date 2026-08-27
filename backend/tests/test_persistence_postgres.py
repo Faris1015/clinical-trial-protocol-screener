@@ -33,7 +33,7 @@ import os
 import pytest
 
 from app.config import Settings
-from app.persistence import AuditDecision, AuditFilter, RuleRecord, open_persistence
+from app.persistence import AuditDecision, AuditFilter, RuleRecord, TermRecord, open_persistence
 
 # Defaulted to "" rather than left as None so it stays a `str` for the psycopg
 # calls below; the skip is what guarantees nothing here runs against the empty one.
@@ -58,7 +58,8 @@ async def _clean() -> None:
 
     conn = await AsyncConnection.connect(DSN, autocommit=True)
     try:
-        for table in ("compliance_rules", "audit_events", "screenings", "app_meta"):
+        tables = ("compliance_rules", "audit_events", "screenings", "app_meta", "term_mappings")
+        for table in tables:
             await conn.execute(f"DROP TABLE IF EXISTS {table}")
     finally:
         await conn.close()
@@ -340,3 +341,58 @@ async def test_postgres_screening_store_parked_runs_and_meta(pg):
     # Test update (upsert)
     await pg.store.set_meta("last_digest_at", "2026-01-02T08:00:00+00:00")
     assert (await pg.store.get_meta("last_digest_at")) == "2026-01-02T08:00:00+00:00"
+
+
+# --- the terms table (#105) --------------------------------------------------
+
+
+async def test_postgres_term_store_lifecycle(pg):
+    """PostgresTermStore round-trips term mappings, supports upsert and purge."""
+    assert pg.terms is not None
+    assert await pg.terms.count() == 0
+
+    records = [
+        TermRecord("nsclc", "lung cancer", "pg-model-1", "match", "2026-01-01T00:00:00+00:00"),
+        TermRecord("nsclc", "hypertension", "pg-model-1", "no_match", "2026-01-01T00:00:00+00:00"),
+        TermRecord("nsclc", "mass in lung", "pg-model-1", "uncertain", "2026-01-01T00:00:00+00:00"),
+        TermRecord("nsclc", "lung cancer", "pg-model-2", "match", "2026-01-01T00:00:00+00:00"),
+    ]
+    await pg.terms.set_many(records)
+
+    assert await pg.terms.count() == 4
+    assert await pg.terms.count(model_id="pg-model-1") == 3
+    assert await pg.terms.count(model_id="pg-model-2") == 1
+
+    # Single lookup
+    rec = await pg.terms.get("nsclc", "mass in lung", "pg-model-1")
+    assert rec is not None
+    assert rec.verdict == "uncertain"
+
+    # Batch lookup
+    pairs = [("nsclc", "lung cancer"), ("nsclc", "hypertension"), ("nsclc", "mass in lung")]
+    results = await pg.terms.get_many(pairs, "pg-model-1")
+    assert results == {
+        ("nsclc", "lung cancer"): "match",
+        ("nsclc", "hypertension"): "no_match",
+        ("nsclc", "mass in lung"): "uncertain",
+    }
+
+    # Upsert: overwrite with updated verdict
+    updated = [
+        TermRecord("nsclc", "mass in lung", "pg-model-1", "match", "2026-01-02T00:00:00+00:00")
+    ]
+    await pg.terms.set_many(updated)
+    rec_updated = await pg.terms.get("nsclc", "mass in lung", "pg-model-1")
+    assert rec_updated is not None
+    assert rec_updated.verdict == "match"
+
+    # Purge by model_id
+    purged_1 = await pg.terms.purge(model_id="pg-model-1")
+    assert purged_1 == 3
+    assert await pg.terms.count(model_id="pg-model-1") == 0
+    assert await pg.terms.count(model_id="pg-model-2") == 1
+
+    # Purge all
+    purged_all = await pg.terms.purge()
+    assert purged_all == 1
+    assert await pg.terms.count() == 0

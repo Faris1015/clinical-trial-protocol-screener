@@ -58,6 +58,7 @@ from app.services import (
     rules,
     simulation,
     sse,
+    terms,
     timeline,
     usage,
 )
@@ -74,7 +75,7 @@ if TYPE_CHECKING:
     from langgraph.checkpoint.base import BaseCheckpointSaver
     from langgraph.graph.state import CompiledStateGraph
 
-    from app.persistence import AuditStore, RuleStore, ScreeningStore
+    from app.persistence import AuditStore, RuleStore, ScreeningStore, TermStore
 
 log = get_logger("screening")
 
@@ -319,6 +320,7 @@ async def _graph_frames(
     *,
     stream_mode: Any,
     operation: str,
+    term_store: TermStore | None = None,
 ) -> AsyncIterator[str]:
     """Drive the graph and render its progress as SSE frames.
 
@@ -337,6 +339,8 @@ async def _graph_frames(
     single mode yields bare chunks, and the fakes in the test suite always do —
     hence the isinstance check rather than a per-caller branch.
     """
+    if term_store is not None:
+        terms._ACTIVE_TERM_STORE.set(term_store)
     try:
         async for item in graph.astream(graph_input, config, stream_mode=stream_mode):
             mode, chunk = item if isinstance(item, tuple) else ("updates", item)
@@ -757,6 +761,7 @@ async def approve_screening(
     graph: ScreeningGraph,
     thread_id: str,
     approver: Principal,
+    term_store: TermStore | None = None,
 ) -> AsyncIterator[str]:
     """Resume past the human-in-the-loop gate and STREAM the matcher over SSE.
 
@@ -817,6 +822,7 @@ async def approve_screening(
         None,
         stream_mode=["updates", "custom"],
         operation="approve",
+        term_store=term_store,
     )
 
 

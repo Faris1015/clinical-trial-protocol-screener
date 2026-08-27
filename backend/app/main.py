@@ -56,9 +56,25 @@ from app.exceptions import (
 )
 from app.health import app_version, readiness
 from app.logging_config import bind_contextvars, clear_contextvars, configure_logging, get_logger
-from app.persistence import AuditStore, Persistence, RuleStore, ScreeningStore, open_persistence
+from app.persistence import (
+    AuditStore,
+    Persistence,
+    RuleStore,
+    ScreeningStore,
+    TermStore,
+    open_persistence,
+)
 from app.schemas.criteria import CriteriaSchema
-from app.services import audit, notifications, patients, rules, screening, simulation, sse
+from app.services import (
+    audit,
+    notifications,
+    patients,
+    rules,
+    screening,
+    simulation,
+    sse,
+    terms,
+)
 from app.services.concurrency import ConcurrencyLimiter, release_after
 from app.services.uploads import read_upload_capped, validate_content_type
 
@@ -146,6 +162,11 @@ def _audit() -> AuditStore:
 def _rules() -> RuleStore:
     assert _persistence is not None, "persistence not initialized — is the app started?"
     return _persistence.rules
+
+
+def _terms() -> TermStore:
+    assert _persistence is not None, "persistence not initialized — is the app started?"
+    return _persistence.terms
 
 
 def _graph() -> CompiledStateGraph:
@@ -627,7 +648,7 @@ async def approve_screening(
     active_screenings.acquire()
     try:
         frames = await screening.approve_screening(
-            _store(), _audit(), _graph(), thread_id, principal
+            _store(), _audit(), _graph(), thread_id, principal, term_store=_terms()
         )
     except BaseException:
         active_screenings.release()
@@ -1243,6 +1264,38 @@ async def set_compliance_rule_enabled(
     leave every past finding pointing at nothing.
     """
     return await rules.set_rule_enabled(_rules(), _audit(), rule_id, body.enabled, principal)
+
+
+class CachePurgeRequest(BaseModel):
+    """Optional model filter for purging cached term mappings (#105)."""
+
+    model_id: str | None = Field(
+        default=None,
+        description="Optional model identifier to purge. If omitted, all cached models are purged.",
+    )
+
+
+@app.post("/api/terms/cache/purge")
+@limiter.limit(lambda: settings.rate_limit_create)
+async def purge_term_cache(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_admin)],
+    body: CachePurgeRequest | None = None,
+) -> dict:
+    """Invalidate cached terminology mappings (#105). Admin-only."""
+    model_id = body.model_id if body else None
+    return await terms.purge_cache(_terms(), _audit(), principal, model_id=model_id)
+
+
+@app.delete("/api/terms/cache")
+@limiter.limit(lambda: settings.rate_limit_create)
+async def delete_term_cache(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_admin)],
+    model_id: Annotated[str | None, Query(description="Optional model identifier to purge")] = None,
+) -> dict:
+    """Invalidate cached terminology mappings (#105). Admin-only."""
+    return await terms.purge_cache(_terms(), _audit(), principal, model_id=model_id)
 
 
 @app.get("/api/metrics/summary")
