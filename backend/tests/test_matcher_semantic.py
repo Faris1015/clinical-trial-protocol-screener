@@ -485,7 +485,6 @@ def test_durable_cache_backend_outage_degrades_gracefully():
         [patient],
         _make_mapper(rules, calls),
         store=store,
-        model_id="test-model",
     )
     assert cache[("prior platinum chemotherapy", "carboplatin")] == "match"
     assert len(calls) == 1

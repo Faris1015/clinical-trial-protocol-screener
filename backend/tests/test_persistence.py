@@ -26,7 +26,6 @@ from app.persistence import (
     RuleRecord,
     SqliteScreeningStore,
     TermRecord,
-    TermStore,
     open_persistence,
 )
 from tests.auth_helpers import sign_in
@@ -775,8 +774,6 @@ async def test_sqlite_migration_adds_gate_columns_and_meta_table(tmp_path):
 @pytest.mark.parametrize("store_kind", ["memory", "sqlite"])
 async def test_term_store_lifecycle(tmp_path, store_kind):
     """Test TermStore get_many, set_many, purge, and count lifecycle."""
-    store: TermStore
-    sync_store: TermStore
     if store_kind == "memory":
         store = InMemoryTermStore()
         await store.setup()
