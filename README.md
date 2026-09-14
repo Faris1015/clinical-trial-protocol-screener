@@ -65,6 +65,13 @@ data gets touched.
   (attribute / operator / value / unit) and `CategoricalCriterion` objects with a closed
   attribute vocabulary — the contract that lets the Matcher run as pure Python instead of
   per-patient LLM calls.
+- **Multi-tier, durable term-mapping cache (#105).** Categorical criteria evaluated
+  against patient EHRs use fast exact/substring matching first. When terminology
+  varies ("NSCLC" vs "non-small cell lung cancer"), an LLM resolves semantic equivalence once
+  and writes the verdict into a durable `TermStore` (SQLite / PostgreSQL / in-memory),
+  keyed by `(criterion_value, patient_term, model_id)`. Subsequent screenings reuse known
+  verdicts across runs without invoking the model again, with admin endpoints to
+  purge cache entries by model scope.
 - **Provenance on every criterion.** Each extracted criterion carries the verbatim
   `source_text` from the protocol so reviewers can audit every threshold.
 - **The Parser is allowed to admit defeat.** Vague criteria ("adequate organ function")
@@ -744,6 +751,32 @@ curl -b admin.txt -X PATCH http://localhost:8000/api/rules/BP-001/enabled \
   a verdict halfway through the Critic's parse→critic loop — and the checkpoint
   records which rules the run was actually judged by.
 
+### Manage the term-mapping cache (admin)
+
+Ambiguous categorical term mappings evaluated by the Matcher's LLM fallback are
+cached durably across runs so subsequent screenings never pay model latency or
+token costs for pairs the system has already resolved (#105). An admin can
+invalidate cached mappings when models are upgraded or terminology prompts change.
+
+```bash
+# Invalidate all cached term mappings (admin only; a reviewer gets 403)
+curl -b admin.txt -X POST http://localhost:8000/api/terms/cache/purge
+
+# Or purge mappings for a specific model scope
+curl -b admin.txt -X DELETE "http://localhost:8000/api/terms/cache?model_id=ollama:qwen2.5:7b"
+# → {"purged": 42, "model_id": "ollama:qwen2.5:7b"}
+```
+
+- **Multi-tier resolution.** The Matcher checks Tier 1 (per-run in-memory cache)
+  → Tier 2 (durable `TermStore`) → Tier 3 (LLM mapper). Any backend store outage
+  gracefully degrades to in-process caching so screening runs never fail on a
+  cache error.
+- **Model isolation by key.** Entries are keyed by
+  `(criterion_value, patient_term, model_id)`. Upgrading or switching the
+  underlying LLM never applies an older model's verdict under the new one.
+- **Audited mutations.** Cache invalidations land in the org-wide audit log
+  (#98) under subject `term_cache` with the actor, timestamp, and model scope.
+
 ### Read the metrics in-app
 
 The domain metrics below have been exported since #7, but reading a screening
@@ -1082,6 +1115,7 @@ concurrency. Full method, numbers, and analysis:
 backend/
   app/
     main.py                    # FastAPI app: thin HTTP routes → service layer
+    persistence.py             # Durable stores (SQLite / Postgres / memory): screenings, audit, rules, terms
     graph/
       state.py                 # Shared LangGraph state (typed, with event reducer)
       builder.py               # Graph assembly: nodes, edges, loop, HITL interrupt
@@ -1102,6 +1136,7 @@ backend/
       provenance.py            # criterion source_text → character span in the protocol
       report.py                # Self-contained, printable HTML screening report
       rules.py                 # The compliance rules: seeding, validation, authoring, reading
+      terms.py                 # Term mapping cache management & admin purge (#105)
       metrics.py               # Custom Prometheus metric definitions (one home)
       metrics_summary.py       # Those metrics reduced for the in-app dashboard
       notifications.py         # Gate/escalation notifications (webhook + email, PHI-free)
