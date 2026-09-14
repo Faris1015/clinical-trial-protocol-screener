@@ -1875,17 +1875,18 @@ class PostgresTermStore(TermStore):
     async def set_many(self, records: Sequence[TermRecord]) -> None:
         if not records:
             return
-        await self._conn.executemany(
-            "INSERT INTO term_mappings "
-            "(criterion_value, patient_term, model_id, verdict, created_at) "
-            "VALUES (%s, %s, %s, %s, %s) "
-            "ON CONFLICT (criterion_value, patient_term, model_id) DO UPDATE SET "
-            "verdict = EXCLUDED.verdict, created_at = EXCLUDED.created_at",
-            [
-                (r.criterion_value, r.patient_term, r.model_id, r.verdict, r.created_at)
-                for r in records
-            ],
-        )
+        async with self._conn.cursor() as cur:
+            await cur.executemany(
+                "INSERT INTO term_mappings "
+                "(criterion_value, patient_term, model_id, verdict, created_at) "
+                "VALUES (%s, %s, %s, %s, %s) "
+                "ON CONFLICT (criterion_value, patient_term, model_id) DO UPDATE SET "
+                "verdict = EXCLUDED.verdict, created_at = EXCLUDED.created_at",
+                [
+                    (r.criterion_value, r.patient_term, r.model_id, r.verdict, r.created_at)
+                    for r in records
+                ],
+            )
         await self._conn.commit()
 
     async def purge(self, *, model_id: str | None = None) -> int:
