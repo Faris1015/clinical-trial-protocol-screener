@@ -20,9 +20,11 @@ from the same deterministic comparison, so the plain view can never disagree
 with the statuses beneath it.
 """
 
+import asyncio
 import json
 import re
 from collections.abc import Callable, Mapping, Sequence
+from datetime import UTC, datetime
 from operator import eq, ge, gt, le, lt
 from typing import Any, NamedTuple
 
@@ -34,8 +36,10 @@ from app.config import get_settings
 from app.exceptions import DataStoreError, LLMUnavailableError
 from app.graph.state import ScreenerState, event
 from app.logging_config import get_logger
+from app.persistence import TermRecord, TermStore
 from app.schemas.review import TermMapping
 from app.services import metrics
+from app.services import terms as terms_service
 from app.services.llm import get_llm, invoke_with_retry
 
 OPS = {">=": ge, "<=": le, ">": gt, "<": lt, "==": eq}
@@ -522,29 +526,67 @@ class TermMappingCost(NamedTuple):
     llm_pairs: int
 
 
+def _fetch_from_store(
+    store: TermStore, pairs: Sequence[tuple[str, str]], model_id: str
+) -> dict[tuple[str, str], str]:
+    if not pairs:
+        return {}
+    cached = store.get_cached(pairs, model_id)
+    if cached:
+        return cached
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is not None and loop.is_running():
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, store.get_many(pairs, model_id)).result()
+    return asyncio.run(store.get_many(pairs, model_id))
+
+
+def _save_to_store(store: TermStore, records: Sequence[TermRecord]) -> None:
+    if not records:
+        return
+    store.set_cached(records)
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is not None and loop.is_running():
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(asyncio.run, store.set_many(records)).result()
+            return
+    asyncio.run(store.set_many(records))
+
+
 def build_verdict_cache(
     criteria: dict,
     patients: list[dict],
     mapper: TermMapper = _map_terms_via_llm,
     on_progress: Callable[[int, int], None] | None = None,
     on_cost: Callable[[TermMappingCost], None] | None = None,
+    store: TermStore | None = None,
+    model_id: str | None = None,
 ) -> dict[tuple[str, str], str]:
     """Resolve the ambiguous categorical tail once for the whole cohort.
 
     For each distinct categorical criterion, gather every patient term the fast
-    path can't already settle, ask the mapper in one batch, and cache the verdict
-    per `(criterion_value, term)`. An unavailable LLM degrades to "uncertain" for
-    that criterion's terms → the affected patients land in needs-review rather than
-    being silently passed or failed.
+    path can't already settle, check Tier 1 (per-screening) and Tier 2 (durable
+    cross-run store, keyed by criterion_value, patient_term, model_id) caches,
+    ask the mapper in one batch for cache misses, and persist the results.
+    An unavailable LLM degrades to "uncertain" for that criterion's terms → the
+    affected patients land in needs-review rather than being silently passed or failed.
 
     `on_progress(done, total)` is called before each LLM mapper call. Each call
     can take tens of seconds on a local model, so this lets the caller emit a
     keepalive/progress signal between them (see matcher_node).
 
     `on_cost(TermMappingCost)` is called once, at the end, with what the cache
-    saved (#101) — see `TermMappingCost`. A callback rather than a second return
-    value because every existing caller wants the cache and nothing else, and the
-    figure is only ever forwarded to a counter.
+    saved (#101, #105) — see `TermMappingCost`.
     """
     categoricals = criteria["inclusion_categorical"] + criteria["exclusion_categorical"]
     # One representative original spelling per normalized term, for the prompt.
@@ -564,15 +606,41 @@ def build_verdict_cache(
                 patients_with_term[tnorm] = patients_with_term.get(tnorm, 0) + 1
 
     cache: dict[tuple[str, str], str] = {}
+    active_store = store if store is not None else terms_service.current_term_store()
+    active_model = model_id or terms_service.active_model_id()
+
+    # Preload from durable cross-run storage (Tier 2) for all unsettled pairs (#105)
+    all_unsettled_pairs: list[tuple[str, str]] = []
+    for c in categoricals:
+        cval = _norm(c["value"])
+        for tnorm in term_by_norm:
+            if not fast_present(cval, tnorm):
+                all_unsettled_pairs.append((cval, tnorm))
+
+    if active_store is not None and all_unsettled_pairs:
+        try:
+            cached_durable = _fetch_from_store(active_store, all_unsettled_pairs, active_model)
+            cache.update(cached_durable)
+        except Exception as exc:  # noqa: BLE001
+            # AC 5: Store outage gracefully degrades to Tier 1 in-process behavior
+            log.warning("matcher.term_cache_read_failed", error=type(exc).__name__, detail=str(exc))
+
     resolutions = 0
-    # Only criteria with an ambiguous tail actually make an LLM call; count those
-    # for a meaningful progress denominator.
+    newly_resolved_records: list[TermRecord] = []
+    total_llm_pairs = 0
+
+    # Only criteria with an ambiguous tail that is not already cached make an LLM call;
+    # count those for a meaningful progress denominator.
     llm_bound = [
         c
         for c in categoricals
-        if any(not fast_present(_norm(c["value"]), tnorm) for tnorm in term_by_norm)
+        if any(
+            not fast_present(_norm(c["value"]), tnorm) and (_norm(c["value"]), tnorm) not in cache
+            for tnorm in term_by_norm
+        )
     ]
     done = 0
+    now_stamp = datetime.now(UTC).isoformat()
     for c in categoricals:
         cval = _norm(c["value"])
         # One `fast_present` sweep per criterion, reused for both the candidate
@@ -581,9 +649,9 @@ def build_verdict_cache(
         # of thousands of extra scans per screening.
         unsettled = [tnorm for tnorm in term_by_norm if not fast_present(cval, tnorm)]
         # Counted before the `continue` below: a criterion whose terms are all
-        # already cached (the protocol quotes it twice) still had those
-        # resolutions required by the cohort — they were simply served from the
-        # cache, which is precisely the saving being measured.
+        # already cached (the protocol quotes it twice, or durable cache hit) still
+        # had those resolutions required by the cohort — they were simply served
+        # from the cache, which is precisely the saving being measured.
         resolutions += sum(patients_with_term.get(tnorm, 0) for tnorm in unsettled)
         candidates = {
             tnorm: term_by_norm[tnorm] for tnorm in unsettled if (cval, tnorm) not in cache
@@ -593,6 +661,7 @@ def build_verdict_cache(
         if on_progress is not None:
             on_progress(done, len(llm_bound))
         done += 1
+        total_llm_pairs += len(candidates)
         try:
             verdicts = mapper(c["value"], list(candidates.values()))
         except LLMUnavailableError as exc:
@@ -607,9 +676,29 @@ def build_verdict_cache(
             )
             verdicts = {tnorm: "uncertain" for tnorm in candidates}
         for tnorm in candidates:
-            cache[(cval, tnorm)] = verdicts.get(tnorm, "no_match")
+            verdict = verdicts.get(tnorm, "no_match")
+            cache[(cval, tnorm)] = verdict
+            newly_resolved_records.append(
+                TermRecord(
+                    criterion_value=cval,
+                    patient_term=tnorm,
+                    model_id=active_model,
+                    verdict=verdict,
+                    created_at=now_stamp,
+                )
+            )
+
+    if active_store is not None and newly_resolved_records:
+        try:
+            _save_to_store(active_store, newly_resolved_records)
+        except Exception as exc:  # noqa: BLE001
+            # AC 5: Store outage on write does not fail the run
+            log.warning(
+                "matcher.term_cache_write_failed", error=type(exc).__name__, detail=str(exc)
+            )
+
     if on_cost is not None:
-        on_cost(TermMappingCost(resolutions=resolutions, llm_pairs=len(cache)))
+        on_cost(TermMappingCost(resolutions=resolutions, llm_pairs=total_llm_pairs))
     return cache
 
 

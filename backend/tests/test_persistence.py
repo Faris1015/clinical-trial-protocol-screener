@@ -20,7 +20,15 @@ from fastapi.testclient import TestClient
 
 import app.main as main
 from app.config import Settings
-from app.persistence import AuditDecision, RuleRecord, SqliteScreeningStore, open_persistence
+from app.persistence import (
+    AuditDecision,
+    InMemoryTermStore,
+    RuleRecord,
+    SqliteScreeningStore,
+    TermRecord,
+    TermStore,
+    open_persistence,
+)
 from tests.auth_helpers import sign_in
 
 # A minimal protocol that clears the router's length + eligibility-marker gate.
@@ -761,4 +769,72 @@ async def test_sqlite_migration_adds_gate_columns_and_meta_table(tmp_path):
         assert rec2 is not None
         assert rec2.gate_entered_at == "2026-01-01T02:00:00+00:00"
     finally:
+        await p.aclose()
+
+
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite"])
+async def test_term_store_lifecycle(tmp_path, store_kind):
+    """Test TermStore get_many, set_many, purge, and count lifecycle."""
+    store: TermStore
+    sync_store: TermStore
+    if store_kind == "memory":
+        store = InMemoryTermStore()
+        await store.setup()
+        sync_store = store
+    else:
+        db_path = str(tmp_path / "terms.db")
+        settings = Settings(_env_file=None, checkpoint_backend="sqlite", sqlite_path=db_path)
+        p = await open_persistence(settings)
+        store = p.terms
+        sync_store = store
+
+    # Initially empty
+    assert await store.count() == 0
+    assert await store.get_many([("nsclc", "lung cancer")], "model-1") == {}
+    assert sync_store.get_cached([("nsclc", "lung cancer")], "model-1") == {}
+
+    # Insert records
+    records = [
+        TermRecord("nsclc", "lung cancer", "model-1", "match", "2026-01-01T00:00:00+00:00"),
+        TermRecord("nsclc", "adenocarcinoma", "model-1", "match", "2026-01-01T00:00:00+00:00"),
+        TermRecord("nsclc", "small cell", "model-1", "no_match", "2026-01-01T00:00:00+00:00"),
+        TermRecord("nsclc", "uncertain term", "model-1", "uncertain", "2026-01-01T00:00:00+00:00"),
+        TermRecord("nsclc", "lung cancer", "model-2", "match", "2026-01-01T00:00:00+00:00"),
+    ]
+    if store_kind == "memory":
+        await store.set_many(records)
+    else:
+        sync_store.set_cached(records)
+
+    assert await store.count() == 5
+    assert await store.count(model_id="model-1") == 4
+    assert await store.count(model_id="model-2") == 1
+
+    # Get single and batch
+    res_m1 = await store.get_many(
+        [("nsclc", "lung cancer"), ("nsclc", "small cell"), ("nsclc", "absent")], "model-1"
+    )
+    assert res_m1 == {("nsclc", "lung cancer"): "match", ("nsclc", "small cell"): "no_match"}
+
+    res_sync = sync_store.get_cached(
+        [("nsclc", "lung cancer"), ("nsclc", "small cell"), ("nsclc", "absent")], "model-1"
+    )
+    assert res_sync == {("nsclc", "lung cancer"): "match", ("nsclc", "small cell"): "no_match"}
+
+    # Model isolation
+    res_m2 = await store.get_many([("nsclc", "small cell")], "model-2")
+    assert res_m2 == {}
+
+    # Purge specific model
+    purged_m1 = await store.purge(model_id="model-1")
+    assert purged_m1 == 4
+    assert await store.count() == 1
+    assert await store.count(model_id="model-2") == 1
+
+    # Purge all
+    purged_all = await store.purge()
+    assert purged_all == 1
+    assert await store.count() == 0
+
+    if store_kind == "sqlite":
         await p.aclose()

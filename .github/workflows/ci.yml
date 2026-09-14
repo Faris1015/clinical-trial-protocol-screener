@@ -65,9 +65,13 @@ jobs:
         # is reproducibility. Leaving it floating broke this step on every branch
         # at once when the runner moved to pip 26 and `stdlib_pkgs` left
         # `pip._internal.utils.compat`. Bump the two together, and only together.
+        # click is pinned to match requirements.lock and CUSTOM_COMPILE_COMMAND is
+        # explicitly set to prevent click option default changes from altering the
+        # header comment.
         run: |
-          pip install pip==26.2.1 pip-tools==7.6.1
-          pip-compile --quiet --output-file=requirements.lock --strip-extras pyproject.toml
+          pip install pip==26.2.1 pip-tools==7.6.1 click==8.4.2
+          CUSTOM_COMPILE_COMMAND="pip-compile --output-file=requirements.lock --strip-extras pyproject.toml" \
+            pip-compile --quiet --output-file=requirements.lock --strip-extras pyproject.toml
           if ! git diff --exit-code requirements.lock; then
             echo "::error file=backend/requirements.lock::requirements.lock is out of sync with pyproject.toml. Regenerate: cd backend && pip-compile --output-file=requirements.lock --strip-extras pyproject.toml"
             exit 1

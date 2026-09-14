@@ -333,3 +333,158 @@ def test_omitted_terms_default_to_no_match():
     cache = build_verdict_cache(crit, [patient], forgetful_mapper)
     assert cache[("diabetes", "hypertension")] == "no_match"
     assert evaluate_patient(patient, crit, cache)["eligible"] is False
+
+
+# --- Durable cross-run cache tests (#105) -----------------------------------
+
+
+def test_durable_cache_second_identical_run_makes_zero_llm_calls():
+    """Acceptance Criterion 1 & 6: Term mappings persist across runs, and a second
+    identical run makes ZERO term-mapping LLM calls."""
+    from app.persistence import InMemoryTermStore
+
+    store = InMemoryTermStore()
+    crit = _criteria(inclusion_categorical=[_cat("prior platinum chemotherapy")])
+    patients = [
+        _patient("P1", medications=["carboplatin"]),
+        _patient("P2", medications=["cisplatin"]),
+    ]
+
+    calls_run1: list = []
+    rules = {
+        ("prior platinum chemotherapy", "carboplatin"): "match",
+        ("prior platinum chemotherapy", "cisplatin"): "match",
+    }
+    cost_run1: list = []
+    cache1 = build_verdict_cache(
+        crit,
+        patients,
+        _make_mapper(rules, calls_run1),
+        store=store,
+        model_id="test-model",
+        on_cost=lambda c: cost_run1.append(c),
+    )
+    assert len(calls_run1) == 1
+    assert len(calls_run1[0][1]) == 2
+    assert cache1[("prior platinum chemotherapy", "carboplatin")] == "match"
+    assert cache1[("prior platinum chemotherapy", "cisplatin")] == "match"
+    assert cost_run1[0].llm_pairs == 2
+    assert cost_run1[0].resolutions == 2
+
+    # Second identical run with the same durable store
+    calls_run2: list = []
+    cost_run2: list = []
+    cache2 = build_verdict_cache(
+        crit,
+        patients,
+        _make_mapper(rules, calls_run2),
+        store=store,
+        model_id="test-model",
+        on_cost=lambda c: cost_run2.append(c),
+    )
+    assert len(calls_run2) == 0  # ZERO LLM calls!
+    assert cache2[("prior platinum chemotherapy", "carboplatin")] == "match"
+    assert cache2[("prior platinum chemotherapy", "cisplatin")] == "match"
+    assert cost_run2[0].llm_pairs == 0  # 0 LLM pairs sent
+    assert cost_run2[0].resolutions == 2  # 2 resolutions served from cache
+
+
+def test_durable_cache_persists_uncertain_verdicts():
+    """Acceptance Criterion 2: 'uncertain' verdicts are cached too so an ambiguous
+    pair is not re-asked on every run."""
+    from app.persistence import InMemoryTermStore
+
+    store = InMemoryTermStore()
+    crit = _criteria(inclusion_categorical=[_cat("hypertension with complications")])
+    patient = _patient("P1", diagnoses=["mild hypertension"])
+
+    calls1: list = []
+    rules = {("hypertension with complications", "mild hypertension"): "uncertain"}
+    cache1 = build_verdict_cache(
+        crit, [patient], _make_mapper(rules, calls1), store=store, model_id="test-model"
+    )
+    assert cache1[("hypertension with complications", "mild hypertension")] == "uncertain"
+    assert len(calls1) == 1
+
+    # Second run: uncertain verdict served from durable cache without asking LLM
+    calls2: list = []
+    cache2 = build_verdict_cache(
+        crit, [patient], _make_mapper(rules, calls2), store=store, model_id="test-model"
+    )
+    assert cache2[("hypertension with complications", "mild hypertension")] == "uncertain"
+    assert len(calls2) == 0
+
+
+def test_durable_cache_model_isolation():
+    """Acceptance Criterion 1: Keyed by model_id — a model change must not silently
+    reuse another model's clinical judgement."""
+    from app.persistence import InMemoryTermStore
+
+    store = InMemoryTermStore()
+    crit = _criteria(inclusion_categorical=[_cat("prior platinum chemotherapy")])
+    patient = _patient("P1", medications=["carboplatin"])
+
+    calls_model_a: list = []
+    rules_a = {("prior platinum chemotherapy", "carboplatin"): "match"}
+    build_verdict_cache(
+        crit, [patient], _make_mapper(rules_a, calls_model_a), store=store, model_id="model-alpha"
+    )
+    assert len(calls_model_a) == 1
+
+    # Run with different model: must NOT reuse model-alpha's cached judgement
+    calls_model_b: list = []
+    rules_b = {("prior platinum chemotherapy", "carboplatin"): "no_match"}
+    cache_b = build_verdict_cache(
+        crit, [patient], _make_mapper(rules_b, calls_model_b), store=store, model_id="model-beta"
+    )
+    assert len(calls_model_b) == 1  # model-beta was asked
+    assert cache_b[("prior platinum chemotherapy", "carboplatin")] == "no_match"
+
+
+def test_durable_cache_backend_outage_degrades_gracefully():
+    """Acceptance Criterion 5: The in-process per-screening cache remains the first
+    tier, so a cache backend outage degrades to in-process behaviour rather than
+    failing a run."""
+
+    from app.persistence import TermStore
+
+    class BrokenTermStore(TermStore):
+        async def setup(self) -> None:
+            pass
+
+        async def get(self, criterion_value: str, patient_term: str, model_id: str):
+            raise RuntimeError("Database connection lost")
+
+        async def purge(self, *, model_id: str | None = None) -> int:
+            raise RuntimeError("Database connection lost")
+
+        async def count(self, *, model_id: str | None = None) -> int:
+            raise RuntimeError("Database connection lost")
+
+        async def get_many(self, pairs, model_id):
+            raise RuntimeError("Database connection lost")
+
+        async def set_many(self, records):
+            raise RuntimeError("Disk full")
+
+        def get_cached(self, pairs, model_id):
+            raise RuntimeError("Database connection lost")
+
+        def set_cached(self, records):
+            raise RuntimeError("Disk full")
+
+    store = BrokenTermStore()
+    crit = _criteria(inclusion_categorical=[_cat("prior platinum chemotherapy")])
+    patient = _patient("P1", medications=["carboplatin"])
+
+    calls: list = []
+    rules = {("prior platinum chemotherapy", "carboplatin"): "match"}
+    # Must NOT raise exception despite broken store
+    cache = build_verdict_cache(
+        crit,
+        [patient],
+        _make_mapper(rules, calls),
+        store=store,
+    )
+    assert cache[("prior platinum chemotherapy", "carboplatin")] == "match"
+    assert len(calls) == 1
